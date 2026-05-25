@@ -1,0 +1,172 @@
+# CLAUDE.md
+
+Guidance for Claude Code working in this repository. Read `docs/DESIGN.md`
+before touching architecture; read `docs/IMPLEMENTATION.md` before touching
+code surface; read this file first.
+
+## Tech stack
+
+Python 3.10+, no runtime dependencies. Orchestrator shells out to
+`claude -p` (Claude Code CLI, on the user's subscription — no API key).
+Uses git worktrees for parallel implementer isolation. `pytest` is the
+only dev dependency.
+
+Centella is small (~1600 LOC) and stays small. All control flow lives in
+one file: `orchestrator/centella.py`.
+
+## The three-layer rule (load-bearing — read first)
+
+This repo deliberately separates *theory*, *mechanism*, and *code*, and
+the layers are **top-down canonical**: each layer derives from and
+conforms to the one above it.
+
+- **`docs/DESIGN.md`** is the architecture and reasoning. It is
+  canonical: the implementation spec and the code derive from it. A
+  line goes stale here only when the *design* changes.
+- **`docs/IMPLEMENTATION.md`** is the code-surface spec — function
+  names, cap values, schemas, install steps — derived from DESIGN. It
+  defines what the code must implement. It is canonical over the code.
+- **The code** is derived from IMPLEMENTATION.md and conforms to it.
+
+Precedence when they disagree:
+
+- DESIGN.md vs IMPLEMENTATION.md → DESIGN.md wins; the spec is the
+  defect.
+- DESIGN.md vs code → DESIGN.md wins; the code is the defect.
+- IMPLEMENTATION.md vs code → IMPLEMENTATION.md wins; the code is the
+  defect.
+
+When you change something: change the highest layer that the change
+touches *first*, then propagate down. Changing how phases relate?
+DESIGN.md, then IMPLEMENTATION.md, then code. Renaming a function or
+changing a cap value? IMPLEMENTATION.md, then code. Pure mechanical
+refactor that leaves the documented surface intact (rename a local
+variable, restructure an unexported helper)? Code only.
+
+If you find drift — the code does something the spec does not describe,
+or contradicts what the spec describes — the resolution is *never*
+"update the spec to match the code." Either the code is a defect (fix
+it to match the spec) or the spec is missing something it should
+specify (update the spec first, then verify the code still conforms).
+
+## The central principle: prompts are advisory, code enforces
+
+(`DESIGN.md` §12.) Any guarantee that *matters* and *can be checked
+mechanically* lives in `orchestrator/centella.py`, not in a worker
+prompt. A prompt can ask for any behavior, but a model can drift; a
+real Python check cannot.
+
+Do not move a check from `centella.py` into a prompt to "make the prompt
+smarter" — that is the wrong direction. The reverse is correct: a
+prompt-level rule that turns out to matter should become a code check
+with the prompt downgraded to documentation.
+
+## No subagent spawning
+
+Workers are headless `claude -p` subprocess invocations, not in-session
+subagents. The orchestrator is an ordinary Python program. (Constraint
+1, DESIGN.md §2.) The Claude Code Agent tool is not available to the
+orchestrator and not used anywhere in this repo.
+
+## Mandatory requirements
+
+- **Worker outputs are JSON-schema-validated.** New worker types must
+  define a schema in `SCHEMAS` (centella.py:76+) and pass it via
+  `--json-schema` in `claude_p()`.
+- **Caps are real Python counters in `DEFAULT_CAPS`**, not prompt
+  instructions. Adding a new cap means adding a counter and a check, not
+  asking a worker to bound itself.
+- **All run state goes through the `State` class.** Never write to
+  `.centella/state.json` directly — `State.save()` writes a temp file then
+  `os.replace()`s it for atomicity. The orchestrator runs on a single asyncio
+  event loop, so no lock is needed: coroutines only interleave at `await`
+  points and never inside a `st.data[k] = v; st.save()` pair.
+- **Source-of-truth answers go through the validation gate in
+  `gather_answers`.** Anything reading `answers["source_of_truth"]` can
+  trust the value is in `SOURCE_OF_TRUTH_ANSWERS` (`codebase` /
+  `research` / `both`).
+- **Don't write to `.centella/` from inside a subtask worktree.** The
+  worktree is disposable; coordination state must outlive it. The
+  orchestrator writes to `.centella/`; workers commit code to their
+  worktree branch only.
+
+## Code style
+
+- **Imports:** stdlib first, then third-party (currently none in
+  production code), then local. Alphabetical within each group.
+- **Naming:** `snake_case` for functions and variables, `PascalCase` for
+  classes, `ALL_CAPS` for module constants.
+- **Logging:** `log("...")` for normal output, `die("...", code=N)` for
+  fatal exits. Never `print(...)` *except* for the interactive question UI in
+  `gather_answers()` — `log()`'s timestamp prefix would mangle a question
+  rendered next to `input("  > ")`. Never `sys.exit(...)` directly (use `die`)
+  *except* for documented non-error structured exits like
+  `EXIT_NEEDS_ANSWERS=10`, where `die()`'s `centella: error:` prefix would
+  mislabel a non-error deferred-clarification signal. Both helpers live in
+  `centella.py`.
+- **Type hints** on every function signature. Use PEP 604 union syntax
+  (`str | None`, not `Optional[str]`) — Python 3.10+ is the minimum.
+- **Comments explain *why*, not *what*.** Well-named identifiers
+  document what; comments are for non-obvious constraints, hidden
+  invariants, or workarounds for specific bugs.
+- **Functional first.** Pure functions over classes. The `State` class
+  is the deliberate exception (encapsulates mutable shared state with a
+  lock).
+
+## File layout
+
+```
+orchestrator/centella.py    All orchestrator control flow (single file by design)
+prompts/*.md                System prompts for each worker type
+scripts/*.sh                Git worktree mechanics (setup, integrate, finalize, cleanup)
+commands/centella.md        Thin plugin skill — launches the orchestrator
+docs/DESIGN.md              Architecture and reasoning
+docs/IMPLEMENTATION.md      Current code surface
+tests/                      pytest suite
+```
+
+## Quick start
+
+```bash
+# Run on a task in the current git repo:
+./centella "Fix the login timeout bug and add a regression test"
+
+# Resume after an interruption:
+./centella --resume
+
+# Set a global source-of-truth preference (otherwise centella asks):
+export CENTELLA_SOURCE_OF_TRUTH=codebase   # or: research, both, ask
+# …or commit a centella.toml at the repo root with: source_of_truth = codebase
+
+# Skip the live `claude -p` smoke test during development:
+./centella "task" --skip-smoke
+```
+
+## Testing
+
+`pytest tests/` from the repo root. Tests cover the deterministic
+enforcement functions (`resolve_source_of_truth`, `gather_answers`
+validation gate, `_retryable_failure`, `check_merge_committed`,
+`validate_result`, `validate_plan`) including a coupling test that the
+retry-policy markers match the live check-function strings. No coverage
+target is set — the suite was introduced from scratch and a number now
+would be arbitrary.
+
+The worker invocation path (`claude_p`) is not unit-tested; meaningful
+testing requires a stub or live `claude` binary and lives in a separate
+end-to-end tier.
+
+## Task completion checklist
+
+Before marking a change complete:
+
+- [ ] Update `IMPLEMENTATION.md` if the change affected code surface
+      described there.
+- [ ] Update `DESIGN.md` only if the architecture itself changed.
+- [ ] `pytest tests/` — all pass.
+- [ ] `python3 -c "import ast; ast.parse(open('orchestrator/centella.py').read())"`
+      as a static check.
+- [ ] `grep -rn <removed-string> .` — confirm no stragglers if the change
+      renamed or removed a string used elsewhere.
+- [ ] `git diff --stat` — confirm the diff is scoped to what the change
+      intended; no collateral edits.

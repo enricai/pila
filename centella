@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# centella — entry point for the Centella orchestrator.
+# Run from the root of the target git repository:
+#   /path/to/centella/centella "your task description"
+# Or symlink this file onto your PATH.
+set -euo pipefail
+exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/orchestrator/centella.py" "$@"

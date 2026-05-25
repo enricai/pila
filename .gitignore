@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Centella run artifacts — created per-run in target repos, never tracked.
+.centella/
+
+# Working notes — kept locally as a reference, not a deliverable.
+foo.txt
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/

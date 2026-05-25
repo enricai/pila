@@ -1,0 +1,41 @@
+# Fast-feedback AST parse of the orchestrator and the test suite.
+# Runs the exact check from CLAUDE.md's task-completion checklist
+# without waiting for the full pytest matrix.
+name: syntax
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'orchestrator/**/*.py'
+      - 'tests/**/*.py'
+      - '.github/workflows/syntax.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'orchestrator/**/*.py'
+      - 'tests/**/*.py'
+      - '.github/workflows/syntax.yml'
+
+concurrency:
+  group: syntax-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: AST parse orchestrator + tests
+        run: |
+          python -c "import ast; ast.parse(open('orchestrator/centella.py').read())"
+          python -c "
+          import ast, pathlib
+          for p in pathlib.Path('tests').rglob('*.py'):
+              ast.parse(p.read_text(), filename=str(p))
+          "

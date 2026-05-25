@@ -1,0 +1,68 @@
+# Runs pytest across the supported Python matrix on every PR and on
+# pushes to main. Coverage is reported (no gate) per CLAUDE.md's stance
+# on coverage targets.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dev dependencies
+        run: pip install pytest pytest-cov
+
+      - name: Syntax check (from CLAUDE.md task-completion checklist)
+        run: python -c "import ast; ast.parse(open('orchestrator/centella.py').read())"
+
+      - name: Run tests with coverage
+        run: pytest tests/ -ra --cov=orchestrator --cov-report=term --cov-report=xml
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          python -c "
+          import xml.etree.ElementTree as ET, os, sys
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          pyver = '${{ matrix.python-version }}'
+          try:
+              root = ET.parse('coverage.xml').getroot()
+              rate = float(root.get('line-rate', '0')) * 100
+              covered = root.get('lines-covered', '?')
+              valid = root.get('lines-valid', '?')
+              line = f'### Coverage (py{pyver})\n- Line coverage: **{rate:.1f}%** ({covered}/{valid})\n'
+          except Exception as exc:
+              line = f'### Coverage (py{pyver})\n- could not parse coverage.xml: {exc}\n'
+          if summary:
+              open(summary, 'a').write(line)
+          else:
+              sys.stdout.write(line)
+          " || true
+
+      - name: Upload coverage artifact
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
