@@ -157,10 +157,22 @@ _TERMINAL_STATUSES = frozenset({"complete", "failed", "blocked"})
 # current version. Each worker type has independent CLI/env/TOML
 # overrides; falls back through global CLI/env/TOML/MODEL_DEFAULT.
 MODEL_VALUES = ("sonnet", "opus", "haiku")
-MODEL_DEFAULT = "sonnet"
+# Global default. Used when no per-worker default applies. DESIGN §5 +
+# IMPLEMENTATION.md §2: judgment workers (everything except implementer)
+# run on Opus by default; implementer's per-worker default is sonnet.
+# Users can override globally with --model / CENTELLA_MODEL / `model =`
+# in centella.toml, or per-worker with --model-<worker> /
+# CENTELLA_MODEL_<WORKER> / `model_<worker> =`.
+MODEL_DEFAULT = "opus"
+# Per-worker defaults applied *after* user overrides (CLI/env/TOML) but
+# *before* the global MODEL_DEFAULT fallback. Only workers that need a
+# different default from MODEL_DEFAULT appear here.
+MODEL_DEFAULT_PER_WORKER = {
+    "implementer": "sonnet",
+}
 MODEL_ENV = "CENTELLA_MODEL"
 MODEL_FILE = "centella.toml"
-WORKER_TYPES = ("classifier", "planner", "implementer",
+WORKER_TYPES = ("classifier", "planner", "reconciler", "implementer",
                 "integrator", "validator")
 
 
@@ -1238,7 +1250,8 @@ def resolve_models(repo_root: Path, args) -> dict[str, str]:
       4. CENTELLA_MODEL env var
       5. model_<worker> in centella.toml
       6. model in centella.toml
-      7. MODEL_DEFAULT
+      7. MODEL_DEFAULT_PER_WORKER[<worker>] (e.g., implementer → sonnet)
+      8. MODEL_DEFAULT (opus)
     `args` is the parsed argparse.Namespace (CLI values are already
     validated by argparse choices=). env and file values are rejected
     via die() when not in MODEL_VALUES."""
@@ -1270,8 +1283,12 @@ def resolve_models(repo_root: Path, args) -> dict[str, str]:
         per_cli = getattr(args, f"model_{worker}", None)
         per_env = from_env(f"{MODEL_ENV}_{worker.upper()}")
         per_file = from_file(f"model_{worker}")
+        # Per-worker default kicks in only when no user override applies.
+        # Implementer falls through to "sonnet"; everything else falls
+        # through to MODEL_DEFAULT ("opus").
+        per_worker_default = MODEL_DEFAULT_PER_WORKER.get(worker, MODEL_DEFAULT)
         models[worker] = (per_cli or global_cli or per_env or global_env
-                          or per_file or global_file or MODEL_DEFAULT)
+                          or per_file or global_file or per_worker_default)
     return models
 
 
@@ -3844,9 +3861,13 @@ def main() -> None:
                          f"{SOURCE_OF_TRUTH_ENV} and centella.toml")
     ap.add_argument("--model", choices=MODEL_VALUES, metavar="ALIAS",
                     help=f"model alias for all workers "
-                         f"({'|'.join(MODEL_VALUES)}, default {MODEL_DEFAULT}); "
-                         f"per-worker --model-<worker> flags override this, "
-                         f"as do CENTELLA_MODEL[_*] env vars and centella.toml")
+                         f"({'|'.join(MODEL_VALUES)}); without an override, "
+                         f"judgment workers default to {MODEL_DEFAULT} and "
+                         f"the implementer defaults to "
+                         f"{MODEL_DEFAULT_PER_WORKER['implementer']} "
+                         "(IMPLEMENTATION.md §2). Per-worker "
+                         "--model-<worker> flags override this, as do "
+                         "CENTELLA_MODEL[_*] env vars and centella.toml")
     for _w in WORKER_TYPES:
         ap.add_argument(f"--model-{_w}", choices=MODEL_VALUES, metavar="ALIAS",
                         help=f"model alias for the {_w} worker — overrides "

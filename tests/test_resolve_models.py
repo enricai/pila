@@ -7,7 +7,13 @@ Per-worker precedence (highest first):
   4. CENTELLA_MODEL env var
   5. model_<worker> in centella.toml
   6. model in centella.toml
-  7. MODEL_DEFAULT
+  7. MODEL_DEFAULT_PER_WORKER[<worker>] (e.g. implementer → sonnet)
+  8. MODEL_DEFAULT (opus)
+
+The judgment-vs-implementation default split was introduced when the
+reconciler worker landed: classifier / planner / reconciler / integrator
+/ validator all default to opus, implementer defaults to sonnet (cost
+mitigation for the worker that runs most often).
 """
 from __future__ import annotations
 
@@ -16,7 +22,18 @@ import argparse
 import pytest
 
 
-WORKERS = ("classifier", "planner", "implementer", "integrator", "validator")
+WORKERS = ("classifier", "planner", "reconciler", "implementer",
+           "integrator", "validator")
+
+# The expected default per worker, with no overrides.
+DEFAULTS = {
+    "classifier": "opus",
+    "planner":    "opus",
+    "reconciler": "opus",
+    "integrator": "opus",
+    "validator":  "opus",
+    "implementer": "sonnet",
+}
 
 
 def ns(**overrides):
@@ -36,10 +53,14 @@ def repo_root(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_all_unset_defaults_to_sonnet_for_every_worker(centella, repo_root):
+def test_all_unset_defaults_per_worker(centella, repo_root):
+    """With no overrides, judgment workers default to opus and the
+    implementer defaults to sonnet. Pins both the global default and
+    the per-worker override table together."""
     models = centella.resolve_models(repo_root, ns())
-    assert models == {w: "sonnet" for w in WORKERS}
-    assert centella.MODEL_DEFAULT == "sonnet"
+    assert models == DEFAULTS
+    assert centella.MODEL_DEFAULT == "opus"
+    assert centella.MODEL_DEFAULT_PER_WORKER == {"implementer": "sonnet"}
 
 
 def test_global_env_applies_to_every_worker(centella, repo_root, monkeypatch):
@@ -103,35 +124,35 @@ def test_per_worker_cli_beats_everything(centella, repo_root, monkeypatch):
 
 def test_full_precedence_per_worker(centella, repo_root, monkeypatch):
     # Per-worker CLI > global CLI > per-worker env > global env >
-    # per-worker TOML > global TOML > default — exercise one rung at a
-    # time on the same worker (planner).
+    # per-worker TOML > global TOML > per-worker default > MODEL_DEFAULT
+    # — exercise one rung at a time on the same worker (planner).
     cfg = repo_root / "centella.toml"
 
-    # rung 7: default
-    assert centella.resolve_models(repo_root, ns())["planner"] == "sonnet"
-
-    # rung 6: global TOML
-    cfg.write_text("model = opus\n")
+    # rung 8 (MODEL_DEFAULT, planner has no per-worker override → opus)
     assert centella.resolve_models(repo_root, ns())["planner"] == "opus"
 
-    # rung 5: per-worker TOML beats global TOML
-    cfg.write_text("model = opus\nmodel_planner = haiku\n")
+    # rung 6: global TOML beats default
+    cfg.write_text("model = haiku\n")
     assert centella.resolve_models(repo_root, ns())["planner"] == "haiku"
 
-    # rung 4: global env beats both TOML rungs
-    monkeypatch.setenv("CENTELLA_MODEL", "sonnet")
+    # rung 5: per-worker TOML beats global TOML
+    cfg.write_text("model = haiku\nmodel_planner = sonnet\n")
     assert centella.resolve_models(repo_root, ns())["planner"] == "sonnet"
 
-    # rung 3: per-worker env beats global env
-    monkeypatch.setenv("CENTELLA_MODEL_PLANNER", "opus")
+    # rung 4: global env beats both TOML rungs
+    monkeypatch.setenv("CENTELLA_MODEL", "opus")
     assert centella.resolve_models(repo_root, ns())["planner"] == "opus"
 
+    # rung 3: per-worker env beats global env
+    monkeypatch.setenv("CENTELLA_MODEL_PLANNER", "haiku")
+    assert centella.resolve_models(repo_root, ns())["planner"] == "haiku"
+
     # rung 2: global CLI beats env (per-worker CLI still unset)
-    assert centella.resolve_models(repo_root, ns(model="haiku"))["planner"] == "haiku"
+    assert centella.resolve_models(repo_root, ns(model="sonnet"))["planner"] == "sonnet"
 
     # rung 1: per-worker CLI beats global CLI
     assert centella.resolve_models(
-        repo_root, ns(model="haiku", model_planner="sonnet"))["planner"] == "sonnet"
+        repo_root, ns(model="sonnet", model_planner="opus"))["planner"] == "opus"
 
 
 def test_bad_global_env_dies(centella, repo_root, monkeypatch, capsys):
@@ -177,10 +198,14 @@ def test_bad_per_worker_toml_dies(centella, repo_root, capsys):
 
 
 def test_empty_env_treated_as_unset(centella, repo_root, monkeypatch):
+    """Empty / whitespace-only env vars fall through as if unset, so the
+    per-worker default table (DEFAULTS) wins — not "sonnet for all".
+    Pins that the strip-then-falsy check in resolve_models hasn't been
+    replaced with a default-value substitution."""
     monkeypatch.setenv("CENTELLA_MODEL", "")
     monkeypatch.setenv("CENTELLA_MODEL_PLANNER", "   ")
     models = centella.resolve_models(repo_root, ns())
-    assert models == {w: "sonnet" for w in WORKERS}
+    assert models == DEFAULTS
 
 
 def test_every_alias_accepted_in_global_env(centella, repo_root, monkeypatch):
