@@ -11,9 +11,13 @@ import pytest
 
 @pytest.fixture
 def setup(centella, tmp_path):
-    """A tmp .centella/ with criteria/sid.md present and a worktree dir
-    containing a real file the evidence can cite."""
-    centella_dir = tmp_path / ".centella"
+    """A tmp per-run dir with criteria/sid.md present and a worktree dir
+    containing a real file the evidence can cite. State writes to
+    `.centella/runs/<run-id>/state.json` under the new layout; tests
+    treat `centella_dir` as the per-run dir."""
+    centella_root = tmp_path / ".centella"
+    run_id = "test-run-aaa111"
+    centella_dir = centella_root / "runs" / run_id
     (centella_dir / "criteria").mkdir(parents=True)
     sid = "feat-x"
     (centella_dir / "criteria" / f"{sid}.md").write_text(
@@ -21,7 +25,7 @@ def setup(centella, tmp_path):
     worktree = tmp_path / "worktrees" / sid
     worktree.mkdir(parents=True)
     (worktree / "src.py").write_text("def f(): pass\n")
-    st = centella.State(centella_dir)
+    st = centella.State(centella_root, run_id)
     st.data = {"task": "test"}
     return centella, centella_dir, st, sid, str(worktree)
 

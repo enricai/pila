@@ -308,7 +308,7 @@ Maps to `DESIGN.md`: §7 (worker contract), §2 (CLI subprocess form).
 
 | Phase | Function(s) | What it does |
 |-------|-------------|--------------|
-| Preflight | `preflight` | git identity, clean working tree, no stale `centella/*` branches or worktrees, live `claude -p` smoke test. Bypassed by `--skip-smoke`; skipped entirely on `--resume` |
+| Preflight | `preflight` | git identity, clean working tree, `claude` CLI version, live `claude -p` smoke test. Run-id collisions are detected later in the flow (filesystem side in `State.rename_to()` post-classify; git side in `setup-run.sh`'s branch-creation step) — they cannot be checked in preflight because the final `run_id` isn't known until phase_classify completes. Smoke test bypassed by `--skip-smoke`; preflight skipped entirely on `--resume` |
 | 1 Classify | `phase_classify` | one classifier worker → categories + questions. Returned categories are filtered against the 8-name whitelist in `CATEGORIES` (mirrors DESIGN §4); `die()` if none survive |
 | 0 Clarify | `gather_answers` | if questions and interactive: collect; non-interactive: write `pending-questions.json`, exit code 10; `--no-clarify` skips clarification entirely per DESIGN §11 — intent questions dropped, source-of-truth resolved from preference or defaulted to `codebase` with a warning |
 | 2 Plan | `phase_plan` | one planner worker per category, awaited concurrently via `gather_or_cancel` (a small wrapper around `asyncio.gather` defined in `centella.py`) under an `asyncio.Semaphore(max_parallel)`; the first worker exception cancels its siblings and propagates to `main()` |
@@ -342,15 +342,20 @@ All in `centella.py`, in execution order. This is the concrete catalogue behind
 | `resolve_models()` at startup | invalid model alias in `centella.toml`, any `CENTELLA_MODEL[_*]` env var, or any `--model[-*]` CLI flag — caught before any worker spawns |
 | `git user.email` / `user.name` set | commits would fail silently without identity |
 | working tree clean | dirty tree → ambiguous diffs, corrupt merge history |
-| no `centella/<run-id>` branch already exists | this run's id collides with a prior or in-flight run — use `--resume --run-id <id>` instead |
-| no `.centella/runs/<run-id>/` already exists | same as above, but caught on the filesystem side |
 | `claude --version` ≥ `MIN_CLAUDE_CLI` (currently `(2, 1, 22)`) | CLI too old for `--json-schema` (introduced for `claude -p` in v2.1.22) — replaces the cryptic "unknown option" message a stale CLI used to produce |
 | `_check_gh_cli(no_push)` — `gh` installed, `gh auth status` ok, `origin` remote present | finalize would fail at push/PR after the full run already ran. Short-circuited when `--no-push` is passed (env / TOML mirrors). |
 | live `claude -p` smoke test | auth failure or network problem |
 
-The preflight runs against `_bootstrap-<6hex>/` until classify completes; once `run_id` is known, the bootstrap directory is atomically renamed to `.centella/runs/<run-id>/`. The `<run-id>` collision checks happen after classify but before the rename, with the same failure message and exit code as if they'd run earlier.
+Run-id collisions are detected outside preflight because the final `run_id` is only known after `phase_classify` returns. There are two natural collision points:
 
-`--skip-smoke` bypasses only the live smoke test (used by the test harness); the CLI version check, the `gh` check, and the run-id collision checks all still run because they are local and read-only, and skipping any of them would defer a confusing failure to mid-run.
+| Check | Where | Catches |
+|-------|-------|---------|
+| `State.rename_to(new_run_id)` refuses if the target dir exists | `orchestrate()` after `phase_classify` | `.centella/runs/<run-id>/` already exists on disk |
+| `setup-run.sh` preserves an existing `centella/<run-id>` branch instead of creating it | wave-execute phase | A pre-existing branch with the same name (treated as a resume; the run picks up wherever the branch was left) |
+
+The bootstrap directory `.centella/runs/_bootstrap-<6hex>/` is used until classify completes; the rename is atomic on POSIX same-filesystem.
+
+`--skip-smoke` bypasses only the live smoke test (used by the test harness); the CLI version check and the `gh` check still run because they are local and read-only, and skipping them would defer a confusing failure to mid-run.
 
 ### Phase 1 checks — `phase_classify`
 | Check | Catches |
@@ -479,7 +484,7 @@ Defaults in `DEFAULT_CAPS` and the per-worker `claude_p` call sites.
 |------|-----|--------|
 | subtask continuations (re-spawns of an implementer for the same subtask — both context-exhaustion handoffs *and* mid-execution clarifications consume from the same budget) | 3 (`subtask_continuations`) | return `blocked`; fatal at wave boundary |
 | corrective retries of a *retryable* failure per subtask (`failed_retries`) | 1 | return `failed` |
-| wave staging re-validation rounds | 5 | abort run, name failing subtasks |
+| wave re-validation rounds | 5 | abort run, name failing subtasks |
 | total worker invocations per run | 40 (`--max-workers`) | abort, state saved for `--resume` |
 | concurrent workers within a wave | 4 (`--max-parallel`) | throughput throttle |
 | turns per `claude -p` call | per worker (below) | worker stops; implementer → `incomplete-handoff` |
@@ -533,7 +538,7 @@ edit `_retryable_failure` and the check function in the same change.
 
 | Failure | Tier | Marker / source |
 |---------|------|-----------------|
-| branch has no commits ahead of staging | Retryable | `"no commits ahead of staging"` from `check_branch_has_commits` |
+| branch has no commits ahead of the run branch | Retryable | `"no commits ahead of the run"` from `check_branch_has_commits` |
 | worktree left dirty | Retryable | `"uncommitted change"` from the dirty-worktree check |
 | cross-field invariant violation | Terminal | `validate_result` |
 | diff touched a protected path | Terminal | `check_diff_scope` |

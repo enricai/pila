@@ -14,11 +14,12 @@ import pytest
 
 @pytest.fixture
 def state(centella, tmp_path):
-    """A fresh State pointing at a tmp_path .centella/, with a feature
+    """A fresh State at a tmp_path/.centella/runs/<run-id>/, with a feature
     task that needs source_of_truth and pref='ask'."""
-    centella_dir = tmp_path / ".centella"
-    centella_dir.mkdir()
-    st = centella.State(centella_dir)
+    centella_root = tmp_path / ".centella"
+    run_id = "test-run-aaa111"
+    (centella_root / "runs" / run_id).mkdir(parents=True)
+    st = centella.State(centella_root, run_id)
     st.data = {
         "task": "test task",
         "categories": ["feature-implementation"],

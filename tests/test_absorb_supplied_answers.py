@@ -27,21 +27,36 @@ import pytest
 # ----- fixtures --------------------------------------------------------------
 
 @pytest.fixture
-def centella_dir(tmp_path):
-    """A populated .centella/ directory with subtasks/ ready to be
-    walked. Real runs always have this — the helper iterates it to
-    flush answers into existing spec files."""
-    cd = tmp_path / ".centella"
-    cd.mkdir()
-    (cd / "subtasks").mkdir()
+def centella_root(tmp_path):
+    """The .centella/ root (parent of per-run dirs)."""
+    cr = tmp_path / ".centella"
+    cr.mkdir()
+    return cr
+
+
+@pytest.fixture
+def centella_dir(centella_root):
+    """A per-run dir with subtasks/ ready to be walked. Real runs always
+    have this — the helper iterates it to flush answers into existing
+    spec files. Under the new layout this is `runs/<run-id>/` under
+    centella_root. exist_ok=True so the `state` fixture (which also
+    constructs the same run_dir) can be a sibling fixture without
+    fighting on directory creation."""
+    cd = centella_root / "runs" / "test-run-aaa111"
+    cd.mkdir(parents=True, exist_ok=True)
+    (cd / "subtasks").mkdir(exist_ok=True)
     return cd
 
 
 @pytest.fixture
-def state(centella, centella_dir):
-    """A State pointed at the centella_dir. Helper saves to state.json,
-    so we need a real on-disk State, not a mock."""
-    st = centella.State(centella_dir)
+def state(centella, centella_root):
+    """A State pointed at a per-run dir matching the centella_dir fixture.
+    Helper saves to state.json, so we need a real on-disk State, not a
+    mock."""
+    run_id = "test-run-aaa111"
+    (centella_root / "runs" / run_id).mkdir(parents=True, exist_ok=True)
+    (centella_root / "runs" / run_id / "subtasks").mkdir(exist_ok=True)
+    st = centella.State(centella_root, run_id)
     st.data = {"task": "test", "answers": {"existing-q1": "kept"}}
     st.save()
     return st
@@ -167,15 +182,16 @@ def test_handles_missing_subtasks_directory(centella, tmp_path):
     structure (not the centella_dir fixture) because that fixture
     creates subtasks/ by default — the whole point here is to test
     the case where subtasks/ is absent."""
-    centella_dir = tmp_path / "fresh-centella"
-    centella_dir.mkdir()
+    centella_root = tmp_path / "fresh-centella"
+    run_id = "test-run-no-subtasks"
+    (centella_root / "runs" / run_id).mkdir(parents=True)
     # NOTE: no subtasks/ subdirectory created.
-    st = centella.State(centella_dir)
+    st = centella.State(centella_root, run_id)
     st.data = {"task": "test", "answers": {}}
     st.save()
     answers_file = tmp_path / "answers.json"
     answers_file.write_text(json.dumps({"q": "v"}))
-    centella.absorb_supplied_answers(_args(str(answers_file)), st, centella_dir)
+    centella.absorb_supplied_answers(_args(str(answers_file)), st, st.run_dir)
     assert st.data["answers"]["q"] == "v"
 
 

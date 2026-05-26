@@ -33,12 +33,13 @@ def _question(qid: str = "feat-001-q1") -> dict:
 
 @pytest.fixture
 def state(centella, tmp_path):
-    """A State pointed at a tmp .centella directory. surface_clarification
-    derives centella_dir from st.path.parent, so we need a real on-disk
-    State."""
-    centella_dir = tmp_path / ".centella"
-    centella_dir.mkdir()
-    st = centella.State(centella_dir)
+    """A State pointed at a tmp per-run directory. surface_clarification
+    derives the per-run dir from st.path.parent, so we need a real
+    on-disk State."""
+    centella_root = tmp_path / ".centella"
+    run_id = "test-run-aaa111"
+    (centella_root / "runs" / run_id).mkdir(parents=True)
+    st = centella.State(centella_root, run_id)
     st.data = {"task": "test", "answers": {}}
     st.save()
     return st

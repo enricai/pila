@@ -992,27 +992,22 @@ async def preflight(centella_dir: Path, verbosity: str = VERBOSITY_DEFAULT,
         die(f"working tree has {len(dirty)} modified/staged file(s). "
             "Commit or stash before running centella.")
 
-    # 3. no stale centella/* branches — they collide with this run's names
-    r = await run_proc(["git", "branch", "--list", "centella/*"])
-    stale_branches = [b.strip() for b in r.stdout.strip().splitlines() if b.strip()]
-    if stale_branches:
-        die(f"stale centella/* branches exist: {', '.join(stale_branches)}\n"
-            "Run scripts/cleanup.sh --branches to remove them first.")
+    # 3. (removed in per-run refactor) The global centella/* branch and
+    #    .centella/worktrees/* checks used to fail a second concurrent
+    #    run; they no longer apply now that each run namespaces its
+    #    branches as centella/<run-id> and its worktrees under the
+    #    per-run dir. A run_id collision is detected separately at
+    #    State.rename_to() (filesystem side) and during setup-run.sh
+    #    (git side). See DESIGN.md §6 and §14 ("single-clone parallelism").
 
-    # 4. no stale worktrees
-    wt_dir = centella_dir / "worktrees"
-    if wt_dir.exists() and any(wt_dir.iterdir()):
-        die(f"stale worktrees exist at {wt_dir}\n"
-            "Run scripts/cleanup.sh to remove them first.")
-
-    # 5. claude CLI version is recent enough for `--json-schema` in -p mode.
+    # 4. claude CLI version is recent enough for `--json-schema` in -p mode.
     #    Runs even when --skip-smoke is set: --skip-smoke is for skipping the
     #    *live* model call (auth + a turn), not for skipping local CLI sanity
     #    checks. Without this, a stale CLI fails the smoke test with a cryptic
     #    'unknown option' that tells the user nothing actionable.
     _check_claude_cli_version()
 
-    # 6. live smoke-test: auth + --output-format stream-json + --json-schema inline.
+    # 5. live smoke-test: auth + --output-format stream-json + --json-schema inline.
     #    Catches auth failures before a 40-worker run starts. Streams so a slow
     #    Opus / heavy-context startup is visible — the previous max_turns=1
     #    failure was invisible in the non-streaming mode until exit.
@@ -1450,9 +1445,15 @@ async def check_diff_scope(sid: str, worktree: str, subtask: dict,
                            st: State) -> str | None:
     """Check the implementer's diff for violations.
     Returns a fatal error string if protected paths were touched.
-    Logs a non-fatal warning for unexpected scope. Returns None when clean."""
+    Logs a non-fatal warning for unexpected scope. Returns None when clean.
+
+    The diff is computed against the run branch (centella/<run-id>) — the
+    base every subtask branched off of. Hardcoding `centella/staging` here
+    used to silently disable the check after the per-run refactor (the
+    branch doesn't exist), so the protected-path enforcement was off."""
+    run_branch = compute_run_branch(st.run_id)
     r = await run_proc(
-        ["git", "diff", "--name-only", "centella/staging..HEAD"],
+        ["git", "diff", "--name-only", f"{run_branch}..HEAD"],
         cwd=worktree,
     )
     if r.returncode != 0:
@@ -1530,15 +1531,18 @@ async def check_integrator_commit(staging: Path) -> str | None:
 
 # --- branch-has-commits verification -----------------------------------------
 
-async def check_branch_has_commits(sid: str, worktree: str) -> str | None:
-    """Return error if the implementer's branch has no commits ahead of staging.
-    An empty diff means the worker produced schema-valid JSON claiming success
-    while doing nothing — a silent no-op that wastes an integration attempt."""
+async def check_branch_has_commits(sid: str, worktree: str,
+                                   parent_branch: str) -> str | None:
+    """Return error if the implementer's subtask branch has no commits
+    ahead of the run branch (`parent_branch` — typically
+    `centella/<run-id>`). An empty diff means the worker produced
+    schema-valid JSON claiming success while doing nothing — a silent
+    no-op that wastes an integration attempt."""
     if not Path(worktree).exists():
         return None  # worktree gone — can't determine, don't block
     try:
         r = await run_proc(
-            ["git", "log", "centella/staging..HEAD", "--oneline"],
+            ["git", "log", f"{parent_branch}..HEAD", "--oneline"],
             cwd=worktree,
         )
     except OSError:
@@ -1546,8 +1550,9 @@ async def check_branch_has_commits(sid: str, worktree: str) -> str | None:
     if r.returncode != 0:
         return None
     if not r.stdout.strip():
-        return (f"branch centella/{sid} has no commits ahead of staging — "
-                "implementer claimed complete without making any changes")
+        return (f"subtask branch for {sid} has no commits ahead of the run "
+                f"branch ({parent_branch}) — implementer claimed complete "
+                "without making any changes")
     return None
 
 
@@ -1599,7 +1604,8 @@ def validate_resume_state(data: dict) -> None:
     a clearer message."""
     if "task" not in data or not str(data.get("task", "")).strip():
         die("state.json has no usable 'task' — cannot resume. "
-            "Inspect .centella/state.json manually.")
+            "Inspect the run's state.json manually "
+            "(under .centella/runs/<run-id>/).")
 
     # waves is optional (absent if interrupted before scheduling); if present
     # it must be well-formed, and completed_waves must be in range.
@@ -2070,10 +2076,17 @@ class State:
     No lock: every mutator runs on the single asyncio event loop, so reads and
     writes are not preempted mid-statement. Concurrent `claude -p` workers
     spawned via `asyncio.gather` interleave only at `await` points, which never
-    fall inside a `st.data[k] = v; st.save()` pair."""
+    fall inside a `st.data[k] = v; st.save()` pair.
 
-    def __init__(self, centella_dir: Path):
-        self.path = centella_dir / "state.json"
+    Per-run scope: every State instance is anchored at
+    `centella_root / "runs" / run_id / state.json`. Two State instances with
+    different run_ids share no on-disk state. See DESIGN.md §6 and §10."""
+
+    def __init__(self, centella_root: Path, run_id: str):
+        self.centella_root = centella_root
+        self.run_id = run_id
+        self.run_dir = centella_root / "runs" / run_id
+        self.path = self.run_dir / "state.json"
         self.data: dict = {}
 
     def load(self) -> bool:
@@ -2087,6 +2100,26 @@ class State:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, indent=2))
         tmp.replace(self.path)   # atomic on POSIX; best-effort on Windows
+
+    def rename_to(self, new_run_id: str) -> None:
+        """Atomically rename the run dir to a new run_id. Used by
+        orchestrate() after phase_classify to promote the bootstrap dir
+        (`_bootstrap-<6hex>`) to the final run_id derived from the
+        classifier category. Fails closed if the target directory
+        already exists — that would mean two runs with the same
+        microsecond `started_at` (extraordinarily unlikely, but caught
+        as a hard error rather than silently overwritten)."""
+        new_dir = self.centella_root / "runs" / new_run_id
+        if new_dir.exists():
+            die(
+                f"run_id collision: .centella/runs/{new_run_id}/ already exists. "
+                "This is extraordinarily unlikely; rerun, or "
+                f"`--resume --run-id {new_run_id}` to continue the existing run."
+            )
+        os.rename(self.run_dir, new_dir)
+        self.run_id = new_run_id
+        self.run_dir = new_dir
+        self.path = new_dir / "state.json"
 
     def bump_workers(self, caps: dict) -> None:
         self.data["worker_count"] = self.data.get("worker_count", 0) + 1
@@ -2471,7 +2504,7 @@ async def run_implementer(sid: str, centella_dir: Path, caps: dict, st: State,
     cap: context-exhaustion handoffs and DESIGN §11 mid-execution
     clarifications."""
     sys_prompt = (PROMPTS / "implementer.md").read_text()
-    proc = await run_script("new-worktree.sh", sid)
+    proc = await run_script("new-worktree.sh", sid, st.run_id)
     if proc.returncode != 0:
         raise WorkerError(f"worktree creation failed for {sid}: {proc.stderr.strip()}")
     worktree = proc.stdout.strip().splitlines()[-1]
@@ -2531,7 +2564,7 @@ def _retryable_failure(reason: str) -> bool:
     partial work the checkpoint pointed at.
 
     Retryable (corrective note can fix it):
-      - branch had no commits ahead of staging
+      - branch had no commits ahead of the run branch
       - worktree left dirty (uncommitted changes)
 
     Terminal (worker is broken/dishonest — terminate immediately, no retry):
@@ -2539,7 +2572,7 @@ def _retryable_failure(reason: str) -> bool:
       - diff touched a protected path (.centella/, .git/, .claude/)
       - any worker-level error surfaced as a failure
     """
-    retryable_markers = ("no commits ahead of staging",
+    retryable_markers = ("no commits ahead of the run",
                          "uncommitted change")
     return any(m in reason for m in retryable_markers)
 
@@ -2646,7 +2679,8 @@ async def settle_subtask(sid: str, centella_dir: Path, caps: dict, st: State,
         if status == "complete":
             # a 'complete' claim with no commits is a retryable mistake —
             # the worker may genuinely have work to commit and just forgot
-            commit_err = await check_branch_has_commits(sid, worktree)
+            commit_err = await check_branch_has_commits(
+                sid, worktree, compute_run_branch(st.run_id))
             if commit_err:
                 log(f"  branch check failed for {sid}: {commit_err}")
                 done = fail(commit_err)
@@ -2770,7 +2804,7 @@ async def integrate_wave(wave: list[str], results: dict[str, dict],
     for sid in wave:
         if results.get(sid, {}).get("status") != "complete":
             continue
-        proc = await run_script("integrate.sh", sid)
+        proc = await run_script("integrate.sh", sid, st.run_id)
         if proc.returncode == 0:
             integrated.append(sid)
             integrated_so_far.append(sid)
@@ -2815,8 +2849,8 @@ async def integrate_wave(wave: list[str], results: dict[str, dict],
                     "reason": f"integrator claimed 'resolved' but {merge_err}"}
                 st.save()
                 die(f"integrator for {sid} returned 'resolved' but {merge_err}. "
-                    f"The merge was aborted; centella/staging is clean. "
-                    f"State saved — resolve and re-run with --resume.")
+                    f"The merge was aborted; {compute_run_branch(st.run_id)} "
+                    "is clean. State saved — resolve and re-run with --resume.")
             commit_err = await check_integrator_commit(staging)
             if commit_err:
                 # non-fatal: log and record, but don't undo the integration
@@ -2841,8 +2875,9 @@ async def integrate_wave(wave: list[str], results: dict[str, dict],
             st.save()
             die(f"integrator could not integrate {sid} "
                 f"({ires.get('status')}): {diagnosis}\n"
-                f"The in-progress merge was aborted; centella/staging is intact "
-                f"at the last good wave. Resolve the conflict between {sid} and "
+                f"The in-progress merge was aborted; "
+                f"{compute_run_branch(st.run_id)} is intact at the last "
+                f"good wave. Resolve the conflict between {sid} and "
                 f"the already-integrated subtasks manually, then re-run with "
                 f"--resume.")
     return integrated
@@ -2901,10 +2936,10 @@ async def phase_execute(centella_dir: Path, st: State, caps: dict,
                         models: dict[str, str]) -> None:
     """Phases 4-5: create staging, then run waves sequentially; within a wave,
     subtasks in parallel (bounded by max_parallel)."""
-    log("phase 4: creating staging worktree")
-    proc = await run_script("setup-staging.sh")
+    log("phase 4: creating run-branch worktree")
+    proc = await run_script("setup-run.sh", st.run_id)
     if proc.returncode != 0:
-        die(f"staging setup failed: {proc.stderr.strip()}")
+        die(f"run setup failed: {proc.stderr.strip()}")
 
     sem = asyncio.Semaphore(caps["max_parallel"])
 
@@ -2930,7 +2965,7 @@ async def phase_execute(centella_dir: Path, st: State, caps: dict,
                                   or results[s].get("summary") for s in blocked}
             st.save()
             die(f"wave {wi + 1} has unresolved subtasks: {', '.join(blocked)}. "
-                f"See .centella/state.json; resolve and re-run with --resume.")
+                f"See {st.path}; resolve and re-run with --resume.")
 
         await integrate_wave(wave, results, centella_dir, caps, st, models)
 
@@ -2940,7 +2975,7 @@ async def phase_execute(centella_dir: Path, st: State, caps: dict,
         marker_err = await scan_conflict_markers(staging_path)
         if marker_err:
             die(f"wave {wi + 1}: {marker_err}\n"
-                "Resolve manually in .centella/worktrees/staging, commit, "
+                f"Resolve manually in {staging_path}, commit, "
                 "then re-run with --resume.")
 
         # re-validate integrated staging; re-spawn failing implementers
@@ -2957,7 +2992,7 @@ async def phase_execute(centella_dir: Path, st: State, caps: dict,
                     f"{caps['wave_revalidation_rounds']} rounds: {failing}")
             for sid in failing:
                 await settle_subtask(sid, centella_dir, caps, st, models)
-                await run_script("integrate.sh", sid)              # re-merge the delta
+                await run_script("integrate.sh", sid, st.run_id)   # re-merge the delta
 
         st.data["completed_waves"] = wi + 1
         st.save()
@@ -2965,9 +3000,9 @@ async def phase_execute(centella_dir: Path, st: State, caps: dict,
 
 async def phase_finalize(centella_dir: Path, st: State) -> None:
     log("phase 6: finalizing")
-    proc = await run_script("finalize.sh")
+    proc = await run_script("finalize.sh", st.run_id)
     if proc.returncode != 0:
-        die(f"finalize failed (staging is intact): {proc.stderr.strip()}")
+        die(f"finalize failed (run branch is intact): {proc.stderr.strip()}")
     await run_script("cleanup.sh")
 
     # verify the merge commit actually landed on the working branch
@@ -2978,13 +3013,15 @@ async def phase_finalize(centella_dir: Path, st: State) -> None:
         log("  ⚠  finalize warning: centella merge commit not found at HEAD — "
             "verify the working branch manually")
 
-    # verify staging and the working branch are now identical — a non-empty
-    # diff here means the merge silently dropped changes (data loss)
+    # verify the run branch and the working branch are now identical — a
+    # non-empty diff here means the merge silently dropped changes (data loss)
+    run_branch = compute_run_branch(st.run_id)
     r = await run_proc(
-        ["git", "diff", "--stat", "centella/staging..HEAD"],
+        ["git", "diff", "--stat", f"{run_branch}..HEAD"],
     )
     if r.returncode == 0 and r.stdout.strip():
-        log(f"  ⚠  finalize warning: working branch diverges from staging after merge:\n"
+        log(f"  ⚠  finalize warning: working branch diverges from {run_branch} "
+            f"after merge:\n"
             f"    {r.stdout.strip()}\n"
             "    Some changes may not have merged. Inspect manually.")
     wc = st.data.get("worker_count", 0)
@@ -2998,7 +3035,7 @@ async def phase_finalize(centella_dir: Path, st: State) -> None:
         log(f"run weight: {tel.get('calls', 0)} claude -p calls, "
             f"{tel.get('input_tokens', 0):,} in / "
             f"{tel.get('output_tokens', 0):,} out tokens "
-            f"(see .centella/state.json)")
+            f"(see {st.path})")
 
 
 # =========================================================================
@@ -3011,7 +3048,7 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
     worker. main() handles sync setup, then drives this with `asyncio.run`."""
     if args.resume:
         if not st.load():
-            die("nothing to resume — no .centella/state.json")
+            die(f"nothing to resume — no state.json at {st.path}")
         validate_resume_state(st.data)
         task = st.data["task"]
         log(f"resuming: {task!r} (worker count {st.data.get('worker_count', 0)})")
@@ -3045,6 +3082,23 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
         supplied = (json.loads(Path(args.answers).read_text())
                     if args.answers else None)
         await phase_classify(task, st, caps, args.no_clarify, models)
+        # Now that classification has chosen a category, promote the
+        # bootstrap dir to its final per-run name (DESIGN §6 "The run
+        # identifier"). The rename is atomic on POSIX same-filesystem;
+        # state.save() opens-writes-closes per call so no long-lived
+        # handle straddles it. POSIX file handles already opened inside
+        # phase_classify's worker (the classifier log under logs/)
+        # survive the rename because they reference inodes, not paths.
+        if st.run_id.startswith("_bootstrap-"):
+            final_run_id = compute_run_id(
+                st.data.get("categories", []), task, st.data["started_at"])
+            log(f"run id: {final_run_id}")
+            st.rename_to(final_run_id)
+            # All subsequent calls in this function pass the new dir;
+            # phase_execute / phase_finalize internally re-derive their
+            # working dir from st.path.parent, so they automatically
+            # pick up the new location.
+            centella_dir = st.run_dir
         # gather_answers blocks on input(). That's fine here: no concurrent
         # tasks are scheduled yet, so blocking the loop blocks nothing. Kept
         # on the event loop deliberately — every State mutation runs on the
@@ -3068,7 +3122,8 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("task", nargs="?", help="the task to execute")
     ap.add_argument("--resume", action="store_true",
-                    help="resume an interrupted run from .centella/state.json")
+                    help="resume an interrupted run (auto-picks if exactly "
+                         "one run exists under .centella/runs/)")
     ap.add_argument("--answers", metavar="FILE",
                     help="JSON file of pre-supplied clarification answers")
     ap.add_argument("--no-clarify", action="store_true",
@@ -3126,6 +3181,19 @@ def main() -> None:
                       capture_output=True).returncode != 0:
         die("not inside a git repository")
 
+    # Pre-per-run layout detection: a top-level .centella/state.json means
+    # the user upgraded from a previous centella version. We can't safely
+    # migrate (don't know the run_id retroactively), so refuse to run
+    # until the user explicitly cleans up the legacy artifacts.
+    if Path(".centella/state.json").exists():
+        die(
+            "legacy state layout detected at .centella/state.json. "
+            "This version of centella uses per-run state under "
+            ".centella/runs/<run-id>/. To migrate, run "
+            "`scripts/cleanup.sh --legacy` (removes the old layout) and "
+            "re-invoke centella."
+        )
+
     caps = dict(DEFAULT_CAPS)
     if args.max_workers:
         caps["max_total_workers"] = args.max_workers
@@ -3144,10 +3212,26 @@ def main() -> None:
                  or verbosity_from_shortcuts(args.verbose, args.quiet)
                  or resolve_verbosity(Path(os.getcwd()), None))
 
-    centella_dir = Path(".centella").resolve()
+    # The on-disk layout is per-run: every run gets its own subdirectory
+    # `centella_root/runs/<run-id>/` (see DESIGN.md §6, §10). For a fresh
+    # run we don't know the final run_id until phase_classify has chosen
+    # a category, so state lives in `_bootstrap-<6hex>/` until then; the
+    # rename to the final run_id happens in orchestrate() after classify.
+    centella_root = Path(".centella").resolve()
+    centella_root.mkdir(parents=True, exist_ok=True)
+    (centella_root / "runs").mkdir(parents=True, exist_ok=True)
+    if args.resume:
+        # Auto-pick if exactly one run exists; die with the available list
+        # if multiple are in flight. (--run-id wiring lands in commit 5.)
+        run_id = resolve_run_id(centella_root, getattr(args, "run_id", None))
+    else:
+        # Bootstrap directory: keyed on the current wall-clock time so two
+        # concurrent invocations don't pick the same one. Renamed to the
+        # final `<short_category>-<slug>-<6hex>` after classify.
+        run_id = "_bootstrap-" + hashlib.sha1(now().encode()).hexdigest()[:6]
+    st = State(centella_root, run_id)
     for sub in ("", "subtasks", "criteria", "checkpoints", "logs"):
-        (centella_dir / sub).mkdir(parents=True, exist_ok=True)
-    st = State(centella_dir)
+        (st.run_dir / sub).mkdir(parents=True, exist_ok=True)
 
     # Resolve source-of-truth and per-worker model preferences once per run.
     # Both die() on a bad value so typos in centella.toml or env vars are
@@ -3159,7 +3243,7 @@ def main() -> None:
     log(f"models: " + ", ".join(f"{w}={models[w]}" for w in WORKER_TYPES))
 
     try:
-        asyncio.run(orchestrate(args, caps, centella_dir, st,
+        asyncio.run(orchestrate(args, caps, st.run_dir, st,
                                 sot_pref, verbosity, models))
     except WorkerError as e:
         st.save()

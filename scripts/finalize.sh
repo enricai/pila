@@ -1,24 +1,34 @@
 #!/usr/bin/env bash
-# finalize.sh — merge the completed staging branch into the user's working branch.
+# finalize.sh <run-id> — merge the completed run branch into the working branch.
 #
-# Run from the repo root after every wave is integrated and staging is green.
-# Leaves the repo checked out on the working branch.
+# Run from the repo root after every wave is integrated and the run branch
+# is green. Leaves the repo checked out on the working branch.
+#
+# Push and PR are added in a subsequent commit. For now this script does
+# the same local merge it always did, just against centella/<run-id>
+# instead of the global centella/staging.
 #
 # If the merge conflicts — which happens only if the working branch received
-# commits DURING the centella run, so it has diverged from where staging was
-# branched — the merge is aborted cleanly: the working branch is restored to
-# its pre-finalize state, and the script exits non-zero. The orchestrator
-# reports this; centella/staging is intact and the run can be finalized manually.
+# commits DURING the centella run, so it has diverged from where the run
+# branch was branched — the merge is aborted cleanly: the working branch
+# is restored to its pre-finalize state, and the script exits non-zero. The
+# orchestrator reports this; centella/<run-id> is intact and the run can be
+# finalized manually.
 set -euo pipefail
 
-if [ ! -f .centella/working-branch ]; then
-  echo "error: .centella/working-branch missing — run setup-staging.sh first" >&2
+RUN_ID="${1:?usage: finalize.sh <run-id>}"
+RUN_DIR=".centella/runs/${RUN_ID}"
+BRANCH="centella/${RUN_ID}"
+WORKING_BRANCH_FILE="${RUN_DIR}/working-branch"
+
+if [ ! -f "${WORKING_BRANCH_FILE}" ]; then
+  echo "error: ${WORKING_BRANCH_FILE} missing — run setup-run.sh ${RUN_ID} first" >&2
   exit 2
 fi
-WORKING_BRANCH="$(cat .centella/working-branch)"
+WORKING_BRANCH="$(cat "${WORKING_BRANCH_FILE}")"
 
-if ! git show-ref --verify --quiet refs/heads/centella/staging; then
-  echo "error: centella/staging does not exist — nothing to finalize" >&2
+if ! git show-ref --verify --quiet "refs/heads/${BRANCH}"; then
+  echo "error: ${BRANCH} does not exist — nothing to finalize" >&2
   exit 2
 fi
 
@@ -27,16 +37,16 @@ if [ "$CURRENT" != "$WORKING_BRANCH" ]; then
   git checkout "$WORKING_BRANCH"
 fi
 
-# Attempt the merge. On conflict, abort it so the working branch is left clean
-# rather than mid-merge with conflict markers.
-if git merge --no-ff -m "centella: integrate completed run into ${WORKING_BRANCH}" centella/staging; then
-  echo "finalized: centella/staging merged into ${WORKING_BRANCH}"
+# Attempt the merge. On conflict, abort it so the working branch is left
+# clean rather than mid-merge with conflict markers.
+if git merge --no-ff -m "centella: integrate completed run into ${WORKING_BRANCH}" "$BRANCH"; then
+  echo "finalized: ${BRANCH} merged into ${WORKING_BRANCH}"
   exit 0
 else
   git merge --abort 2>/dev/null || true
-  echo "error: finalize merge conflicts — ${WORKING_BRANCH} diverged from staging" >&2
-  echo "       during the run. The merge was aborted; ${WORKING_BRANCH} is clean" >&2
-  echo "       and centella/staging is intact. Resolve by merging centella/staging" >&2
-  echo "       into ${WORKING_BRANCH} manually." >&2
+  echo "error: finalize merge conflicts — ${WORKING_BRANCH} diverged from" >&2
+  echo "       ${BRANCH} during the run. The merge was aborted;" >&2
+  echo "       ${WORKING_BRANCH} is clean and ${BRANCH} is intact." >&2
+  echo "       Resolve by merging ${BRANCH} into ${WORKING_BRANCH} manually." >&2
   exit 1
 fi
