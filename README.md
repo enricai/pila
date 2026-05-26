@@ -16,7 +16,7 @@ Centella inverts the relationship. **The model writes code. The program runs eve
 - **Success criteria are locked at implementation time — enforced by the orchestrator, not the worker.** The implementer cannot weaken its own tests to make them pass. The checker and the thing being checked are never the same agent.
 - **Workers must justify confidence with evidence, not feelings.** Before writing code, an implementer clears domain-specific evidence gates — file-and-line citations, reproductions, falsification attempts. A self-reported score without hard artifacts doesn't clear the bar.
 - **Parallel work that's actually safe.** Each implementer gets an isolated git worktree. Parallel writes never collide. Conflicts surface one wave at a time, close to the work that caused them.
-- **Resumable by design.** Interruption (Ctrl-C, reboot, budget cap) loses nothing. The run branch is the durable record; `--resume` picks up from the last completed wave.
+- **Resumable by design.** A reboot, network blip, budget cap, or external kill (SIGTERM from CI / systemd / a closed terminal) loses nothing — the run branch is the durable record, worktrees are torn down, and `--resume` picks up from the last completed wave. The one exception is Ctrl-C, which is treated as an explicit "throw this away" gesture: the run's branches, worktrees, and state dir are removed and `--resume` cannot recover it. (For a *resumable* abort, prefer `kill <pid>` over Ctrl-C.)
 - **Parallel-safe across runs.** Multiple `./centella` invocations in the same repository each get a unique `run_id` (a derived branch + state directory). Their branches, worktrees, and `.centella/` state never collide. Launch a fix and a feature in parallel without coordination.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -238,8 +238,8 @@ live `claude` binary would be needed; out of scope for the current suite).
 | `scripts/setup-run.sh` | Create per-run branch + worktree (`centella/<run-id>`) |
 | `scripts/new-worktree.sh` | Create per-subtask branch + worktree off the run branch |
 | `scripts/integrate.sh` | Merge a subtask branch into the run branch |
-| `scripts/finalize.sh` | Merge the run branch into the working branch; push and open a PR (unless `--no-push`) |
-| `scripts/cleanup.sh` | Remove worktrees / branches for one run (default) or all runs (`--all-runs`); legacy layout cleanup via `--legacy` |
+| `scripts/finalize.sh` | Merge the run branch into the working branch (local merge only — the push + PR step lives in Python's `push_and_open_pr`, called from `phase_finalize` unless `--no-push`) |
+| `scripts/cleanup.sh` | Remove worktrees for one run (default `--run-id`) or all runs (`--all-runs`). State dir always preserved as audit. `--branches` also deletes the matching `centella/<run-id>*` branches. `--bootstrap` removes orphaned `_bootstrap-*` dirs (runs that died before classify completed). `--legacy` removes the pre-per-run layout. |
 | `centella` | Executable entry-point wrapper |
 | `commands/centella.md` | Thin plugin skill — reachable as `/centella` from Claude Code |
 | `docs/DESIGN.md` | Full design document and rationale |
@@ -278,9 +278,17 @@ them with `scripts/cleanup.sh --run-id <id> --branches` (or `--all-runs
   The plugin skill at `commands/centella.md` handles this relay
   automatically when invoked as `/centella`.
 
-- **Run interrupted (Ctrl-C, reboot, network blip)** — `./centella --resume`
-  from the same directory. The resume cursor is `state.completed_waves` in
-  `.centella/state.json`; finished waves are not re-run.
+- **Run interrupted (Ctrl-C)** — Ctrl-C is treated as the user's explicit
+  "throw this away" gesture. The run's worktrees, branches, and state dir
+  are all removed (`centella/<run-id>*` branches included). The run is
+  *not* resumable. If you want to abort temporarily and resume later, use
+  `kill <pid>` (SIGTERM) instead — see the next entry.
+
+- **Run terminated by signal (SIGTERM, SIGHUP, CI cancel, terminal close, reboot)** —
+  worktrees are torn down but state.json + run branch are preserved.
+  Resume with `./centella --resume` (auto-picks if exactly one run) or
+  `./centella --resume --run-id <id>`. Run `centella --list` to see what's
+  in flight.
 
 - **A subtask reports `blocked`** — the implementer hit something it
   cannot resolve and bailed before integration. Read the blocker reason in

@@ -559,12 +559,23 @@ Every script takes a `RUN_ID` as its first positional argument (after any flags)
 | `setup-run.sh <run-id>` | Creates `centella/<run-id>` **only if absent** — never force-resets it (an existing branch carries completed waves; resetting it would destroy resume state). Records the working branch (HEAD-at-run-start) to `.centella/runs/<run-id>/working-branch` on first run only. Adds the run-branch worktree at `.centella/runs/<run-id>/worktrees/staging` if missing. Appends `.centella/` to the repo's `.git/info/exclude` (idempotent). Safe on `--resume`. |
 | `new-worktree.sh <id> <run-id>` | Creates `centella/<run-id>/<id>` worktree at `.centella/runs/<run-id>/worktrees/<id>` branched off the current `centella/<run-id>` tip; reuses an existing worktree/branch if present (resume after handoff). Prints the absolute worktree path. |
 | `integrate.sh <id> <run-id>` | From repo root, inside the run-branch worktree (`.centella/runs/<run-id>/worktrees/staging`): `git merge --no-ff centella/<run-id>/<id>`. Exit 0 clean; exit 1 on conflict, leaving the worktree mid-merge for an integrator; exit 2 on precondition failure (run-branch worktree or subtask branch missing) — `integrate_wave` treats exit 2 as fatal via `die()` and does *not* spawn an integrator, since the worktree-less case would fail in confusing ways. |
-| `finalize.sh <run-id> [--no-push] [--no-verify]` | Checks out the working branch (recorded by `setup-run.sh`), merges `centella/<run-id>` into it. On conflict: `git merge --abort`, restore the working branch clean, exit non-zero with manual-merge instructions; run branch left intact. On success and unless `--no-push`: `git push -u origin centella/<run-id>` (appending `--no-verify` to the push if the flag was set), then `gh pr create --base <working-branch> --head centella/<run-id> --title <title> --body-file -`. Push failure exits non-zero with a multi-line message naming both branches, the captured stderr, and the exact retry command; updates `.centella/runs/<run-id>/run.json` with `push_error`. PR-creation failure is *non-fatal*: logs a warning with the pushed-branch URL and the retry command; updates `run.json` with `pr_error` but exits 0. |
-| `cleanup.sh [--run-id <id>] [--all-runs] [--legacy] [--branches]` | Default (no flag): scans `.centella/runs/*/state.json` and picks the most recent run *without* a `finished_at`, confirms before deletion, removes only that run's worktrees and branches (`centella/<run-id>` and `centella/<run-id>/*`). `--run-id <id>` is an explicit single-run cleanup. `--all-runs` removes every run's artifacts (audit cleanup). `--legacy` removes the pre-per-run layout (`.centella/state.json`, `.centella/worktrees/`, `centella/staging` branch). `--branches` (with `--run-id` or `--all-runs`) additionally deletes the matching run branches; without it, branches are kept as an audit trail. |
+| `finalize.sh <run-id>` | The *local-merge half* of finalize. Checks out the working branch (recorded by `setup-run.sh`), merges `centella/<run-id>` into it. On conflict: `git merge --abort`, restore the working branch clean, exit non-zero with manual-merge instructions; run branch left intact. The push and PR step is **not** in this script — it lives in `push_and_open_pr()` in `centella.py` (see below) so it can compose the PR body with `compose_pr_body()`, write `run.json`, and emit Python-style multi-line failure messages. |
+| `cleanup.sh [--run-id <id> \| --all-runs \| --bootstrap \| --legacy] [--branches]` | Default (no flag): scans `.centella/runs/*/state.json` for the most-recently-failed run (most recent without `finished_at`), confirms y/N, then removes only that run's worktrees + prunes git metadata. State dir stays as audit. `--run-id <id>` is an explicit single-run cleanup (worktrees only). `--all-runs` runs the same per-run cleanup across every run dir under `.centella/runs/` (excluding `_bootstrap-*`). `--bootstrap` removes orphaned `_bootstrap-*` directories (runs that died before classify completed; not enumerable by `discover_runs`). `--legacy` removes the pre-per-run layout (`.centella/state.json`, `.centella/worktrees/`, `centella/staging` branch). `--branches` (combinable with `--run-id` or `--all-runs`) additionally deletes the matching run branches (`centella/<id>` and `centella/<id>/*`); without `--branches`, branches are kept as an audit trail. State dirs are always preserved by `cleanup.sh` — full nuke-the-run is the Ctrl-C path in the orchestrator (`_cleanup_on_abnormal_exit(full_purge=True)`). |
 
 A run branch `centella/<run-id>` is never reset once created — this is the invariant `--resume` depends on. See `DESIGN.md` §6 ("the run branch is the resume contract").
 
-Maps to `DESIGN.md`: §6.
+### Push and PR (Python; called from `phase_finalize`)
+
+The push + PR step is implemented in Python rather than in `finalize.sh`. It runs after `finalize.sh` succeeds, unless `--no-push` is in effect.
+
+| Function (centella.py) | Behavior |
+|--------|----------|
+| `push_and_open_pr(st, no_verify)` | Pushes `centella/<run-id>` to `origin` (with `--no-verify` appended if the CLI flag was set), then opens a PR via `gh pr create --base <working-branch> --head centella/<run-id> --title centella: <run-id> --body-file -` piping `compose_pr_body(st.data, st.run_id)`. Push failure dies non-zero with a multi-line message naming both branches, the captured stderr, and the exact retry command; updates `.centella/runs/<run-id>/run.json` with `push_error`. PR-creation failure is **non-fatal**: logs a warning with the pushed-branch URL and the retry command; updates `run.json` with `pr_error` and returns 0 (the run is complete; only the PR is missing). |
+| `_check_gh_cli(no_push)` | Preflight gate. Short-circuits silently when `--no-push` is set. Else verifies `shutil.which("gh")`, `gh auth status` exits 0, and `git remote get-url origin` succeeds. Each failure dies with an actionable message + the `--no-push` escape hatch. |
+
+`--no-push` skips the entire push + PR step (the run completes with the local merge only). CLI flag, `CENTELLA_NO_PUSH` env, `no_push = true` in `centella.toml` — same precedence pattern as `--source-of-truth`. `--no-verify` is CLI-only and only affects the push step (worker `git commit`s inside worktrees still run all hooks).
+
+Maps to `DESIGN.md`: §6 (Finalization — Push and PR).
 
 ---
 
@@ -632,6 +643,20 @@ discovery without parsing the full `state.json`):
 - If `pr_url` is set, `pushed_at` must be set (cannot have a PR without a push).
 
 A corrupt sidecar is flagged but does not block the rest of the system; `centella --list` will render that run with `status=corrupt-sidecar` and the user can inspect or delete the file.
+
+`centella --list` derives a single status per run via `_derive_run_status(run_json, state_json)`. The taxonomy is checked in priority order — earlier rows fire first:
+
+| Status | When it fires | Typical next step |
+|--------|---------------|-------------------|
+| `corrupt-sidecar` | `run.json` violates one of the three invariants above | inspect the file under `.centella/runs/<id>/run.json` |
+| `push-failed` | `push_error` is set | re-run `git push -u origin centella/<id>` after fixing the access issue |
+| `pr-failed` | `pr_error` is set (and push succeeded) | re-run `gh pr create` manually using the command logged at finalize |
+| `done-pushed-pr` | `pr_url` is set | the happy path: PR open, work merged locally |
+| `done-pushed-no-pr` | `pushed_at` set but `pr_url` not | rare: push succeeded, PR wasn't attempted (e.g., gh removed between push and PR) |
+| `done-local` | `finished_at` set, no `pushed_at` | the user passed `--no-push`; push manually if desired |
+| `in-progress` | none of the above | the run is still active (or died very early); resume with `--resume --run-id <id>` |
+
+`RUN_STATUSES` in `centella.py` declares the seven values; a test coupling check asserts the tuple matches every value `_derive_run_status` can return.
 
 `state.json` fields. This table is canonical: every field the orchestrator
 writes to `st.data` must appear here, and every field listed here must be

@@ -377,6 +377,40 @@ needs to be reviewed. Defaulting to push + PR turns every run into a
 reviewable artifact. `--no-push` exists for users running centella offline
 or in repositories without a GitHub remote.
 
+### Cleanup on abnormal exit
+
+A run can end abnormally three ways: the user hits Ctrl-C, an external
+process sends a signal (SIGTERM/SIGHUP from CI, systemd, a terminal
+close), or an unhandled exception fires. In each case the orchestrator
+runs a cleanup pass before exiting, and the cleanup *scope* depends on
+the cause.
+
+**Ctrl-C (SIGINT) → full purge.** The user explicitly told centella to
+abort. Worktrees, run branch + per-subtask branches (`centella/<run-id>`,
+`centella/<run-id>/*`), and the per-run state directory are all removed.
+The run is gone; `--resume` cannot recover it.
+
+**SIGTERM, SIGHUP, WorkerError, any other exception → worktrees only.**
+The orchestrator was likely killed by something external (CI cancel,
+systemd stop, terminal close) rather than by the user's intent to abandon
+the run. State and the run branch are preserved so `--resume --run-id <id>`
+can continue once the underlying issue is fixed. Only the (re-creatable)
+worktrees are torn down to leave a clean filesystem.
+
+Both paths use the same `_cleanup_on_abnormal_exit()` helper; the
+`full_purge` boolean parameter selects between them. The signal vs.
+exception classification happens in `main()`'s try/except: SIGINT keeps
+Python's default `KeyboardInterrupt`; SIGTERM and SIGHUP raise a
+dedicated `InterruptedBySignal` exception via handlers installed at
+program start. SIGINT and SIGHUP are POSIX-only — guarded with
+`hasattr(signal, ...)` so the orchestrator still runs on Windows
+(degraded: only SIGTERM-equivalent termination works).
+
+A `die()` call (the documented clean-exit mechanism for known failure
+modes) is *not* an abnormal exit. The user already got an actionable
+error message; running a worktree cleanup pass is correct (the run was
+mid-flight) but it is silent unless there were worktrees to clean.
+
 ---
 
 ## 7. The worker contract

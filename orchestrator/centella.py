@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -423,6 +424,100 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+class InterruptedBySignal(BaseException):
+    """Raised by signal handlers (SIGTERM, SIGHUP) installed in main().
+    Inherits BaseException (not Exception) so the broad `except Exception`
+    handlers inside orchestrate() don't swallow it. Caught only at
+    main()'s top-level try/except, where it triggers worktree-only
+    cleanup with state and branches preserved (DESIGN §6).
+
+    SIGINT keeps Python's default KeyboardInterrupt — caught separately
+    and triggers a full-purge cleanup (the user's explicit "throw this
+    away" gesture)."""
+    pass
+
+
+def _install_signal_handlers() -> None:
+    """Install SIGTERM/SIGHUP handlers that raise InterruptedBySignal.
+    SIGINT is left to Python's default (KeyboardInterrupt). On Windows,
+    SIGHUP doesn't exist and SIGTERM behaves differently — best-effort,
+    guard with hasattr."""
+    def _raise_intr(signum, frame):
+        raise InterruptedBySignal(signal.Signals(signum).name)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _raise_intr)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _raise_intr)
+
+
+def _cleanup_on_abnormal_exit(st: "State", *, full_purge: bool) -> None:
+    """Clean up after an abnormal exit (signal, exception, WorkerError).
+
+    Always: remove every git worktree under `st.run_dir / "worktrees"`,
+    then `git worktree prune` to clear stale metadata. Per-worktree
+    failures are caught — one bad worktree shouldn't block the others.
+
+    If `full_purge` is True (the user's explicit Ctrl-C gesture):
+    additionally delete every centella/<run-id>* branch and recursively
+    remove `st.run_dir`. The run is gone; `--resume` can't recover it.
+
+    If `full_purge` is False (SIGTERM/SIGHUP/exception): state.json and
+    the run branch are left intact so `--resume --run-id <id>` can
+    continue the run. This is the conservative default for "external
+    process killed me, user probably wants to recover.\""""
+    if st is None or st.run_id is None:
+        return
+    worktrees_dir = st.run_dir / "worktrees"
+    has_worktrees = worktrees_dir.is_dir() and any(worktrees_dir.iterdir())
+    # full_purge requires a log line (it's removing the whole run dir);
+    # worktrees-only with nothing to do is silent (e.g., preflight died
+    # before setup-run.sh — no worktrees ever existed).
+    if full_purge or has_worktrees:
+        log(f"cleanup: {'full purge' if full_purge else 'worktrees only'} "
+            f"for run {st.run_id}")
+    # Remove worktrees.
+    if worktrees_dir.is_dir():
+        for entry in worktrees_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(entry)],
+                    capture_output=True, check=False, timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired) as e:
+                log(f"  cleanup: failed to remove worktree {entry}: {e}")
+    try:
+        subprocess.run(["git", "worktree", "prune"],
+                       capture_output=True, check=False, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if not full_purge:
+        return
+    # Full purge: delete branches and the run dir.
+    branch_globs = [
+        f"refs/heads/centella/{st.run_id}",
+        f"refs/heads/centella/{st.run_id}/",
+    ]
+    for glob in branch_globs:
+        r = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname:short)", glob],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        if r.returncode != 0:
+            continue
+        for ref in r.stdout.splitlines():
+            ref = ref.strip()
+            if not ref:
+                continue
+            subprocess.run(
+                ["git", "branch", "-D", ref],
+                capture_output=True, check=False, timeout=10,
+            )
+    if st.run_dir.exists():
+        shutil.rmtree(st.run_dir, ignore_errors=True)
+
+
 def _parse_claude_version(version_output: str | None) -> tuple[int, int, int] | None:
     """Pull MAJOR.MINOR.PATCH out of `claude --version` output.
     Returns None if the format is unrecognized — caller falls through to
@@ -770,6 +865,96 @@ def resolve_run_id(centella_root: Path, cli_run_id: str | None) -> str:
         "multiple runs present; pass --run-id <id> to disambiguate:\n  "
         f"{available}\nUse `centella --list` to see full details."
     )
+
+
+# --- run status (consumed by `centella --list`) -------------------------
+
+# The seven derived statuses returned by `_derive_run_status`. Status is
+# *derived* from run.json + state.json fields, not stored, so the value
+# rendered by --list is always consistent with the actual on-disk state.
+RUN_STATUSES = (
+    "corrupt-sidecar",
+    "in-progress",
+    "done-local",
+    "done-pushed-no-pr",
+    "done-pushed-pr",
+    "push-failed",
+    "pr-failed",
+)
+
+
+def _derive_run_status(run_json: dict | None, state_json: dict | None) -> str:
+    """Pure function: derive a run's status from run.json + state.json.
+
+    Order of checks matters — earlier checks fire first:
+      1. run.json invariant-invalid → `corrupt-sidecar`.
+      2. push_error set            → `push-failed`.
+      3. pr_error set              → `pr-failed`.
+      4. pr_url set                → `done-pushed-pr`.
+      5. pushed_at set             → `done-pushed-no-pr`.
+      6. finished_at set           → `done-local` (run completed, --no-push).
+      7. otherwise                 → `in-progress`.
+
+    state_json is currently unused in the derivation but accepted for
+    forward-compat: future statuses (e.g., 'blocked') may consult
+    state.json["blocked"]."""
+    rj = run_json or {}
+    if rj:
+        try:
+            _validate_run_json(rj)
+        except ValueError:
+            return "corrupt-sidecar"
+    if rj.get("push_error"):
+        return "push-failed"
+    if rj.get("pr_error"):
+        return "pr-failed"
+    if rj.get("pr_url"):
+        return "done-pushed-pr"
+    if rj.get("pushed_at"):
+        return "done-pushed-no-pr"
+    if rj.get("finished_at"):
+        return "done-local"
+    return "in-progress"
+
+
+def list_runs(centella_root: Path) -> None:
+    """Render a sortable columnar table of runs to stdout. Used by
+    `centella --list`. Reads run.json sidecar (commit 4) for status
+    derivation; falls back to state.json fields for runs without a
+    sidecar (e.g., extremely-early failures before the rename, though
+    discover_runs filters those out)."""
+    runs = discover_runs(centella_root)
+    if not runs:
+        print("no runs under .centella/runs/")
+        return
+    # Read each run's run.json sidecar.
+    rows: list[tuple[str, str, str, str]] = []
+    for state in runs:
+        run_id = state["run_id"]
+        run_dir = centella_root / "runs" / run_id
+        run_json: dict | None = None
+        sidecar = run_dir / "run.json"
+        if sidecar.is_file():
+            try:
+                parsed = json.loads(sidecar.read_text())
+                if isinstance(parsed, dict):
+                    run_json = parsed
+            except (OSError, ValueError):
+                run_json = None
+        status = _derive_run_status(run_json, state)
+        started_at = state.get("started_at") or "—"
+        branch = (run_json or {}).get("branch") or compute_run_branch(run_id)
+        rows.append((run_id[:50], started_at, status, branch))
+    # Columnar layout: widths from the data, with sensible minimums.
+    w_id = max(len("run_id"), *(len(r[0]) for r in rows))
+    w_st = max(len("started_at"), *(len(r[1]) for r in rows))
+    w_status = max(len("status"), *(len(r[2]) for r in rows))
+    w_br = max(len("branch"), *(len(r[3]) for r in rows))
+    fmt = f"{{:<{w_id}}}  {{:<{w_st}}}  {{:<{w_status}}}  {{:<{w_br}}}"
+    print(fmt.format("run_id", "started_at", "status", "branch"))
+    print(fmt.format("-" * w_id, "-" * w_st, "-" * w_status, "-" * w_br))
+    for r in rows:
+        print(fmt.format(*r))
 
 
 def _read_toml_key(path: Path, key: str) -> str | None:
@@ -3357,6 +3542,14 @@ def main() -> None:
     ap.add_argument("--resume", action="store_true",
                     help="resume an interrupted run (auto-picks if exactly "
                          "one run exists under .centella/runs/)")
+    ap.add_argument("--run-id", metavar="ID",
+                    help="select a specific run by id (for --resume when "
+                         "multiple runs are in flight). See `--list` to "
+                         "enumerate.")
+    ap.add_argument("--list", action="store_true", dest="list_runs",
+                    help="enumerate in-flight and completed runs in this "
+                         "repository (run id, started, status, branch). "
+                         "Exits without running orchestrate.")
     ap.add_argument("--answers", metavar="FILE",
                     help="JSON file of pre-supplied clarification answers")
     ap.add_argument("--no-clarify", action="store_true",
@@ -3417,6 +3610,14 @@ def main() -> None:
                          "-qq=quiet (errors and phase boundaries only)")
     args = ap.parse_args()
 
+    # --list short-circuits everything else: read .centella/runs/* and
+    # exit. No git/CLI checks needed; the user might be inspecting runs
+    # from outside a git repo or with the legacy layout still in place.
+    if args.list_runs:
+        centella_root = Path(".centella").resolve()
+        list_runs(centella_root)
+        return
+
     if not shutil.which("claude"):
         die("`claude` CLI not found on PATH. Install Claude Code (native, "
             "recommended): `curl -fsSL https://claude.ai/install.sh | bash`. "
@@ -3466,8 +3667,8 @@ def main() -> None:
     (centella_root / "runs").mkdir(parents=True, exist_ok=True)
     if args.resume:
         # Auto-pick if exactly one run exists; die with the available list
-        # if multiple are in flight. (--run-id wiring lands in commit 5.)
-        run_id = resolve_run_id(centella_root, getattr(args, "run_id", None))
+        # if multiple are in flight unless --run-id picks one explicitly.
+        run_id = resolve_run_id(centella_root, args.run_id)
     else:
         # Bootstrap directory: keyed on the current wall-clock time so two
         # concurrent invocations don't pick the same one. Renamed to the
@@ -3492,17 +3693,80 @@ def main() -> None:
     # `args.no_push` regardless of where the choice came from.
     args.no_push = resolve_no_push(repo_root, args.no_push)
 
+    # Signal handlers (DESIGN §6 / DESIGN §14): SIGTERM and SIGHUP raise
+    # InterruptedBySignal so the same try/except machinery that catches
+    # KeyboardInterrupt also handles process-level termination. The
+    # cleanup logic chooses full purge vs. worktrees-only based on which
+    # signal/exception fired.
+    _install_signal_handlers()
+
+    abnormal = False
+    full_purge = False
+    exit_code = 0
+    exit_message: str | None = None
     try:
         asyncio.run(orchestrate(args, caps, st.run_dir, st,
                                 sot_pref, verbosity, models))
     except WorkerError as e:
+        abnormal = True
+        full_purge = False
         st.save()
-        die(str(e))
+        exit_message = str(e)
+        exit_code = 1
     except KeyboardInterrupt:
-        # asyncio.run cancels pending tasks on KeyboardInterrupt; run_proc's
-        # CancelledError handler kills any in-flight child processes.
+        # Ctrl-C → user's explicit "throw this away" gesture. Full purge:
+        # worktrees + branches + state dir all removed. asyncio.run
+        # already cancelled pending tasks and run_proc's CancelledError
+        # handler killed in-flight child processes.
+        abnormal = True
+        full_purge = True
+        log("interrupted by user (SIGINT) — full purge of run state")
+        exit_code = 130
+    except InterruptedBySignal as e:
+        # SIGTERM / SIGHUP → external orchestration (CI cancel, systemd
+        # stop, terminal close). User likely wants to recover; preserve
+        # state and run branch for --resume.
+        abnormal = True
+        full_purge = False
         st.save()
-        die("interrupted — state saved; re-run with --resume", code=130)
+        log(f"interrupted by signal ({e}) — worktree cleanup; "
+            f"state preserved (resume with --resume --run-id {st.run_id})")
+        # 128 + signal number; SIGTERM=15 → 143, SIGHUP=1 → 129.
+        signum = getattr(signal, str(e), None)
+        exit_code = (128 + int(signum)) if signum else 1
+    except SystemExit:
+        # `die()` raises SystemExit. It's the *clean* exit mechanism for
+        # known failure modes (preflight gh missing, classifier produced
+        # no categories, integrator design-conflict, ...). Don't treat it
+        # as an unhandled exception — die() already printed the right
+        # message. Mark abnormal so the finally block can clean up any
+        # worktrees the run did create (no-op when none exist, e.g.
+        # preflight die() before setup-run.sh ran).
+        abnormal = True
+        full_purge = False
+        raise
+    except BaseException as e:
+        # Anything else (genuinely unhandled exception in orchestrate,
+        # asyncio cancellation chain, etc.). Save state, mark abnormal
+        # so the finally block runs cleanup, then re-raise so the user
+        # sees the traceback.
+        abnormal = True
+        full_purge = False
+        st.save()
+        log(f"unhandled exception: {type(e).__name__}: {e}")
+        raise
+    finally:
+        if abnormal:
+            try:
+                _cleanup_on_abnormal_exit(st, full_purge=full_purge)
+            except BaseException as cleanup_err:
+                # Cleanup failure is non-fatal; the user can re-run
+                # `scripts/cleanup.sh --run-id <id>` manually.
+                log(f"cleanup failed (non-fatal): {cleanup_err}")
+    if exit_message is not None:
+        die(exit_message, code=exit_code)
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
