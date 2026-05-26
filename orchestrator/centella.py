@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent       # centella plugin/repo root
 PROMPTS = ROOT / "prompts"
 SCRIPTS = ROOT / "scripts"
+
+# Minimum `claude` CLI version that supports `--json-schema` in `claude -p`
+# mode. Anthropic CHANGELOG v2.1.22 (2026-01-28): "Fixed structured outputs
+# for non-interactive (-p) mode." Earlier 2.1.x point releases may work but
+# have no positive evidence in the release notes; v1.x and v2.0.x do not
+# have the flag at all. Enforced at preflight by _check_claude_cli_version().
+MIN_CLAUDE_CLI = (2, 1, 22)
 
 # --- tunable caps --------------------------------------------------------
 DEFAULT_CAPS = {
@@ -392,6 +400,41 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+def _parse_claude_version(version_output: str | None) -> tuple[int, int, int] | None:
+    """Pull MAJOR.MINOR.PATCH out of `claude --version` output.
+    Returns None if the format is unrecognized — caller falls through to
+    the live smoke test rather than failing closed on a regex."""
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", (version_output or "").strip())
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def _check_claude_cli_version() -> None:
+    """die() if `claude` is too old for --json-schema. Without this, a
+    stale CLI surfaces as a cryptic 'unknown option' wrapped in the
+    smoke-test error path — actionable for nobody. Existence on PATH is
+    already enforced earlier in main() via shutil.which()."""
+    try:
+        out = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        die("`claude --version` timed out — investigate the CLI install.")
+    found = _parse_claude_version(out.stdout)
+    if found is None:
+        return  # unrecognized format — defer to smoke test
+    if found < MIN_CLAUDE_CLI:
+        die(
+            f"claude CLI {'.'.join(map(str, found))} is too old; centella "
+            f"requires >= {'.'.join(map(str, MIN_CLAUDE_CLI))} for "
+            "--json-schema (introduced for `claude -p` in v2.1.22). "
+            "Upgrade with the native installer: "
+            "`curl -fsSL https://claude.ai/install.sh | bash`. "
+            "(npm/pnpm installs are now an advanced/legacy option per the "
+            "Claude Code docs.)"
+        )
+
+
 def _read_toml_key(path: Path, key: str) -> str | None:
     """Read a single `key = value` from a flat centella.toml. Returns
     None when the file does not exist or the key is absent. Strips
@@ -691,11 +734,17 @@ async def preflight(centella_dir: Path, verbosity: str = VERBOSITY_DEFAULT,
         die(f"stale worktrees exist at {wt_dir}\n"
             "Run scripts/cleanup.sh to remove them first.")
 
-    # 5. live smoke-test: auth + --output-format stream-json + --json-schema inline.
-    #    Catches auth failures and version mismatches before a 40-worker
-    #    run starts. Streams so a slow Opus / heavy-context startup is
-    #    visible — the previous max_turns=1 failure was invisible in the
-    #    non-streaming mode until exit.
+    # 5. claude CLI version is recent enough for `--json-schema` in -p mode.
+    #    Runs even when --skip-smoke is set: --skip-smoke is for skipping the
+    #    *live* model call (auth + a turn), not for skipping local CLI sanity
+    #    checks. Without this, a stale CLI fails the smoke test with a cryptic
+    #    'unknown option' that tells the user nothing actionable.
+    _check_claude_cli_version()
+
+    # 6. live smoke-test: auth + --output-format stream-json + --json-schema inline.
+    #    Catches auth failures before a 40-worker run starts. Streams so a slow
+    #    Opus / heavy-context startup is visible — the previous max_turns=1
+    #    failure was invisible in the non-streaming mode until exit.
     if not skip_smoke:
         log("preflight: smoke-testing claude -p…")
         cmd = ["claude", "-p", "respond with the single word ok",
@@ -2799,7 +2848,9 @@ def main() -> None:
     args = ap.parse_args()
 
     if not shutil.which("claude"):
-        die("the `claude` CLI is not on PATH — install Claude Code first")
+        die("`claude` CLI not found on PATH. Install Claude Code (native, "
+            "recommended): `curl -fsSL https://claude.ai/install.sh | bash`. "
+            "Docs: https://docs.claude.com/en/docs/claude-code/setup")
     if subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
                       capture_output=True).returncode != 0:
         die("not inside a git repository")

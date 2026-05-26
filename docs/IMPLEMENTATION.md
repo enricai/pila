@@ -329,9 +329,10 @@ All in `centella.py`, in execution order. This is the concrete catalogue behind
 | working tree clean | dirty tree → ambiguous diffs, corrupt merge history |
 | no stale `centella/*` branches | name collisions with this run |
 | no stale worktrees | branch checkout failures |
-| live `claude -p` smoke test | auth failure, version mismatch, broken `--json-schema` |
+| `claude --version` ≥ `MIN_CLAUDE_CLI` (currently `(2, 1, 22)`) | CLI too old for `--json-schema` (introduced for `claude -p` in v2.1.22) — replaces the cryptic "unknown option" message a stale CLI used to produce |
+| live `claude -p` smoke test | auth failure or network problem |
 
-`--skip-smoke` bypasses the last check (used by the test harness).
+`--skip-smoke` bypasses only the live smoke test (used by the test harness); the CLI version check still runs because it is local and read-only, and skipping it would let a stale CLI through to every worker.
 
 ### Phase 1 checks — `phase_classify`
 | Check | Catches |
