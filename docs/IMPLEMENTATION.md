@@ -25,7 +25,9 @@ centella/
 │   ├── reconciler.md              Phase 2½ worker — resolve cross-domain
 │   │                              capability-tag drift between planners
 │   ├── implementer.md             Phase 5 implementer worker system prompt
-│   └── integrator.md              conflict-resolution worker system prompt
+│   ├── integrator.md              conflict-resolution worker system prompt
+│   └── judge.md                  LLM judge worker — 3-dimensional rubric for
+│                                  reviewing captured call records
 │   (the validator's system prompt is the `VALIDATOR_SYSTEM` constant in
 │    `orchestrator/centella.py`, not a file — it is short and has no
 │    behavioral tuning that would benefit from out-of-tree editing)
@@ -509,6 +511,7 @@ Maps to `DESIGN.md`: §7 (worker contract), §2 (CLI subprocess form).
 | 4 Setup | `phase_execute` head → `setup-run.sh` | create the run branch `centella/runs/<run-id>` and its worktree (per-run, isolated from any other run) |
 | 5 Execute | `phase_execute`, `settle_subtask`, `integrate_wave`, `validate_wave` | per wave: implementers awaited concurrently via `gather_or_cancel` under a fresh `asyncio.Semaphore(max_parallel)` (separate instance from Phase 2's), then integrate, then re-validate. If any subtask in the wave ends `blocked` or `failed`, `phase_execute` aborts the run *before* `integrate_wave` is called — the blocker is recorded in `state.json` and the run resumes with `--resume` |
 | 6 Finalize | `phase_finalize` → `finalize.sh`, `cleanup.sh` | merge run branch into working branch; post-merge sanity checks; push the run branch and open a PR (unless `--no-push`); record push / PR outcome in `run.json` |
+| Post-run Judge | `phase_judge`, `judge_capture` | standalone post-run phase (not part of main orchestrate flow): reads `calls.ndjson`, runs one `judge_capture()` per record in parallel under `asyncio.Semaphore(max_parallel)`, writes per-record verdicts to `<judge-dir>/<call_id>.json` and a summary `INDEX.json`; uses `prompts/judge.md` rubric |
 
 `phase_classify` runs before `gather_answers` because the question set depends
 on the classification.
@@ -1013,16 +1016,13 @@ type. Required fields, current shape:
 - **validator** — required: `results` (array of `{subtask_id,
   all_criteria_met (both required), failing?}`). `failing` is optional in the
   schema; when omitted, the orchestrator treats it as an empty list.
-- **judge** — required: `verdicts` (array of per-call verdict objects). Each
-  verdict object has required fields: `call_id` (str — matches the `call_id` in
-  the NDJSON envelope), `schema_ok` (bool — did the worker's output conform to
-  its schema?), `factually_grounded` (bool — are the claims grounded in the
-  inputs?), `hallucination_free` (bool — does the output avoid content absent
-  from the inputs?), `pass` (bool — overall verdict, true only when all three
-  dimensions are true). Optional: `rationale` (str — the judge's explanation for
-  any false dimension). The `judge` schema is used by the judge skill's
-  `claude -p` worker; it is not used by the orchestrator's main `claude_p()`
-  function (the judge skill is post-run, not an orchestrator worker).
+- **judge** — required: `passed` (bool — aggregate verdict, true only when all
+  three dimensions are true), `dimensions` (object with required boolean fields
+  `schema_ok`, `factual_ok`, `hallucination_ok`), `rationale` (str — 1–3
+  sentence explanation for the verdict), `suggested_fixes` (array of strings —
+  empty when `passed: true`). One verdict object per `judge_capture()` call.
+  Used by `phase_judge()` / `judge_capture()` — not by the orchestrator's main
+  workflow workers. `prompts/judge.md` carries the rubric.
 - **patch_generator** — required: `anchor` (str — the exact substring of the
   current system prompt that the patch should replace; the heal loop validates
   this against the actual prompt text before applying), `replacement` (str —
@@ -1167,6 +1167,7 @@ enforcement functions:
 | `test_resolve_inspect_dirs.py` | `resolve_inspect_dirs()` precedence (CLI → env → TOML → `[]`), `~` expansion, dedup, and `STATE_FIELDS` membership |
 | `test_resolve_prompt.py` | `resolve_prompt()` — every `WORKER_TYPES` member returns a valid triple; parity/coupling test; validator returns `("constant", …, "orchestrator/centella.py:VALIDATOR_SYSTEM")`; unknown call_type raises |
 | `test_replay_capture.py` | `replay_capture()` — args reconstructed from capture record, `override_system_prompt` plumbed through, no `calls.ndjson` written during replay, return-value shape `(envelope, structured_output)` |
+| `test_phase_judge.py` | `phase_judge()` / `judge_capture()` — 3 verdicts written for 3-record NDJSON, INDEX.json content, schema validation, max_parallel semaphore bound, call_type filtering, empty/missing NDJSON edge cases |
 
 Run with `pytest tests/` from the repo root. The suite completes in
 under two seconds end to end.

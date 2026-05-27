@@ -593,6 +593,29 @@ SCHEMAS: dict[str, dict] = {
             },
         },
     },
+    "judge": {
+        # Output of a judge worker invocation. Three dimensions mirror the
+        # beacon scorer rubric but as an LLM judgment (not a hard-coded rule):
+        # schema adherence, factual accuracy, hallucination-freeness. The
+        # `passed` field is the aggregate verdict; the caller decides what
+        # to do with a failing verdict (log, heal, or both).
+        "type": "object",
+        "required": ["passed", "dimensions", "rationale", "suggested_fixes"],
+        "properties": {
+            "passed": {"type": "boolean"},
+            "dimensions": {
+                "type": "object",
+                "required": ["schema_ok", "factual_ok", "hallucination_ok"],
+                "properties": {
+                    "schema_ok": {"type": "boolean"},
+                    "factual_ok": {"type": "boolean"},
+                    "hallucination_ok": {"type": "boolean"},
+                },
+            },
+            "rationale": {"type": "string"},
+            "suggested_fixes": {"type": "array", "items": {"type": "string"}},
+        },
+    },
 }
 
 
@@ -2963,6 +2986,128 @@ class State:
         t["input_tokens"] += int(usage.get("input_tokens") or 0)
         t["output_tokens"] += int(usage.get("output_tokens") or 0)
         self.save()
+
+
+# =========================================================================
+# judge phase — LLM-scored review of captured call records
+# =========================================================================
+
+async def judge_capture(record: dict, models: dict[str, str],
+                        caps: dict, st: "State") -> dict:
+    """Run a judge worker against one captured call record.
+
+    The judge evaluates the record's response_content on three dimensions:
+    schema adherence, factual accuracy, and hallucination-freeness. Uses
+    claude_p() with schema_key="judge" and a deterministic sid derived from
+    the call_type and call_id so the per-worker log file is locatable.
+
+    Returns the structured judge output dict (validated against
+    SCHEMAS["judge"]).
+    """
+    call_type = record.get("call_type", "unknown")
+    call_id = record.get("call_id", "unknown")
+    sys_prompt = (PROMPTS / "judge.md").read_text()
+    user_prompt = (
+        "CALL RECORD TO JUDGE:\n"
+        f"call_type: {call_type}\n"
+        f"call_id: {call_id}\n"
+        f"model: {record.get('model', '')}\n\n"
+        "SYSTEM PROMPT (the instructions the worker was given):\n"
+        f"{record.get('system_prompt', '')}\n\n"
+        "USER CONTENT (the input the worker received):\n"
+        f"{record.get('user_content', '')}\n\n"
+        "RESPONSE CONTENT (what the worker produced):\n"
+        f"{record.get('response_content', '')}\n\n"
+        f"parsed_ok: {record.get('parsed_ok', False)}\n"
+        f"success: {record.get('success', False)}\n\n"
+        "Judge this call on the three dimensions and return your verdict."
+    )
+    # Judge workers are stateless observers — read-only tools only.
+    model = models.get("judge", models.get("validator", MODEL_DEFAULT))
+    st.bump_workers(caps)
+    return await claude_p(
+        user_prompt=user_prompt,
+        system_prompt=sys_prompt,
+        schema_key="judge",
+        cwd=os.getcwd(),
+        allowed_tools=INSPECT_TOOLS,
+        max_turns=20,
+        autonomous=False,
+        caps=caps,
+        st=st,
+        model=model,
+        sid=f"judge-{call_type}-{call_id[:8]}",
+    )
+
+
+async def phase_judge(run_dir: Path, judge_out_dir: Path,
+                      caps: dict, st: "State",
+                      models: dict[str, str],
+                      judge_call_types: list[str] | None = None) -> dict:
+    """Judge all captured call records in run_dir/calls.ndjson.
+
+    Reads each line of calls.ndjson, optionally filters by call_type when
+    `judge_call_types` is provided, then runs judge_capture() in parallel
+    under the existing asyncio.Semaphore(max_parallel) bound.
+
+    Each verdict is written to judge_out_dir/<call_id>.json. After all
+    judgments complete, an INDEX.json is written to judge_out_dir/ listing
+    every judged call with its call_id, call_type, and passed status.
+
+    Returns a dict with keys "judged" (count) and "index" (list of index
+    entries).
+    """
+    capture_path = run_dir / "calls.ndjson"
+    if not capture_path.exists():
+        log("phase_judge: no calls.ndjson found — nothing to judge")
+        return {"judged": 0, "index": []}
+
+    records: list[dict] = []
+    for line in capture_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            log(f"  phase_judge: skipping malformed NDJSON line: {line[:80]!r}")
+            continue
+        if judge_call_types and rec.get("call_type") not in judge_call_types:
+            continue
+        records.append(rec)
+
+    if not records:
+        log("phase_judge: no records to judge after filtering")
+        return {"judged": 0, "index": []}
+
+    judge_out_dir.mkdir(parents=True, exist_ok=True)
+    log(f"phase_judge: judging {len(records)} record(s)")
+
+    sem = asyncio.Semaphore(caps["max_parallel"])
+    index: list[dict] = []
+
+    async def judge_one(rec: dict) -> None:
+        async with sem:
+            call_id = rec.get("call_id", "unknown")
+            call_type = rec.get("call_type", "unknown")
+            verdict = await judge_capture(rec, models, caps, st)
+            verdict_path = judge_out_dir / f"{call_id}.json"
+            verdict_path.write_text(json.dumps(verdict, indent=2))
+            index.append({
+                "call_id": call_id,
+                "call_type": call_type,
+                "passed": verdict.get("passed", False),
+            })
+            status = "pass" if verdict.get("passed") else "FAIL"
+            log(f"  judge-{call_type}-{call_id[:8]}: {status}")
+
+    await gather_or_cancel(*(judge_one(r) for r in records))
+
+    # Sort index by call_id for stable output across parallel orderings.
+    index.sort(key=lambda e: e["call_id"])
+    (judge_out_dir / "INDEX.json").write_text(json.dumps(index, indent=2))
+    log(f"phase_judge: wrote {len(index)} verdict(s) to {judge_out_dir}")
+    return {"judged": len(index), "index": index}
 
 
 # =========================================================================
