@@ -86,11 +86,10 @@ Each call_type has exactly one system-prompt source
 | reconciler  | `prompts/reconciler.md` |
 | implementer | `prompts/implementer.md` |
 | integrator  | `prompts/integrator.md` |
-| validator   | `VALIDATOR_SYSTEM` constant in `orchestrator/centella.py` |
+| conformer   | `prompts/conformer.md` |
 
-For the first five, the heal loop reads the current file from `prompts/`
-as the base prompt text. For `validator`, it reads `VALIDATOR_SYSTEM`
-from `orchestrator/centella.py` (grep for `VALIDATOR_SYSTEM = `).
+The heal loop reads the current file from `prompts/` as the base
+prompt text for any call_type it heals.
 
 ### Heal-loop on-disk state layout
 
@@ -158,9 +157,7 @@ For each failing sample (those with `pass=false` in the verdict file):
 
 ### 2b. Iteration loop (until convergence or cap)
 
-1. **Read base prompt:** load from `prompts/<call_type>.md` (or grep
-   `VALIDATOR_SYSTEM` from `orchestrator/centella.py` for the validator
-   call_type).
+1. **Read base prompt:** load from `prompts/<call_type>.md`.
 
 2. **Build patch request:** create
    `<heal-dir>/<call_type>/iter-N/patch-request.json` with:

@@ -331,7 +331,7 @@ satisfaction is not enough. A textually clean merge can still silently break
 the behavior one of the subtasks was validated against.
 
 So conflict resolution is defined behaviorally. The integrator reads the intent
-and the frozen success criteria of *every* subtask whose work is part of the
+and the success-criteria notes of *every* subtask whose work is part of the
 conflicting merge — the incoming subtask and every already-integrated subtask
 it collides with — and resolves the merge so that each side's intent is
 preserved. Resolving a *semantic* conflict is what the integrator is for;
@@ -485,10 +485,12 @@ worker communicate through a strict contract:
 What happens after a hard worker error depends on whether partial progress can
 be salvaged. An **implementer** has a worktree branch and possibly a checkpoint,
 so its failure is converted into a handoff: a fresh implementer can continue.
-The **classifier, planner, integrator, and validator** have no partial-progress
+The **classifier, planner, reconciler, and integrator** have no partial-progress
 artifact to hand off — there is nothing for a successor to continue from — so
-their hard failure aborts the run with state saved for `--resume`. The rule is
-general: salvage if there is something to salvage; abort cleanly otherwise.
+their hard failure aborts the run with state saved for `--resume`. The
+**conformer** has commits but its phase is advisory, so a hard failure surfaces
+as a warning, not an abort. The rule is general: salvage if there is something
+to salvage; abort cleanly otherwise.
 
 ---
 
@@ -618,9 +620,10 @@ subtask's terminal status.
 
 ### Post-work conformance
 
-Frozen criteria say whether the code does what it was assigned to do. They do
-not say whether the *change* is in good standing with the repo it lives in:
-whether documentation that describes the touched surface is still accurate,
+The §8 confidence gate says whether the work landed; the
+implementer's criteria notes describe what it was aimed at. Neither
+says whether the *change* is in good standing with the repo it lives
+in: whether documentation that describes the touched surface is still accurate,
 whether tests for the touched code were updated, whether the change still
 honors whatever rules the repo declares for itself (CLAUDE.md, AGENTS.md,
 `.cursorrules`, a section of the README, a `docs/` file — the location is
@@ -964,7 +967,7 @@ the *principle* — correctable-mistake versus broken-worker — is the design.
 
 Every LLM call in Centella passes through one of the six worker types in
 `WORKER_TYPES`: `classifier`, `planner`, `reconciler`, `implementer`,
-`integrator`, or `validator`. Each worker type is a distinct **call type** — a
+`integrator`, or `conformer`. Each worker type is a distinct **call type** — a
 first-class identifier that partitions every captured call into its role in the
 system. The call_type partition is exactly `WORKER_TYPES`: one call_type per
 worker role, no overlap, no gap.

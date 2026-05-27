@@ -124,11 +124,15 @@ And `git worktree list` will show entries like:
 ```
 
 After every implementer commits in its worktree, the integrator merges
-its branch into the run branch, and the validator runs your project's
-detected test runner against the run branch to confirm nothing regressed.
-Acting workers use `--dangerously-skip-permissions` by design — bounded
-by worktree isolation. See [README "Safety"](../README.md#safety) and
-[`DESIGN.md`](DESIGN.md) §6.
+its branch into the run branch, and the post-work conformance phase
+runs your project's detected build/lint/test commands as advisory
+checks against the worktree — surfacing residuals as warnings on the
+subtask result, not gating the wave. The wave boundary itself only
+runs a deterministic conflict-marker scan; whether the work landed is
+the implementer's confidence-gate call (DESIGN §8). Acting workers use
+`--dangerously-skip-permissions` by design — bounded by worktree
+isolation. See [README "Safety"](../README.md#safety) and
+[`DESIGN.md`](DESIGN.md) §6, §9.
 
 ## Step 5 — Reviewing the run branch
 
@@ -208,12 +212,11 @@ schema is documented in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) §8.
   committed per-repo default; outranked by env and CLI.
 - `--model sonnet|opus|haiku` — model for every worker this run.
   Without any override the per-worker defaults apply: judgment workers
-  (classifier, planner, reconciler, integrator, validator) run on
-  `opus`; the acting workers (implementer, conformer) run on `sonnet`.
-  Per-worker `--model-classifier`, `--model-planner`,
-  `--model-reconciler`, `--model-implementer`, `--model-integrator`,
-  `--model-validator`, `--model-conformer` flags override the global
-  default. Env-var equivalents are
+  (classifier, planner, reconciler, integrator) run on `opus`; the
+  acting workers (implementer, conformer) run on `sonnet`. Per-worker
+  `--model-classifier`, `--model-planner`, `--model-reconciler`,
+  `--model-implementer`, `--model-integrator`, `--model-conformer`
+  flags override the global default. Env-var equivalents are
   `CENTELLA_MODEL` (and `CENTELLA_MODEL_<WORKER>` for the per-worker
   overrides); TOML keys are `model` / `model_<worker>` in
   `centella.toml`. Full precedence table in

@@ -999,8 +999,8 @@ the plugin skill in `commands/centella.md`):
 The checkpoint schema — seven required sections, enforced by
 `validate_checkpoint()`: *Frozen success criteria*, *Current status*, *Files
 touched*, *Decisions made*, *Evidence gate status*, *Next action*, *Open
-unknowns*. The validator enforces three layers: (a) every section header
-must be present; (b) every section must carry non-whitespace content; (c)
+unknowns*. `validate_checkpoint()` enforces three layers: (a) every section
+header must be present; (b) every section must carry non-whitespace content; (c)
 the five "must carry handoff context" sections reject single-token
 placeholder content (`none`/`n/a`/`na`/`tbd`/`nothing`/`unknown`/`todo`/`pending`/`—`/`--`/`-`/`?`) — the two
 "nothing-to-report-is-OK" sections (*Decisions made*, *Open unknowns*)

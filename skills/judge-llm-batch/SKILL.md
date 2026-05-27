@@ -55,7 +55,7 @@ Arguments parsed from `$ARGUMENTS`:
   `.centella/runs/<run-id>/` directory — the skill will find
   `calls.ndjson` inside it.
 - `--call-type <name>` (required): one of `classifier`, `planner`,
-  `reconciler`, `implementer`, `integrator`, `validator`. Filters the
+  `reconciler`, `implementer`, `integrator`, `conformer`. Filters the
   NDJSON to only lines with this `call_type` value.
 - `--run-id <id>` (optional): if provided, resolves the path as
   `.centella/runs/<run-id>/calls.ndjson` relative to CWD.
@@ -102,7 +102,7 @@ Each `call_type` maps to exactly one system-prompt source
 | reconciler  | `prompts/reconciler.md` |
 | implementer | `prompts/implementer.md` |
 | integrator  | `prompts/integrator.md` |
-| validator   | `VALIDATOR_SYSTEM` constant in `orchestrator/centella.py` |
+| conformer   | `prompts/conformer.md` |
 
 The `system_prompt` field in the NDJSON capture is the actual verbatim
 text injected — so the judge can always derive what the worker was asked

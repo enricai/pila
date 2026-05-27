@@ -13,7 +13,7 @@ Most AI "orchestrators" let the model pilot: the model decides what to do next, 
 Centella inverts the relationship. **The model writes code. The program runs everything else.** Phases, wave scheduling, retries, caps, merge logic, and success-criteria enforcement are ordinary Python — real loops and conditionals that cannot drift.
 
 - **No silent failures.** Every worker output is JSON-schema-validated before the orchestrator acts on it. A worker cannot, by malformed output or confident hallucination, cause the system to do something undefined.
-- **Success criteria are locked at implementation time — enforced by the orchestrator, not the worker.** The implementer cannot weaken its own tests to make them pass. The checker and the thing being checked are never the same agent.
+- **Confidence is the only hard gate.** The implementer self-gates on evidence-anchored confidence in `root_cause` and `solution` (≥9 on both, see DESIGN.md §8) — falsifiers tested, contradictions reconciled, gaps named with concrete artifacts. A worker that cannot justify the score exits `blocked` with the gap analysis. Everything else — tests passing, lint clean, build green, per-criterion satisfaction — is best-effort: surfaced as advisory warnings on the subtask result, never escalated to `failed` or `blocked` by the orchestrator. The criteria file is the implementer's working note, not a gate.
 - **Workers must justify confidence with evidence, not feelings.** Before writing code, an implementer clears domain-specific evidence gates — file-and-line citations, reproductions, falsification attempts. A self-reported score without hard artifacts doesn't clear the bar.
 - **Parallel work that's actually safe.** Each implementer gets an isolated git worktree. Parallel writes never collide. Conflicts surface one wave at a time, close to the work that caused them.
 - **Resumable by design.** A reboot, network blip, budget cap, or external kill (SIGTERM from CI / systemd / a closed terminal) loses nothing — the run branch is the durable record, worktrees are torn down, and `--resume` picks up from the last completed wave. The one exception is Ctrl-C, which is treated as an explicit "throw this away" gesture: the run's branches, worktrees, and state dir are removed and `--resume` cannot recover it. (For a *resumable* abort, prefer `kill <pid>` over Ctrl-C.)
@@ -117,8 +117,8 @@ export CENTELLA_SOURCE_OF_TRUTH=codebase    # or: research, both
 /path/to/centella/centella "task" --source-of-truth codebase
 
 # Choose the model. Without overrides, judgment workers (classifier /
-# planner / reconciler / integrator / validator) default to opus and
-# the acting workers (implementer, conformer) default to sonnet — see
+# planner / reconciler / integrator) default to opus and the acting
+# workers (implementer, conformer) default to sonnet — see
 # docs/IMPLEMENTATION.md §2 "Model selection" for the full env-var /
 # CLI-flag / TOML-key table.
 # Set CENTELLA_MODEL=sonnet (or --model sonnet) to restore the
@@ -164,7 +164,7 @@ Complete reference for every CLI flag, environment variable, and
 | `--source-of-truth VALUE` | `both` | `codebase` / `research` / `both`. Overrides `CENTELLA_SOURCE_OF_TRUTH` and `centella.toml`. |
 | `--inspect-dir PATH` | none | Extra directory the inspect-bucket workers (classifier, planner, reconciler) may read; forwarded to `claude -p` as `--add-dir`. Repeatable. Also `CENTELLA_INSPECT_DIRS` (colon-separated) or `inspect_dirs` in `centella.toml` (comma-separated). |
 | `--model ALIAS` | per-worker (judgment: `opus`; acting workers — implementer, conformer: `sonnet`) | `sonnet` / `opus` / `haiku`. Sets every worker this run; without it the per-worker defaults apply. |
-| `--model-<worker> ALIAS` | per-worker default (`implementer`, `conformer` → `sonnet`; everything else → `opus`) | Per-worker override. `<worker>` is one of `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `validator`, `conformer`. Overrides `--model`, `CENTELLA_MODEL`, and `centella.toml`. |
+| `--model-<worker> ALIAS` | per-worker default (`implementer`, `conformer` → `sonnet`; everything else → `opus`) | Per-worker override. `<worker>` is one of `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer`. Overrides `--model`, `CENTELLA_MODEL`, and `centella.toml`. |
 | `--judge-model ALIAS` | `sonnet` | Model alias for the post-run judge skill. Also `CENTELLA_MODEL_JUDGE` or `model_judge` in `centella.toml`. |
 | `--heal-model ALIAS` | `sonnet` | Model alias for the post-run self-heal skill. Also `CENTELLA_MODEL_HEAL` or `model_heal` in `centella.toml`. |
 | `--heal-max-rounds N` | `10` | Maximum heal-loop iterations per `call_type`. Also `CENTELLA_HEAL_MAX_ROUNDS` or `heal_max_rounds` in `centella.toml`. |
@@ -184,7 +184,7 @@ Complete reference for every CLI flag, environment variable, and
 |---------|---------------------|-------------|
 | `CENTELLA_SOURCE_OF_TRUTH` | `source_of_truth` | Sticky source-of-truth preference (`codebase` / `research` / `both`). Overridden by `--source-of-truth`. Unset → default `both`. |
 | `CENTELLA_MODEL` | `model` | Model alias applied to every worker. Overridden by `--model` and per-worker overrides. Unset → per-worker defaults (judgment workers `opus`, acting workers — implementer, conformer — `sonnet`). |
-| `CENTELLA_MODEL_<WORKER>` | `model_<worker>` | Per-worker override (e.g. `CENTELLA_MODEL_IMPLEMENTER=opus`). Overridden by `--model-<worker>`. `<worker>` ∈ `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `validator`, `conformer`. Unset → `implementer` and `conformer` → `sonnet`; everything else → `opus`. |
+| `CENTELLA_MODEL_<WORKER>` | `model_<worker>` | Per-worker override (e.g. `CENTELLA_MODEL_IMPLEMENTER=opus`). Overridden by `--model-<worker>`. `<worker>` ∈ `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer`. Unset → `implementer` and `conformer` → `sonnet`; everything else → `opus`. |
 | `CENTELLA_CONFIDENCE_ROUNDS` | `confidence_rounds` | Evidence-gate rounds per worker (positive integer). Overridden by `--confidence-rounds`. Unset → default `8`. |
 | `CENTELLA_INSPECT_DIRS` | `inspect_dirs` | Extra directories the inspect-bucket workers (classifier, planner, reconciler) may read; forwarded as `--add-dir`. Env value is colon-separated; TOML value is comma-separated. Overridden by `--inspect-dir` (repeatable). Unset → none. |
 | `CENTELLA_VERBOSITY` | `verbosity` | Inline-output verbosity (`quiet` / `normal` / `stream` / `debug`). Overridden by `--verbosity`. `-v` / `-vv` / `-q` / `-qq` shortcuts override both. Unset → default `stream`. |
@@ -237,10 +237,9 @@ subprocess; there is no in-session agent nesting.
 | `implementer` | `prompts/implementer.md` | sonnet | one per subtask (per wave, parallel) | commits on a `centella/subtasks/<run-id>/<subtask-id>` branch |
 | `conformer` | `prompts/conformer.md` | sonnet | one per subtask, only on the implementer's success path | advisory `conformance_warnings` on the subtask result; doc/test/rule-fix commits prefixed `conformer:` on the same branch (DESIGN §9 *Post-work conformance*) |
 | `integrator` | `prompts/integrator.md` | opus | on conflict during wave integration | resolved merge commit on `centella/runs/<run-id>` |
-| `validator` | constant `VALIDATOR_SYSTEM` in `centella.py` (not a file) | opus | once per wave | pass/fail on the run branch |
 
 **Per-worker model defaults:** judgment workers (classifier, planner,
-reconciler, integrator, validator) default to Opus; the acting workers
+reconciler, integrator) default to Opus; the acting workers
 (implementer, conformer) default to Sonnet — their job is concrete
 subtask execution where throughput matters more than broad-context
 judgment. To revert to the
@@ -381,9 +380,14 @@ No. Per-subtask isolation is provided by `git worktree`; the worktree
 mechanism is load-bearing, not optional.
 
 **What if my project has no test runner?**
-The validator falls back to a worker-driven correctness check. See
-[`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) §4 for `detect_test_runner()`
-and what happens when nothing is detected.
+That's fine — running tests is advisory only (DESIGN §9 *Post-work
+conformance*). When `detect_test_runner()` finds nothing, the
+conformance phase reports the test axis as not-applicable and surfaces
+no warning. The subtask's terminal status is determined by the
+implementer's confidence gate (DESIGN §8), not by whether tests ran.
+See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) §4 for
+`detect_test_runner()` and §5 for the conformance phase's advisory
+contract.
 
 **Can I see what each worker did?**
 Yes. Every worker commits to its own `centella/subtasks/<run-id>/<subtask-id>`
