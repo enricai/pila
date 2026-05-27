@@ -815,7 +815,127 @@ the *principle* — correctable-mistake versus broken-worker — is the design.
 
 ---
 
-## 14. Known limitations
+## 14. Telemetry, judging, and self-healing
+
+Every LLM call in Centella passes through one of the six worker types in
+`WORKER_TYPES`: `classifier`, `planner`, `reconciler`, `implementer`,
+`integrator`, or `validator`. Each worker type is a distinct **call type** — a
+first-class identifier that partitions every captured call into its role in the
+system. The call_type partition is exactly `WORKER_TYPES`: one call_type per
+worker role, no overlap, no gap.
+
+### The three pillars
+
+Three capabilities build on this partition to make the system observable,
+self-diagnosing, and self-improving:
+
+1. **Per-call NDJSON telemetry.** Every `claude -p` invocation emits a
+   structured record to a per-run append-only NDJSON file. The file is written
+   by the orchestrator — one JSON object per line, one line per call —
+   immediately after the call returns. Crash-safety comes from the format
+   itself: each line is a complete, self-contained JSON object. A hard kill
+   between writes leaves the file valid through the last fully-written line.
+   No partial write can corrupt earlier records.
+
+2. **LLM judge skill.** A Claude Code skill that reads a harvest of captured
+   calls (one call_type at a time), applies a multi-dimensional rubric to each
+   captured prompt/response pair, and writes structured verdicts. The rubric
+   evaluates three dimensions: schema adherence (did the worker produce
+   well-formed output), factual accuracy (are the claims grounded in the
+   codebase or research the worker was given), and hallucination-freeness (does
+   the output introduce content absent from the inputs). The judge is advisory
+   at the rubric level — its rubric lives in a prompt — but the scoring
+   aggregation and pass/fail threshold are real Python in the skill's
+   orchestrator script (§12 applied: the rubric is a prompt, the verdict
+   accounting is code).
+
+3. **LLM self-heal skill.** A Claude Code skill that takes the judge's verdicts
+   for a given call_type, identifies the failure modes, proposes targeted patches
+   to the relevant worker system prompt in `prompts/`, applies those patches, and
+   replays the failing samples against the patched prompt to measure improvement.
+   The loop is capped and its convergence check — whether a heal iteration is an
+   improvement, a plateau, or a regression — is real Python (§12 applied: the
+   patch proposal is a prompt, the convergence detection is code).
+
+### The subprocess contract — no new runtime
+
+Both the judge skill and the self-heal skill run exclusively through the
+existing `claude -p` subprocess invocation path (the same `claude_p()` function
+the orchestrator uses for all workers). They introduce no new runtime, no API
+key, and no dependency beyond the `claude` CLI already required for the rest of
+the system. This is the same resolution as §2: subscriptions rather than the
+metered API, and headless CLI subprocesses rather than an agent library.
+
+The judge spawns a fresh `claude -p` worker per batch of calls to be scored;
+the self-heal spawns fresh workers for patch generation and for replaying the
+failing samples against the patched prompt. Each worker sees exactly the inputs
+it needs for its slice of work, and its structured output is schema-validated
+before the skill's orchestrator acts on it — the same contract as every other
+worker in the system (§7).
+
+### The NDJSON file convention
+
+Each run's telemetry lives at:
+
+```
+.centella/runs/<run-id>/calls.ndjson
+```
+
+One file per run. The file is opened for append at run start and written to
+by the orchestrator as each call completes. It is never read by the runtime —
+the orchestrator writes it and moves on. Reading is a post-run operation:
+the judge and heal skills are invoked separately, after the run, against a
+harvested set of files.
+
+Each line is a JSON object with a fixed envelope:
+
+```
+{"ts": "<ISO-8601>", "run_id": "<run-id>", "call_type": "<worker-type>",
+ "call_id": "<uuid>", "model": "...", "input_tokens": N, "output_tokens": N,
+ "latency_ms": N, "success": true|false, "system_prompt": "...",
+ "user_content": "...", "response_content": "...", "parsed_ok": true|false}
+```
+
+Fields are sufficient for the judge to evaluate quality (`system_prompt`,
+`user_content`, `response_content`, `parsed_ok`) and for the heal loop to
+replay the call against a patched prompt (`system_prompt`, `user_content`).
+The `call_type` field is how the judge and heal skills partition their input —
+they always operate on one call_type at a time, matching Beacon's design.
+
+### §12 applied — prompts are advisory, code enforces
+
+The central principle (§12) governs this subsystem the same way it governs
+everything else:
+
+- The **judge rubric** — what counts as schema-valid, factually grounded, or
+  hallucination-free — is an instruction to the judge worker. The worker
+  applies it under judgment; the same drift risk applies as with any worker
+  prompt.
+- The **judge verdict aggregation** — counting pass/fail per dimension, computing
+  pass rate across a batch, deciding which calls are "failures" for the heal
+  loop — is real Python in the skill's orchestrator script. A Python counter
+  cannot drift.
+- The **heal convergence check** — is the patched prompt's pass rate above the
+  success threshold? is improvement plateauing? is there a regression? — is
+  real Python. These are measurements over numbers, not model judgment.
+- The **patch proposal** itself — what text to change in a system prompt, and
+  where — is a worker output and is therefore advisory. The heal loop does not
+  trust it unconditionally: it validates the proposed anchor match before
+  applying, and it verifies the improvement by replay rather than by the
+  subagent's own assessment.
+
+The heal loop re-applies the evidence-gate discipline from §8: each heal
+iteration must show measured improvement (a quantitative outcome, not an
+assertion) before it updates the "best patch so far." The loop is bounded; a
+cap that cannot be cleared within the bound terminates the heal loop rather
+than running forever. The same falsification and convergence discipline that
+governs an implementer's confidence loop governs the heal loop's patch
+iteration — the number of rounds, the success threshold, and the plateau
+detection window are all configured, not left open-ended.
+
+---
+
+## 15. Known limitations
 
 These are honest, designed-in limitations — not bugs, but the known edges of
 what the architecture can guarantee.
@@ -876,7 +996,7 @@ what the architecture can guarantee.
 
 ---
 
-## 15. Verification status
+## 16. Verification status
 
 A design document should be honest about how much of the system has been
 *demonstrated* to work, as opposed to *reasoned* to work. The distinction is
@@ -913,7 +1033,7 @@ small, fully-specified task before trusting it on real work.
 
 ---
 
-## 16. Traceability to the original specification
+## 17. Traceability to the original specification
 
 Every requirement of the original eight-step specification is accounted for in
 the design. Where the design departs from the original wording, the departure
@@ -940,7 +1060,7 @@ is deliberate and is justified in the section named.
 
 ---
 
-## 17. Future work
+## 18. Future work
 
 Directions that would strengthen the system but are not part of the current
 design:
@@ -951,7 +1071,7 @@ design:
   the last fully-completed wave is re-run. Finer-grained resume would re-run
   less.
 - ~~A dependency-graph sanity pass~~ — implemented as the reconciler worker
-  (DESIGN §5 and §14). After all planners finish, a reconciler worker
+  (§5 and §15). After all planners finish, a reconciler worker
   resolves vocabulary drift between domains' capability tags before the
   scheduler builds its DAG.
 - **Per-domain implementer specialization.** One generic implementer serves all
