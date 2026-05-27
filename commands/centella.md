@@ -21,7 +21,8 @@ clarification step if one occurs.
    `--clarify` so the orchestrator surfaces classifier intent
    questions through this Claude Code session rather than running
    unattended — the user is here in chat, so this session is the
-   relay channel:
+   relay channel. (`CLAUDE_PLUGIN_ROOT` is the absolute path to this
+   plugin's install directory; Claude Code sets it automatically.)
 
    ```
    bash "${CLAUDE_PLUGIN_ROOT}/centella" --clarify "$ARGUMENTS"

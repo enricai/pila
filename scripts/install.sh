@@ -26,6 +26,11 @@ set -euo pipefail
 
 # --- defaults ------------------------------------------------------------
 
+# Guard against an unset HOME (some CI containers, broken cron envs, minimal
+# Docker images). Without this, $HOME/.centella expands to /.centella and the
+# install silently tries to write under the root filesystem.
+: "${HOME:?HOME is unset; cannot compute install prefix. Set HOME (or CENTELLA_HOME + CENTELLA_BIN_DIR) and retry.}"
+
 DEFAULT_REPO_URL="https://github.com/enricai/centella.git"
 DEFAULT_REF="main"
 DEFAULT_PYTHON="3.12"
@@ -174,7 +179,7 @@ fi
 
 # --- 3. provision Python 3.12 -------------------------------------------
 
-log "provisioning Python $DEFAULT_PYTHON via uv"
+log "provisioning Python $DEFAULT_PYTHON via uv (first run downloads ~25MB; uv shows its own progress bar)"
 run uv python install "$DEFAULT_PYTHON"
 
 # --- 4. clone or update --------------------------------------------------
@@ -220,11 +225,13 @@ case ":$PATH:" in
       *)    rcfile="your shell rc file" ;;
     esac
     if [ "${SHELL##*/}" = "fish" ]; then
-      log "Add to $rcfile:    set -gx PATH $BIN_DIR \$PATH"
+      log "Add to $rcfile:                      set -gx PATH $BIN_DIR \$PATH"
+      log "Or for the current shell session:    set -gx PATH $BIN_DIR \$PATH"
     else
-      log "Add to $rcfile:    export PATH=\"$BIN_DIR:\$PATH\""
+      log "Add to $rcfile:                      export PATH=\"$BIN_DIR:\$PATH\""
+      log "Or for the current shell session:    export PATH=\"$BIN_DIR:\$PATH\""
     fi
-    log "Then restart your shell."
+    log "(rc-file change takes effect after restarting your shell.)"
     ;;
 esac
 

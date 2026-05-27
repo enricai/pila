@@ -26,7 +26,7 @@ labels: bug
 - OS: <e.g., macOS 14.5, Ubuntu 22.04>
 - Python: `python3 --version`
 - `claude --version`:
-- Centella commit: `git -C /path/to/centella rev-parse HEAD`
+- Centella commit: `git -C ~/.centella rev-parse HEAD` (or wherever you cloned it)
 
 ## Relevant state
 
