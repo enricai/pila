@@ -2655,7 +2655,8 @@ def _capture_call(run_dir: Path, record: dict) -> None:
 async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
                    cwd: str, allowed_tools: str, max_turns: int, autonomous: bool,
                    caps: dict, st: "State", model: str, sid: str,
-                   add_dirs: list[str] | None = None) -> dict:
+                   add_dirs: list[str] | None = None,
+                   _suppress_capture: bool = False) -> dict:
     """Run one headless Claude Code worker and return its validated
     structured output.
 
@@ -2728,25 +2729,28 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
         st.add_telemetry(envelope)
 
         # capture NDJSON record — written on every attempt (success and failure)
-        # so a hard-killed run leaves a complete audit trail
-        _usage = envelope.get("usage") or {}
-        _parsed_ok = envelope.get("structured_output") is not None
-        _success = not envelope.get("is_error") and _parsed_ok
-        _capture_call(st.run_dir, {
-            "call_id": str(uuid.uuid4()),
-            "run_id": st.run_id,
-            "call_type": schema_key,
-            "model": model,
-            "system_prompt": system_prompt,
-            "user_content": user_prompt + retry_note,
-            "response_content": str(envelope.get("result") or ""),
-            "parsed_ok": _parsed_ok,
-            "input_tokens": int(_usage.get("input_tokens") or 0),
-            "output_tokens": int(_usage.get("output_tokens") or 0),
-            "latency_ms": _latency_ms,
-            "success": _success,
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-        })
+        # so a hard-killed run leaves a complete audit trail.
+        # Skipped when _suppress_capture=True (replay mode) so replays
+        # never pollute the captures stream.
+        if not _suppress_capture:
+            _usage = envelope.get("usage") or {}
+            _parsed_ok = envelope.get("structured_output") is not None
+            _success = not envelope.get("is_error") and _parsed_ok
+            _capture_call(st.run_dir, {
+                "call_id": str(uuid.uuid4()),
+                "run_id": st.run_id,
+                "call_type": schema_key,
+                "model": model,
+                "system_prompt": system_prompt,
+                "user_content": user_prompt + retry_note,
+                "response_content": str(envelope.get("result") or ""),
+                "parsed_ok": _parsed_ok,
+                "input_tokens": int(_usage.get("input_tokens") or 0),
+                "output_tokens": int(_usage.get("output_tokens") or 0),
+                "latency_ms": _latency_ms,
+                "success": _success,
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            })
 
         # surface non-clean exits — a worker that hit --max-turns exits 0 and
         # can still produce structured_output, but stopped mid-work
@@ -2780,6 +2784,106 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
         return structured
 
     raise WorkerError(f"worker failed schema-valid output twice: {last_problem}")
+
+
+async def replay_capture(record: dict, *,
+                         override_system_prompt: str | None = None,
+                         cwd: str | None = None) -> tuple[dict, dict]:
+    """Replay one captured call from a calls.ndjson record.
+
+    Given a single NDJSON record (as a dict), reconstructs the `claude_p()`
+    invocation with the captured `system_prompt`, `user_content`, `call_type`
+    (mapped to `schema_key`), `model`, and any other reproducible parameters.
+    Returns `(envelope, structured_output)` from the new invocation.
+
+    `override_system_prompt` lets the heal loop replay with a patched prompt
+    instead of the originally captured one.
+
+    Replays use a throw-away in-memory state and `_suppress_capture=True` so
+    they never pollute the original run's calls.ndjson — the capture stream is
+    the ground truth; replay is ephemeral analysis.
+
+    `cwd` defaults to the current working directory. The replay worker runs
+    non-autonomous (read-only tools) by default, matching the behaviour most
+    call types actually use; callers may not need write access for scoring.
+
+    The returned structured_output is the parsed object from the new envelope.
+    A WorkerError is raised if the replay call fails schema validation twice,
+    same as a live call.
+    """
+    call_type = record["call_type"]
+    system_prompt = override_system_prompt or record["system_prompt"]
+    user_prompt = record["user_content"]
+    model = record.get("model", MODEL_DEFAULT)
+
+    # Minimal in-memory state: no run dir needed because capture is suppressed.
+    # _suppress_capture=True prevents _capture_call from writing anywhere;
+    # add_telemetry is called but state.save() writes to a tempdir that is
+    # discarded after replay.
+    import tempfile
+    with tempfile.TemporaryDirectory() as _tmpdir:
+        tmp_run_dir = Path(_tmpdir) / "replay-run"
+        tmp_run_dir.mkdir()
+        tmp_state_path = tmp_run_dir / "state.json"
+        tmp_state_path.write_text("{}")
+
+        replay_st = _ReplayState(tmp_run_dir, tmp_state_path)
+        caps = dict(DEFAULT_CAPS)
+
+        structured = await claude_p(
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            schema_key=call_type,
+            cwd=cwd or os.getcwd(),
+            allowed_tools=INSPECT_TOOLS,
+            max_turns=40,
+            autonomous=False,
+            caps=caps,
+            st=replay_st,
+            model=model,
+            sid=f"replay-{call_type}",
+            _suppress_capture=True,
+        )
+    envelope = replay_st.last_envelope
+    return (envelope, structured)
+
+
+class _ReplayState:
+    """Minimal State-alike for replay_capture: no persistent writes.
+
+    Satisfies the interface claude_p() calls on the state object (bump_workers,
+    add_telemetry, .data, .run_id, .run_dir, .path) without touching .centella/.
+    All save() calls are no-ops. last_envelope captures the envelope returned
+    by _invoke so replay_capture can return (envelope, structured_output).
+    """
+
+    def __init__(self, run_dir: Path, state_path: Path) -> None:
+        self.run_dir = run_dir
+        self.path = state_path
+        self.run_id = "replay"
+        self.data: dict = {
+            "telemetry": {"calls": 0, "cost_usd": 0.0,
+                          "input_tokens": 0, "output_tokens": 0},
+            "verbosity": "quiet",
+        }
+        self.last_envelope: dict = {}
+
+    def save(self) -> None:
+        pass  # replay writes nothing
+
+    def bump_workers(self, caps: dict) -> None:
+        pass  # no budget tracking during replay
+
+    def add_telemetry(self, envelope: dict) -> None:
+        self.last_envelope = envelope
+        t = self.data.setdefault("telemetry", {"calls": 0, "cost_usd": 0.0,
+                                               "input_tokens": 0,
+                                               "output_tokens": 0})
+        t["calls"] += 1
+        t["cost_usd"] += float(envelope.get("total_cost_usd") or 0.0)
+        usage = envelope.get("usage") or {}
+        t["input_tokens"] += int(usage.get("input_tokens") or 0)
+        t["output_tokens"] += int(usage.get("output_tokens") or 0)
 
 
 # =========================================================================

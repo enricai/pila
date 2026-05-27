@@ -1115,6 +1115,32 @@ patch-generator worker calls `resolve_prompt` instead of duplicating the
 file/constant branching itself. Raises `ValueError` for an unknown
 `call_type`.
 
+### replay_capture — primitive for judge and heal-loop replays
+
+```python
+async def replay_capture(
+    record: dict,
+    *,
+    override_system_prompt: str | None = None,
+    cwd: str | None = None,
+) -> tuple[dict, dict]:
+```
+
+Given one NDJSON record from `calls.ndjson`, reconstructs the `claude_p()`
+invocation with the captured `system_prompt`, `user_content`, `call_type`
+(used as `schema_key`), and `model`, and returns `(envelope, structured_output)`
+from the new invocation.
+
+`override_system_prompt` lets the heal loop replay with a patched prompt in
+place of the originally captured one.
+
+Replays use a throw-away in-memory `_ReplayState` and `_suppress_capture=True`
+so they **never write to any `calls.ndjson`**. The capture stream is the ground
+truth; replay results are ephemeral scoring artifacts.
+
+Both judge (n=1 replay, then score) and heal (n=N replays, baseline vs patched)
+build on this primitive.
+
 ---
 
 ## 11. Verification status of the code
@@ -1140,6 +1166,7 @@ enforcement functions:
 | `test_inspect_tools.py` | `INSPECT_TOOLS` composition and the three inspect-callsite wirings (classifier, planner, reconciler) — pins that the inspect bucket grants `Bash(<verb>:*)` patterns but never `Write`/`Edit` or bare `Bash`, the same DESIGN §12 enforcement applied to workers that don't get `--dangerously-skip-permissions` |
 | `test_resolve_inspect_dirs.py` | `resolve_inspect_dirs()` precedence (CLI → env → TOML → `[]`), `~` expansion, dedup, and `STATE_FIELDS` membership |
 | `test_resolve_prompt.py` | `resolve_prompt()` — every `WORKER_TYPES` member returns a valid triple; parity/coupling test; validator returns `("constant", …, "orchestrator/centella.py:VALIDATOR_SYSTEM")`; unknown call_type raises |
+| `test_replay_capture.py` | `replay_capture()` — args reconstructed from capture record, `override_system_prompt` plumbed through, no `calls.ndjson` written during replay, return-value shape `(envelope, structured_output)` |
 
 Run with `pytest tests/` from the repo root. The suite completes in
 under two seconds end to end.
