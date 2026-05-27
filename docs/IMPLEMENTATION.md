@@ -1105,6 +1105,16 @@ the replay context for self-healing — it reads `prompts/<call_type>.md`
 for five of the six types, and reads `VALIDATOR_SYSTEM` directly from
 `centella.py` for the sixth.
 
+`resolve_prompt(call_type: str) -> tuple[str, str, str]` centralises
+this asymmetry: given any member of `WORKER_TYPES`, it returns
+`(source_kind, content, location_hint)` where `source_kind` is `"file"`
+or `"constant"`, `content` is the prompt body, and `location_hint` is
+either the relative path `"prompts/<call_type>.md"` or the literal
+`"orchestrator/centella.py:VALIDATOR_SYSTEM"`. The heal loop's
+patch-generator worker calls `resolve_prompt` instead of duplicating the
+file/constant branching itself. Raises `ValueError` for an unknown
+`call_type`.
+
 ---
 
 ## 11. Verification status of the code
@@ -1129,6 +1139,7 @@ enforcement functions:
 | `test_validator_tools.py` | `RUN_TOOLS` composition and `validate_wave`'s wiring — pins that the validator gets `Bash` but never `Write`/`Edit`, enforcing the DESIGN §12 "you do not modify code" rule mechanically (per §3 of this document) |
 | `test_inspect_tools.py` | `INSPECT_TOOLS` composition and the three inspect-callsite wirings (classifier, planner, reconciler) — pins that the inspect bucket grants `Bash(<verb>:*)` patterns but never `Write`/`Edit` or bare `Bash`, the same DESIGN §12 enforcement applied to workers that don't get `--dangerously-skip-permissions` |
 | `test_resolve_inspect_dirs.py` | `resolve_inspect_dirs()` precedence (CLI → env → TOML → `[]`), `~` expansion, dedup, and `STATE_FIELDS` membership |
+| `test_resolve_prompt.py` | `resolve_prompt()` — every `WORKER_TYPES` member returns a valid triple; parity/coupling test; validator returns `("constant", …, "orchestrator/centella.py:VALIDATOR_SYSTEM")`; unknown call_type raises |
 
 Run with `pytest tests/` from the repo root. The suite completes in
 under two seconds end to end.

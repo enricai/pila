@@ -256,6 +256,34 @@ VALIDATOR_SYSTEM = (
     "any failing criteria with the reason each failed."
 )
 
+# Stable location hint for the validator's embedded constant — referenced by
+# resolve_prompt() so the heal loop can describe a patch in anchor-replacement
+# form without special-casing the constant/file asymmetry.
+_VALIDATOR_LOCATION_HINT = "orchestrator/centella.py:VALIDATOR_SYSTEM"
+
+
+def resolve_prompt(call_type: str) -> tuple[str, str, str]:
+    """Return (source_kind, content, location_hint) for a worker call_type.
+
+    source_kind is 'file' for the five file-backed workers and 'constant'
+    for the validator. location_hint is a stable pointer the heal loop uses
+    to describe where to apply a patch — either a relative path like
+    'prompts/classifier.md' or the literal
+    'orchestrator/centella.py:VALIDATOR_SYSTEM'.
+
+    Raises ValueError for an unknown call_type.
+    """
+    if call_type not in WORKER_TYPES:
+        raise ValueError(
+            f"unknown call_type {call_type!r}; valid types: {WORKER_TYPES}"
+        )
+    if call_type == "validator":
+        return ("constant", VALIDATOR_SYSTEM, _VALIDATOR_LOCATION_HINT)
+    hint = f"prompts/{call_type}.md"
+    content = (PROMPTS / f"{call_type}.md").read_text()
+    return ("file", content, hint)
+
+
 # --- worker output schemas -----------------------------------------------
 # Passed to `claude -p` via --json-schema. The CLI validates the worker's
 # final output against the schema AFTER the run and exposes the validated
