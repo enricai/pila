@@ -30,6 +30,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -2609,6 +2611,19 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
     return envelope
 
 
+def _capture_call(run_dir: Path, record: dict) -> None:
+    """Append one NDJSON record to calls.ndjson with fsync-per-line durability.
+
+    fsync ensures a hard-killed run leaves a clean, fully-written last line
+    rather than a partial line that would break NDJSON parsers."""
+    capture_path = run_dir / "calls.ndjson"
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    with capture_path.open("a") as f:
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
                    cwd: str, allowed_tools: str, max_turns: int, autonomous: bool,
                    caps: dict, st: "State", model: str, sid: str,
@@ -2675,12 +2690,35 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
         retry_note = ("" if attempt == 1 else
                       f"\n\nYOUR PREVIOUS ATTEMPT FAILED: {last_problem} "
                       "Return output that conforms exactly to the required schema.")
+        _t0 = time.monotonic()
         envelope = await _invoke(build(retry_note), cwd, timeout,
                                  sid, centella_dir, verbosity,
                                  progress=_get_progress(st))
+        _latency_ms = int((time.monotonic() - _t0) * 1000)
 
         # record run-weight telemetry
         st.add_telemetry(envelope)
+
+        # capture NDJSON record — written on every attempt (success and failure)
+        # so a hard-killed run leaves a complete audit trail
+        _usage = envelope.get("usage") or {}
+        _parsed_ok = envelope.get("structured_output") is not None
+        _success = not envelope.get("is_error") and _parsed_ok
+        _capture_call(st.run_dir, {
+            "call_id": str(uuid.uuid4()),
+            "run_id": st.run_id,
+            "call_type": schema_key,
+            "model": model,
+            "system_prompt": system_prompt,
+            "user_content": user_prompt + retry_note,
+            "response_content": str(envelope.get("result") or ""),
+            "parsed_ok": _parsed_ok,
+            "input_tokens": int(_usage.get("input_tokens") or 0),
+            "output_tokens": int(_usage.get("output_tokens") or 0),
+            "latency_ms": _latency_ms,
+            "success": _success,
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        })
 
         # surface non-clean exits — a worker that hit --max-turns exits 0 and
         # can still produce structured_output, but stopped mid-work
