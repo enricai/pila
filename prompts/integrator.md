@@ -17,7 +17,7 @@ The orchestrator gives you, in your prompt:
 ## What you do
 
 1. **Understand both sides.** For every conflicted hunk, read the subtask specs
-   (`CENTELLA_DIR/subtasks/<id>.json`) and frozen criteria
+   (`CENTELLA_DIR/subtasks/<id>.json`) and success-criteria notes
    (`CENTELLA_DIR/criteria/<id>.md`) of the incoming subtask and each conflicting
    subtask. Know what behavior each side intended before resolving anything.
 

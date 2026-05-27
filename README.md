@@ -55,56 +55,112 @@ read [`docs/DESIGN.md`](docs/DESIGN.md).
 ## Requirements
 
 - `claude` CLI on `PATH`, logged in interactively
-- Python 3.10+
+- `git`
 - A git repository with `user.email` and `user.name` configured
 - A reasonably clean working tree
 
-## Install and run
+**You don't need to install Python yourself.** Centella is a Python
+3.10+ program (hence the badge), but both install paths below
+provision a hermetic Python 3.12 via [`uv`](https://docs.astral.sh/uv/),
+so your system Python — or its absence — is irrelevant. The orchestrator
+itself remains stdlib-only.
+
+## Install
+
+One command. Pick the path that matches how you'll use Centella.
+
+### Inside Claude Code (recommended)
+
+```
+/plugin marketplace add enricai/centella
+/plugin install centella@enricai-centella
+```
+
+Then in any Claude Code session:
+
+```
+/centella Fix the login timeout bug and add a regression test
+```
+
+### From a terminal
 
 ```bash
-# Get Centella (no install step — runs directly from the checkout):
-git clone https://github.com/enricai/centella.git
+curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh | bash
 ```
+
+This installs `uv` (if missing), provisions Python 3.12, clones the repo
+into `~/.centella`, and symlinks `centella` into `~/.local/bin`. After
+it finishes:
+
+```bash
+centella "Fix the login timeout bug and add a regression test"
+```
+
+To inspect the installer before piping to bash:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh -o install.sh
+bash install.sh --dry-run            # print actions without executing
+bash install.sh                       # then run for real
+```
+
+Customize with `--prefix DIR` (default `~/.centella`), `--bin-dir DIR`
+(default `~/.local/bin`), or `--ref REF` (default `main`).
+
+### Manual (clone + run)
+
+If you'd rather not run any installer:
+
+```bash
+git clone https://github.com/enricai/centella.git
+centella "your task"
+```
+
+The launcher routes through `uv` when it's on `PATH`, otherwise falls
+back to your system `python3` (requires Python 3.10+).
+
+## Usage
 
 ```bash
 # From the root of the target git repository:
-/path/to/centella/centella "Fix the login timeout bug and add a regression test"
+centella "Fix the login timeout bug and add a regression test"
+# (substitute centella if you used the manual install)
 
 # Or pass a path to a .txt / .md file whose contents are the task —
 # useful for multi-paragraph briefs that are awkward to quote on the shell:
-/path/to/centella/centella path/to/task.md
+centella path/to/task.md
 
 # Resume an interrupted or budget-capped run. Auto-picks if exactly one
 # in-flight run exists; otherwise requires --run-id (see `--list`).
-/path/to/centella/centella --resume
-/path/to/centella/centella --resume --run-id fix-login-timeout-bug-b81e90
+centella --resume
+centella --resume --run-id fix-login-timeout-bug-b81e90
 
 # List in-flight and completed runs in this repository:
-/path/to/centella/centella --list
+centella --list
 
 # Skip the default push + PR at finalize (run completes with the run
 # branch local-only; your working branch is unchanged):
-/path/to/centella/centella "task" --no-push
+centella "task" --no-push
 
 # Skip pre-push hooks at finalize (the user's explicit override; defaults
 # off). Affects only the final `git push`; worker commits still run hooks.
-/path/to/centella/centella "task" --no-verify
+centella "task" --no-verify
 
 # Opt into intent questions (default: no questions are surfaced).
-/path/to/centella/centella "task" --clarify
+centella "task" --clarify
 
 # Pre-supply clarification answers (JSON object):
 # Keys are question ids from the classifier, plus "source_of_truth"
 # set to "codebase", "research", or "both".
-/path/to/centella/centella "task" --answers answers.json
+centella "task" --answers answers.json
 
 # Override caps (defaults: 40 total workers, 4 in parallel per wave):
-/path/to/centella/centella "task" --max-workers 60 --max-parallel 6
+centella "task" --max-workers 60 --max-parallel 6
 
 # Dial how persistent the planner and implementer are at building
 # confidence before they exit blocked (default 8 evidence-gate rounds
 # inside each worker; see DESIGN §8):
-/path/to/centella/centella "task" --confidence-rounds 12
+centella "task" --confidence-rounds 12
 export CENTELLA_CONFIDENCE_ROUNDS=12
 
 # Override the default source-of-truth preference (`both`) — pass
@@ -114,7 +170,7 @@ export CENTELLA_CONFIDENCE_ROUNDS=12
 # research / both).
 # Precedence (highest first): --source-of-truth > env > centella.toml.
 export CENTELLA_SOURCE_OF_TRUTH=codebase    # or: research, both
-/path/to/centella/centella "task" --source-of-truth codebase
+centella "task" --source-of-truth codebase
 
 # Choose the model. Without overrides, judgment workers (classifier /
 # planner / reconciler / integrator) default to opus and the acting
@@ -124,19 +180,17 @@ export CENTELLA_SOURCE_OF_TRUTH=codebase    # or: research, both
 # Set CENTELLA_MODEL=sonnet (or --model sonnet) to restore the
 # pre-0.3 all-sonnet behavior in one knob.
 export CENTELLA_MODEL=sonnet                # or: opus, haiku
-/path/to/centella/centella "task" --model opus
-/path/to/centella/centella "task" --model-implementer opus --model-classifier haiku
+centella "task" --model opus
+centella "task" --model-implementer opus --model-classifier haiku
 
 # Optional but recommended — lower the auto-compaction threshold
 # for worker processes (default is 95%):
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70
 ```
 
-Via the thin plugin skill from inside Claude Code:
+Inside Claude Code (after `/plugin install centella@enricai-centella`):
 
-```bash
-claude --plugin-dir /path/to/centella
-# then in the session:
+```
 /centella Fix the login timeout bug and add a regression test
 ```
 

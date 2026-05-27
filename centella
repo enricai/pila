@@ -1,7 +1,40 @@
 #!/usr/bin/env bash
 # centella — entry point for the Centella orchestrator.
-# Run from the root of the target git repository:
-#   /path/to/centella/centella "your task description"
-# Or symlink this file onto your PATH.
+# After install: `centella "your task description"` from any git repo.
+# Direct git-clone: `/path/to/centella/centella "your task description"`,
+# or symlink this file onto your PATH manually.
+#
+# Python is provisioned by `uv` (https://docs.astral.sh/uv/) when available —
+# the installer puts `uv` on your PATH, and `uv` manages a hermetic Python 3.12
+# under ~/.local/share/uv/python/. If `uv` is not installed, we fall back to
+# the system `python3` so direct git-clone users on Python 3.10+ still work.
 set -euo pipefail
-exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/orchestrator/centella.py" "$@"
+
+# Resolve symlinks (the curl|bash installer symlinks this script into
+# ~/.local/bin, but the orchestrator + prompts + scripts live alongside
+# the real launcher under $CENTELLA_HOME). Loop until we hit the real
+# file; readlink -f isn't portable to BSD/macOS, so do it by hand. The
+# iteration cap prevents an unbounded spin on a pathological symlink loop.
+SRC="${BASH_SOURCE[0]}"
+hops=0
+while [ -L "$SRC" ]; do
+  hops=$((hops + 1))
+  if [ "$hops" -gt 20 ]; then
+    echo "centella: refusing to resolve symlink chain deeper than 20 hops at $SRC" >&2
+    exit 1
+  fi
+  TARGET="$(readlink "$SRC")"
+  case "$TARGET" in
+    /*) SRC="$TARGET" ;;
+    *)  SRC="$(cd -P "$(dirname "$SRC")" && pwd)/$TARGET" ;;
+  esac
+done
+HERE="$(cd -P "$(dirname "$SRC")" && pwd)"
+SCRIPT="$HERE/orchestrator/centella.py"
+
+# Run `uv --version` (not just `command -v uv`) so a broken pyenv shim
+# or stale wrapper doesn't trap us in the uv branch.
+if uv --version >/dev/null 2>&1; then
+  exec uv run --quiet --python 3.12 --no-project python "$SCRIPT" "$@"
+fi
+exec python3 "$SCRIPT" "$@"

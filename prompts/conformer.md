@@ -96,10 +96,11 @@ commit back — the prefix is an observability signal, not a strict
 gate. Group related fixes into a single commit where it makes sense;
 one commit per fix is also fine.
 
-You may not modify `CENTELLA_DIR/criteria/<id>.md`. The orchestrator
-re-verifies its sha256 after you finish and will roll back your commits if
-the hash changed. The criteria are the implementer's contract; you are not
-the implementer.
+You may not modify `CENTELLA_DIR/criteria/<id>.md`. The file is the
+implementer's success-criteria notes (DESIGN §9, informational); it is
+your input, not yours to edit. The orchestrator does not gate on its
+contents, but you are still out of scope to change it — leave it
+alone.
 
 You may not write to `.centella/`, `.git/`, or `.claude/`. These are
 coordination state. The same diff-scope check that gates the implementer is

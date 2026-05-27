@@ -11,8 +11,12 @@ document never restates either.
 
 ## Prerequisites recap
 
-You need the `claude` CLI on `PATH` (logged in), Python 3.10+, and a git
-repo with `user.email` and `user.name` set and a clean working tree. See
+You need the `claude` CLI on `PATH` (logged in), `git`, and a git repo
+with `user.email` and `user.name` set and a clean working tree. Python
+is *not* a prerequisite — the install paths provision Python 3.12
+hermetically via `uv`. See
+[README "Install"](../README.md#install) for the one-command install
+(Claude Code marketplace or `curl | bash`), and
 [README "Requirements"](../README.md#requirements) for the full list.
 
 ## The example task
@@ -34,16 +38,16 @@ From the root of the target repository:
 
 ```bash
 export CENTELLA_SOURCE_OF_TRUTH=codebase
-/path/to/centella/centella "Add a --dry-run flag to the CLI that prints the plan without executing it, plus a regression test"
+centella "Add a --dry-run flag to the CLI that prints the plan without executing it, plus a regression test"
 
 # Equivalent one-off invocation without the env var:
-/path/to/centella/centella --source-of-truth codebase "Add a --dry-run flag …"
+centella --source-of-truth codebase "Add a --dry-run flag …"
 
 # Same idea for the model — judgment workers default to `opus` and the
 # acting workers (implementer, conformer) default to `sonnet`; `--model
 # <alias>` sets every worker. Per-worker overrides exist
 # (e.g. --model-implementer opus).
-/path/to/centella/centella --model opus "Add a --dry-run flag …"
+centella --model opus "Add a --dry-run flag …"
 ```
 
 Setting `CENTELLA_SOURCE_OF_TRUTH=codebase` up front pins the

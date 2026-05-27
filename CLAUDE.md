@@ -6,10 +6,15 @@ code surface; read this file first.
 
 ## Tech stack
 
-Python 3.10+, no runtime dependencies. Orchestrator shells out to
-`claude -p` (Claude Code CLI, on the user's subscription — no API key).
-Uses git worktrees for parallel implementer isolation. `pytest` is the
-only dev dependency.
+Python 3.10+, stdlib-only orchestrator. Both install paths route the
+`centella` launcher through [`uv`](https://docs.astral.sh/uv/), which
+provisions a hermetic Python 3.12 — the user is never asked to install
+Python themselves. The launcher falls back to system `python3` for
+direct-git-clone users on Python 3.10+. The orchestrator shells out to
+`claude -p` (Claude Code CLI, on the user's subscription — no API key),
+and uses git worktrees for parallel implementer isolation. `pytest` is
+the only dev dependency. See `docs/IMPLEMENTATION.md` §0 for the install
+surface.
 
 Centella is small (~1600 LOC) and stays small. All control flow lives in
 one file: `orchestrator/centella.py`.
@@ -128,6 +133,12 @@ tests/                      pytest suite
 ## Quick start
 
 ```bash
+# Install (one command — pick one):
+#   Inside Claude Code:  /plugin marketplace add enricai/centella
+#                        /plugin install centella@enricai-centella
+#   From a terminal:     curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh | bash
+# See README "Install" for details.
+
 # Run on a task in the current git repo:
 ./centella "Fix the login timeout bug and add a regression test"
 

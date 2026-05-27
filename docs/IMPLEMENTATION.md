@@ -12,12 +12,107 @@
 
 ---
 
+## 0. Install surface
+
+Centella ships two install paths. Both ultimately invoke the on-disk
+`centella` launcher; the difference is who put it there and how the
+user reaches it.
+
+### Files
+
+| Path | Purpose |
+|------|---------|
+| `.claude-plugin/marketplace.json` | Single-plugin marketplace manifest. Makes the repo itself discoverable via `/plugin marketplace add enricai/centella` from inside Claude Code. Points at `.` so Claude Code reads the sibling `.claude-plugin/plugin.json`. |
+| `.claude-plugin/plugin.json` | Existing plugin manifest (commands, skills, metadata). The `version` field is the single source of truth for `centella --version`. |
+| `scripts/install.sh` | The `curl \| bash` shell installer. Preflight → bootstrap `uv` → provision Python 3.12 → clone → symlink → verify. Self-contained bash; deps: `bash`, `curl`, `git`. |
+| `centella` (launcher) | Routes through `uv run --python 3.12 --no-project python orchestrator/centella.py "$@"` when `uv` is on `PATH`; falls back to `python3` when not. The fallback preserves backward compatibility for direct git-clone users. |
+
+### Python runtime — provisioned by `uv`
+
+Centella requires Python 3.10+. Both install paths satisfy that requirement
+*for the user* by routing the launcher through [`uv`](https://docs.astral.sh/uv/),
+Astral's Rust-written Python toolchain. `uv` downloads and pins a managed
+3.12 interpreter under `~/.local/share/uv/python/`. The user's system
+Python (or its absence) is irrelevant.
+
+The orchestrator itself remains stdlib-only — no `pip install`, no
+`pyproject.toml`, no PyPI release. `uv` is purely a *launcher* concern
+that solves "is the right Python available." `pytest` is still the only
+dev dependency.
+
+### Path A — Claude Code plugin marketplace (primary)
+
+```
+/plugin marketplace add enricai/centella
+/plugin install centella@enricai-centella
+# then inside Claude Code:
+/centella "task description"
+```
+
+`marketplace.json` exposes one plugin (the existing `plugin.json`).
+Claude Code clones the repo into its plugin directory and registers the
+`commands/` and `skills/` entries. `/centella` then runs the plugin
+skill at `commands/centella.md`, which shells out to the on-disk
+`centella` launcher in the cloned plugin directory — and through it,
+to `uv` and the managed Python.
+
+### Path B — `curl | bash` installer (secondary)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh | bash
+```
+
+The script:
+
+1. **Preflight**: verifies `git` and `claude` are on `PATH`. Does *not*
+   check Python — `uv` handles that. Missing deps print a
+   platform-specific remediation hint and the script exits non-zero.
+2. **Installs `uv` if missing**, via Astral's official installer
+   (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Statically
+   linked binary; no Python required to bootstrap. Prints what it is
+   about to do first.
+3. **Provisions Python 3.12** via `uv python install 3.12` so the
+   first `centella` invocation does not pay the download cost.
+4. **Clones** `enricai/centella` to `$CENTELLA_HOME` (default
+   `~/.centella`). `git clone --depth 1` for fresh installs; `git pull
+   --ff-only` for upgrades.
+5. **Symlinks** `$CENTELLA_HOME/centella` → `~/.local/bin/centella`.
+   Creates `~/.local/bin` if missing. Does not touch system directories.
+6. **PATH check**: if `~/.local/bin` is not in `$PATH`, prints (does
+   not silently edit) the exact shell-rc line to add, based on `$SHELL`.
+7. **Verifies** by invoking `centella --version`. A green exit proves
+   the full chain works: launcher → uv → managed Python → orchestrator.
+
+Supports `--dry-run` (prints actions without executing) and
+`--prefix DIR` (overrides `CENTELLA_HOME`).
+
+### `--version`
+
+`centella --version` reads `.claude-plugin/plugin.json`'s `version`
+field via stdlib `json` and prints it to stdout. Single source of truth —
+no `__version__` constant in the orchestrator. Used by `install.sh` as
+its end-to-end smoke test.
+
+### Backward compatibility
+
+The launcher's `python3` fallback means existing direct-git-clone users
+who already have Python 3.10+ on `PATH` and never run `install.sh`
+continue to work unchanged. The `uv` path is the new default for users
+on either of the two install paths; the fallback is the escape hatch.
+
+Maps to `DESIGN.md`: §2 (no plugin-spawned subagents — the launcher is
+plain process exec, not in-session orchestration).
+
+---
+
 ## 1. Repository layout
 
 ```
 centella/
 ├── .claude-plugin/plugin.json     plugin manifest
-├── centella                        executable entry-point wrapper (chmod +x)
+├── .claude-plugin/marketplace.json single-plugin marketplace manifest (Claude Code `/plugin marketplace add` entry point)
+├── centella                        executable entry-point wrapper (chmod +x);
+│                                   routes through `uv` with python3 fallback
 ├── orchestrator/centella.py        the orchestrator — all control flow (chmod +x)
 ├── prompts/
 │   ├── classifier.md              Phase 1 worker system prompt
@@ -34,7 +129,8 @@ centella/
 │   ├── new-worktree.sh            create/reuse a per-subtask worktree (per-run scoped)
 │   ├── integrate.sh               merge a subtask branch into the per-run branch
 │   ├── finalize.sh                verify the run branch exists and is non-empty; ready for push
-│   └── cleanup.sh                 remove worktrees / branches (default: scoped to one run)
+│   ├── cleanup.sh                 remove worktrees / branches (default: scoped to one run)
+│   └── install.sh                 one-command installer (curl | bash); bootstraps uv + clones + symlinks
 ├── commands/centella.md            thin plugin skill — launches the orchestrator
 ├── skills/
 │   ├── judge-llm-batch/SKILL.md  post-run judge skill — scores a batch of captured
@@ -57,46 +153,46 @@ Maps to `DESIGN.md`: §3 (architecture / phases), §2 (why a program, not a skil
 
 ```bash
 # From the root of the target git repository:
-/path/to/centella/centella "Fix the login timeout bug and add a regression test"
+centella "Fix the login timeout bug and add a regression test"
 
 # Or pass a path to a .txt / .md file whose contents are the task — useful
 # for multi-paragraph briefs that are awkward to quote on the shell:
-/path/to/centella/centella path/to/task.md
+centella path/to/task.md
 
 # Resume an interrupted run. Auto-picks if exactly one in-flight run exists;
 # requires --run-id otherwise (see `centella --list` to enumerate).
-/path/to/centella/centella --resume
-/path/to/centella/centella --resume --run-id fix-login-timeout-bug-b81e90
+centella --resume
+centella --resume --run-id fix-login-timeout-bug-b81e90
 
 # List in-flight and completed runs in this repository:
-/path/to/centella/centella --list
+centella --list
 
 # Skip the default push + PR at finalize (run completes with the run branch
 # local-only; the working branch is unchanged):
-/path/to/centella/centella "task" --no-push
+centella "task" --no-push
 export CENTELLA_NO_PUSH=1
 
 # Skip pre-push hooks at finalize (the user's explicit override; defaults off).
 # Affects only the final `git push`; worker `git commit` operations inside
 # worktrees continue to run all hooks normally.
-/path/to/centella/centella "task" --no-verify
+centella "task" --no-verify
 
 # Opt into clarification (DESIGN §11). Without --clarify (the default),
 # the classifier's intent questions are filtered and dropped — the
 # implementer makes a best-effort decision documented in its notes.
 # Pass --clarify to surface the surviving questions to the user
 # (interactively if a TTY, otherwise via pending-questions.json).
-/path/to/centella/centella "task" --clarify
+centella "task" --clarify
 
 # Pre-supply clarification answers:
-/path/to/centella/centella "task" --answers answers.json
+centella "task" --answers answers.json
 
 # Override caps:
-/path/to/centella/centella "task" --max-workers 60 --max-parallel 6
+centella "task" --max-workers 60 --max-parallel 6
 
 # Dial how persistent workers are at building confidence before they exit
 # blocked (default: 8 rounds inside each planner / implementer):
-/path/to/centella/centella "task" --confidence-rounds 12
+centella "task" --confidence-rounds 12
 export CENTELLA_CONFIDENCE_ROUNDS=12
 
 # Verbosity controls how much per-worker activity surfaces inline.
@@ -104,18 +200,18 @@ export CENTELLA_CONFIDENCE_ROUNDS=12
 # centella's pre-streaming terse output; -qq is fully quiet (errors
 # still emit). -vv adds raw payloads. Per-worker .centella/logs/<sid>.log
 # files are always written regardless of level.
-/path/to/centella/centella "task"        # default: stream
-/path/to/centella/centella "task" -q      # normal (pre-streaming)
-/path/to/centella/centella "task" -qq     # quiet (errors only)
-/path/to/centella/centella "task" -vv     # debug
-/path/to/centella/centella "task" --verbosity normal
+centella "task"        # default: stream
+centella "task" -q      # normal (pre-streaming)
+centella "task" -qq     # quiet (errors only)
+centella "task" -vv     # debug
+centella "task" --verbosity normal
 export CENTELLA_VERBOSITY=stream
 
 # Override the default source-of-truth preference (`both`). CLI flag and
 # env var are session-scoped overrides; commit `source_of_truth = ...` in
 # centella.toml for a per-repo default.
 export CENTELLA_SOURCE_OF_TRUTH=codebase    # or: research, both
-/path/to/centella/centella "task" --source-of-truth codebase
+centella "task" --source-of-truth codebase
 
 # Choose the model. Without overrides: judgment workers (classifier,
 # planner, reconciler, integrator) default to opus; acting workers
@@ -124,27 +220,27 @@ export CENTELLA_SOURCE_OF_TRUTH=codebase    # or: research, both
 # for the committed repo default. Per-worker overrides also exist —
 # see §2.
 export CENTELLA_MODEL=sonnet                # or: opus, haiku
-/path/to/centella/centella "task" --model opus
-/path/to/centella/centella "task" --model-implementer opus --model-classifier haiku
+centella "task" --model opus
+centella "task" --model-implementer opus --model-classifier haiku
 
 # Telemetry: on by default; disable with --no-telemetry or env var:
-/path/to/centella/centella "task" --no-telemetry
+centella "task" --no-telemetry
 export CENTELLA_TELEMETRY=0
 # Override output subdirectory (default: <run-dir>/events/):
-/path/to/centella/centella "task" --telemetry-dir my-events
+centella "task" --telemetry-dir my-events
 export CENTELLA_TELEMETRY_DIR=my-events
 # Override judge/heal output subdirectories:
-/path/to/centella/centella "task" --judge-dir my-judge --heal-dir my-heal
+centella "task" --judge-dir my-judge --heal-dir my-heal
 export CENTELLA_JUDGE_DIR=my-judge
 export CENTELLA_HEAL_DIR=my-heal
 
 # Judge and heal model overrides (default: sonnet for throughput):
-/path/to/centella/centella "task" --judge-model opus --heal-model opus
+centella "task" --judge-model opus --heal-model opus
 export CENTELLA_MODEL_JUDGE=sonnet
 export CENTELLA_MODEL_HEAL=sonnet
 
 # Heal-loop convergence knobs (defaults shown):
-/path/to/centella/centella "task" --heal-max-rounds 10 --heal-success-threshold 0.9
+centella "task" --heal-max-rounds 10 --heal-success-threshold 0.9
 export CENTELLA_HEAL_MAX_ROUNDS=10
 export CENTELLA_HEAL_SUCCESS_THRESHOLD=0.9
 
@@ -154,10 +250,10 @@ export CENTELLA_HEAL_SUCCESS_THRESHOLD=0.9
 # --phase heal: read the judge index for failing call_types and run the
 #   self-heal loop for each; if no judge index exists yet, runs judge first.
 # Use --run-id to select a run when multiple exist; auto-picks when only one.
-/path/to/centella/centella --phase judge --run-id fix-login-timeout-bug-b81e90
-/path/to/centella/centella --phase heal  --run-id fix-login-timeout-bug-b81e90
+centella --phase judge --run-id fix-login-timeout-bug-b81e90
+centella --phase heal  --run-id fix-login-timeout-bug-b81e90
 # Combine with heal-loop knobs:
-/path/to/centella/centella --phase heal --heal-max-rounds 5 --heal-success-threshold 0.8
+centella --phase heal --heal-max-rounds 5 --heal-success-threshold 0.8
 
 # Recommended backstop for worker auto-compaction
 # (Claude Code CLI variable — not consumed by centella itself):
@@ -165,13 +261,16 @@ export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70
 ```
 
 Requirements: the `claude` CLI on `PATH` and logged in interactively (no API
-key — subscription auth); Python 3.10+; a git repository with `user.email` and
-`user.name` configured.
+key — subscription auth); `git`; a git repository with `user.email` and
+`user.name` configured. Python is provisioned by `uv` from either install
+path (see §0); the launcher falls back to system `python3` (Python 3.10+)
+for direct-git-clone users.
 
-Via the plugin skill, from inside Claude Code:
+Via the plugin skill, from inside Claude Code (after
+`/plugin marketplace add enricai/centella` and
+`/plugin install centella@enricai-centella` — see §0):
 
 ```
-claude --plugin-dir /path/to/centella
 /centella <task>
 ```
 

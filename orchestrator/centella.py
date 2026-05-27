@@ -39,6 +39,16 @@ ROOT = Path(__file__).resolve().parent.parent       # centella plugin/repo root
 PROMPTS = ROOT / "prompts"
 SCRIPTS = ROOT / "scripts"
 
+
+def _read_version() -> str:
+    """Single source of truth: `.claude-plugin/plugin.json`'s `version`
+    field. Read at --version time, not at import time, so a missing /
+    malformed manifest produces a clear runtime error rather than
+    blocking the orchestrator from importing."""
+    return json.loads(
+        (ROOT / ".claude-plugin" / "plugin.json").read_text()
+    )["version"]
+
 # `{{include: _foo.md}}` placeholder pattern used by load_prompt() to embed
 # a shared prompt fragment into a worker prompt. Only files prefixed with
 # `_` are eligible — that prefix marks an internal include, never a
@@ -4409,11 +4419,10 @@ def _retryable_failure(reason: str) -> bool:
 # `settle_subtask` returns. The phase is advisory: nothing it does or fails
 # to do can produce a `failed` / `blocked` subtask status. The code-enforced
 # guarantees are narrow — rule-file discovery is deterministic, the worker's
-# output is schema-validated, the criteria lock is re-verified after any
-# conformer commits, and the same diff-scope check that gates the implementer
-# is re-applied to the conformer's commits. Everything else (which rule was
-# violated, whether build/lint/tests passed, whether docs are actually
-# stale) is the worker's judgment, surfaced as warnings.
+# output is schema-validated, and the same diff-scope check that gates the
+# implementer is re-applied to the conformer's commits. Everything else
+# (which rule was violated, whether build/lint/tests passed, whether docs
+# are actually stale) is the worker's judgment, surfaced as warnings.
 
 # Fixed, capped allowlist of rule-file paths the discovery function checks.
 # Order is the priority order the conformer reads in. Adding to this list
@@ -4550,9 +4559,9 @@ async def _branch_head_sha(worktree: str) -> str:
 
 async def rollback_conformer_commits(worktree: str, before_sha: str) -> None:
     """Hard-reset the subtask branch back to `before_sha`. Used when the
-    conformer wrote to a protected path or modified the criteria file —
-    the implementer's commits are preserved, the conformer's are dropped.
-    Safe to call when no new commits were made: it's a no-op reset.
+    conformer wrote to a protected path — the implementer's commits
+    are preserved, the conformer's are dropped. Safe to call when no
+    new commits were made: it's a no-op reset.
 
     Note: `git reset --hard` also discards uncommitted changes. Callers
     that want to warn about discarded scribbles should call
@@ -5340,6 +5349,9 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
 def main() -> None:
     ap = argparse.ArgumentParser(prog="centella", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version",
+                    version=f"centella {_read_version()}",
+                    help="print the centella version and exit")
     ap.add_argument("task", nargs="?",
                     help="the task to execute (literal string, or path to "
                          "a .txt/.md file whose contents are the task)")

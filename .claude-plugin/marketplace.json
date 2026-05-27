@@ -1,0 +1,16 @@
+{
+  "name": "enricai-centella",
+  "owner": {
+    "name": "Andres Restrepo",
+    "email": "andres@enricai.com",
+    "url": "https://enricai.com"
+  },
+  "plugins": [
+    {
+      "name": "centella",
+      "source": ".",
+      "version": "0.2.0",
+      "description": "Deterministic, headless task orchestrator for Claude Code. Classifies a task, decomposes it into dependency-ordered waves, and executes each subtask in an isolated git worktree under an evidence-gated implement/validate loop. Runs entirely on the Claude Code CLI/subscription via `claude -p` workers."
+    }
+  ]
+}
