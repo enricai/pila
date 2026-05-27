@@ -5245,6 +5245,18 @@ def main() -> None:
                     help=f"subdirectory name under the run dir for LLM self-heal "
                          f"output (default '{HEAL_DIR_DEFAULT}'); also "
                          f"{HEAL_DIR_ENV} or heal_dir in centella.toml")
+    ap.add_argument("--phase", choices=["judge", "heal"], metavar="PHASE",
+                    help="run a post-run skill phase against an existing run's "
+                         "captured LLM calls instead of starting a new run. "
+                         "PHASE must be 'judge' or 'heal'. Requires an existing "
+                         "run (use --run-id to select one when multiple runs "
+                         "exist, or omit when exactly one run is in flight). "
+                         "'judge' scores every captured call in calls.ndjson "
+                         "using the 3-dimensional LLM judge rubric and writes "
+                         "verdict files to <run-dir>/<judge-dir>/. "
+                         "'heal' reads the judge index for failing call_types "
+                         "and runs the self-heal loop for each, writing healing "
+                         "reports to <run-dir>/<heal-dir>/.")
     args = ap.parse_args()
 
     # --list short-circuits everything else: read .centella/runs/* and
@@ -5347,6 +5359,73 @@ def main() -> None:
         repo_root, getattr(args, "heal_max_rounds", None))
     args.heal_success_threshold = resolve_heal_success_threshold(
         repo_root, getattr(args, "heal_success_threshold", None))
+
+    # --phase judge|heal: post-run skill phases. Short-circuit the normal
+    # orchestrate() flow — just pick an existing run and run the skill.
+    if args.phase:
+        phase_run_id = resolve_run_id(centella_root, args.run_id)
+        phase_st = State(centella_root, phase_run_id)
+        if not phase_st.load():
+            die(f"no state.json found for run {phase_run_id!r}; "
+                f"the run may not have reached the execute phase yet")
+        phase_run_dir = phase_st.run_dir
+        judge_out_dir = phase_run_dir / args.judge_dir
+        heal_out_dir = phase_run_dir / args.heal_dir
+        if args.phase == "judge":
+            asyncio.run(phase_judge(phase_run_dir, judge_out_dir, caps,
+                                    phase_st, models))
+        else:  # heal
+            # Read judge INDEX.json to find failing call_types; if no index
+            # exists yet, run phase_judge first so heal has verdicts to
+            # act on.
+            index_path = judge_out_dir / "INDEX.json"
+            if not index_path.exists():
+                log("--phase heal: no judge INDEX.json found; running judge first")
+                asyncio.run(phase_judge(phase_run_dir, judge_out_dir, caps,
+                                        phase_st, models))
+            if index_path.exists():
+                try:
+                    index = json.loads(index_path.read_text())
+                except (OSError, ValueError) as e:
+                    die(f"--phase heal: could not read {index_path}: {e}")
+            else:
+                index = []
+            # Collect failing call_ids grouped by call_type.
+            failing_by_type: dict[str, list[str]] = {}
+            for entry in index:
+                if not entry.get("passed", True):
+                    ct = entry.get("call_type", "unknown")
+                    failing_by_type.setdefault(ct, []).append(
+                        entry.get("call_id", ""))
+            if not failing_by_type:
+                log("--phase heal: no failing captures in judge index; nothing to heal")
+                return
+            # Load the original capture records from calls.ndjson.
+            capture_path = phase_run_dir / "calls.ndjson"
+            all_captures: dict[str, dict] = {}
+            if capture_path.exists():
+                for line in capture_path.read_text().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        all_captures[rec.get("call_id", "")] = rec
+                    except (ValueError, AttributeError):
+                        pass
+            for call_type, failing_ids in sorted(failing_by_type.items()):
+                failing_records = [all_captures[cid] for cid in failing_ids
+                                   if cid in all_captures]
+                if not failing_records:
+                    log(f"--phase heal: {call_type}: no capture records found; skipping")
+                    continue
+                config = {
+                    "max_iterations": args.heal_max_rounds,
+                    "success_threshold": args.heal_success_threshold,
+                }
+                asyncio.run(phase_heal(call_type, failing_records, heal_out_dir,
+                                       caps, phase_st, models, config=config))
+        return
 
     # Signal handlers (DESIGN §6 / DESIGN §14): SIGTERM and SIGHUP raise
     # InterruptedBySignal so the same try/except machinery that catches
