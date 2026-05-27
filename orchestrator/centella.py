@@ -30,6 +30,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -199,11 +201,61 @@ MODEL_DEFAULT = "opus"
 # different default from MODEL_DEFAULT appear here.
 MODEL_DEFAULT_PER_WORKER = {
     "implementer": "sonnet",
+    "judge": "sonnet",
+    "heal": "sonnet",
 }
 MODEL_ENV = "CENTELLA_MODEL"
 MODEL_FILE = "centella.toml"
 WORKER_TYPES = ("classifier", "planner", "reconciler", "implementer",
                 "integrator", "validator")
+# Post-run skill workers — not in WORKER_TYPES because they don't run inside
+# the main orchestrate loop, but they do get dedicated model resolution via
+# --judge-model / --heal-model (and their env / TOML mirrors).
+MODEL_JUDGE_ENV = "CENTELLA_MODEL_JUDGE"
+MODEL_HEAL_ENV = "CENTELLA_MODEL_HEAL"
+
+# Telemetry enabled/disabled — see IMPLEMENTATION.md §2 "Telemetry".
+# Resolution order: --telemetry/--no-telemetry CLI → CENTELLA_TELEMETRY env →
+# telemetry in centella.toml → True (on by default). NDJSON events land in
+# <run-dir>/<telemetry_subdir>/ which is already under .centella/ and thus
+# covered by the existing .gitignore exclusion.
+TELEMETRY_DEFAULT = True
+TELEMETRY_ENV = "CENTELLA_TELEMETRY"
+TELEMETRY_FILE = "centella.toml"
+
+# Telemetry event subdir — the directory name appended to <run-dir> where
+# NDJSON event files are written. Resolution order: --telemetry-dir CLI →
+# CENTELLA_TELEMETRY_DIR env → telemetry_dir in centella.toml → "events".
+TELEMETRY_SUBDIR_DEFAULT = "events"
+TELEMETRY_SUBDIR_ENV = "CENTELLA_TELEMETRY_DIR"
+TELEMETRY_SUBDIR_FILE = "centella.toml"
+
+# Judge output directory name — relative to <run-dir>. Holds LLM judge
+# output files. Resolution order: --judge-dir CLI → CENTELLA_JUDGE_DIR env →
+# judge_dir in centella.toml → "judge-out".
+JUDGE_DIR_DEFAULT = "judge-out"
+JUDGE_DIR_ENV = "CENTELLA_JUDGE_DIR"
+JUDGE_DIR_FILE = "centella.toml"
+
+# Heal output directory name — relative to <run-dir>. Holds LLM self-heal
+# loop output files. Resolution order: --heal-dir CLI → CENTELLA_HEAL_DIR env →
+# heal_dir in centella.toml → "heal-out".
+HEAL_DIR_DEFAULT = "heal-out"
+HEAL_DIR_ENV = "CENTELLA_HEAL_DIR"
+HEAL_DIR_FILE = "centella.toml"
+
+# Heal-loop convergence knobs — see IMPLEMENTATION.md §2 "Heal-loop convergence
+# parameters". User-tunable knobs use the standard CLI/env/TOML/default
+# resolution; non-user-tunable constants (window, delta, n) are fixed here.
+HEAL_MAX_ROUNDS_DEFAULT = 10        # max iterations per call_type
+HEAL_SUCCESS_THRESHOLD_DEFAULT = 0.9  # pass-rate bar for SUCCESS verdict
+HEAL_PLATEAU_WINDOW_DEFAULT = 3     # look-back window for plateau detection
+HEAL_PLATEAU_DELTA_DEFAULT = 0.03   # minimum improvement to avoid plateau
+HEAL_N_REPLAYS_DEFAULT = 5          # replays per sample per iteration
+HEAL_MAX_ROUNDS_ENV = "CENTELLA_HEAL_MAX_ROUNDS"
+HEAL_SUCCESS_THRESHOLD_ENV = "CENTELLA_HEAL_SUCCESS_THRESHOLD"
+HEAL_MAX_ROUNDS_FILE = "centella.toml"
+HEAL_SUCCESS_THRESHOLD_FILE = "centella.toml"
 
 
 def _source_of_truth_hint() -> str:
@@ -225,6 +277,34 @@ VALIDATOR_SYSTEM = (
     "each subtask, its id, whether all its criteria were met, and a list of "
     "any failing criteria with the reason each failed."
 )
+
+# Stable location hint for the validator's embedded constant — referenced by
+# resolve_prompt() so the heal loop can describe a patch in anchor-replacement
+# form without special-casing the constant/file asymmetry.
+_VALIDATOR_LOCATION_HINT = "orchestrator/centella.py:VALIDATOR_SYSTEM"
+
+
+def resolve_prompt(call_type: str) -> tuple[str, str, str]:
+    """Return (source_kind, content, location_hint) for a worker call_type.
+
+    source_kind is 'file' for the five file-backed workers and 'constant'
+    for the validator. location_hint is a stable pointer the heal loop uses
+    to describe where to apply a patch — either a relative path like
+    'prompts/classifier.md' or the literal
+    'orchestrator/centella.py:VALIDATOR_SYSTEM'.
+
+    Raises ValueError for an unknown call_type.
+    """
+    if call_type not in WORKER_TYPES:
+        raise ValueError(
+            f"unknown call_type {call_type!r}; valid types: {WORKER_TYPES}"
+        )
+    if call_type == "validator":
+        return ("constant", VALIDATOR_SYSTEM, _VALIDATOR_LOCATION_HINT)
+    hint = f"prompts/{call_type}.md"
+    content = (PROMPTS / f"{call_type}.md").read_text()
+    return ("file", content, hint)
+
 
 # --- worker output schemas -----------------------------------------------
 # Passed to `claude -p` via --json-schema. The CLI validates the worker's
@@ -531,6 +611,46 @@ SCHEMAS: dict[str, dict] = {
                     },
                 },
             },
+        },
+    },
+    "judge": {
+        # Output of a judge worker invocation. Three dimensions mirror the
+        # beacon scorer rubric but as an LLM judgment (not a hard-coded rule):
+        # schema adherence, factual accuracy, hallucination-freeness. The
+        # `passed` field is the aggregate verdict; the caller decides what
+        # to do with a failing verdict (log, heal, or both).
+        "type": "object",
+        "required": ["passed", "dimensions", "rationale", "suggested_fixes"],
+        "properties": {
+            "passed": {"type": "boolean"},
+            "dimensions": {
+                "type": "object",
+                "required": ["schema_ok", "factual_ok", "hallucination_ok"],
+                "properties": {
+                    "schema_ok": {"type": "boolean"},
+                    "factual_ok": {"type": "boolean"},
+                    "hallucination_ok": {"type": "boolean"},
+                },
+            },
+            "rationale": {"type": "string"},
+            "suggested_fixes": {"type": "array", "items": {"type": "string"}},
+        },
+    },
+    "patch_generator": {
+        # Output of the patch-generator worker. The worker proposes a
+        # minimal edit to the system prompt that addresses the observed
+        # failure mode. `anchor` and `replacement` are the only required
+        # fields; the heal loop validates that `anchor` is a literal
+        # substring of the current prompt body before applying the patch
+        # (per the prompts-are-advisory-code-enforces principle — the
+        # check is in request_patch, not in the prompt).
+        "type": "object",
+        "required": ["anchor", "replacement"],
+        "properties": {
+            "anchor": {"type": "string"},
+            "replacement": {"type": "string"},
+            "strategy": {"type": "string"},
+            "pivot_reason": {"type": ["string", "null"]},
         },
     },
 }
@@ -1384,7 +1504,170 @@ def resolve_models(repo_root: Path, args) -> dict[str, str]:
         per_worker_default = MODEL_DEFAULT_PER_WORKER.get(worker, MODEL_DEFAULT)
         models[worker] = (per_cli or global_cli or per_env or global_env
                           or per_file or global_file or per_worker_default)
+    # Judge and heal use dedicated flags (--judge-model / --heal-model) and
+    # dedicated env vars (CENTELLA_MODEL_JUDGE / CENTELLA_MODEL_HEAL) rather
+    # than the --model-<W> pattern — they're post-run skill workers that don't
+    # participate in the --model global-default resolution path. They still
+    # fall back to the global override so `--model sonnet` applies everywhere.
+    judge_cli = getattr(args, "judge_model", None)
+    judge_env = from_env(MODEL_JUDGE_ENV)
+    judge_file = from_file("model_judge")
+    models["judge"] = (judge_cli or judge_env or global_cli or global_env
+                       or judge_file or global_file
+                       or MODEL_DEFAULT_PER_WORKER.get("judge", MODEL_DEFAULT))
+    heal_cli = getattr(args, "heal_model", None)
+    heal_env = from_env(MODEL_HEAL_ENV)
+    heal_file = from_file("model_heal")
+    models["heal"] = (heal_cli or heal_env or global_cli or global_env
+                      or heal_file or global_file
+                      or MODEL_DEFAULT_PER_WORKER.get("heal", MODEL_DEFAULT))
     return models
+
+
+def resolve_telemetry_enabled(repo_root: Path,
+                              cli_value: bool | None = None) -> bool:
+    """Resolve the telemetry enabled/disabled preference. Order:
+    --telemetry/--no-telemetry CLI flag → CENTELLA_TELEMETRY env var →
+    telemetry in centella.toml → TELEMETRY_DEFAULT (True). cli_value is
+    True when --telemetry was passed, False when --no-telemetry was passed,
+    None when neither was passed (argparse store_true/store_false pair with
+    default None). env and file values are rejected via die() if not parseable
+    as a boolean — a bad config is caught at startup."""
+    if cli_value is not None:
+        return cli_value
+    env = os.environ.get(TELEMETRY_ENV, "").strip()
+    if env:
+        try:
+            parsed = _parse_bool_envtoml(env)
+        except ValueError:
+            die(f"{TELEMETRY_ENV}={env!r} is not a boolean "
+                "(use 1/0, true/false, yes/no, on/off)")
+        if parsed is not None:
+            return parsed
+    cfg = repo_root / TELEMETRY_FILE
+    file_val = _read_toml_key(cfg, "telemetry")
+    if file_val is not None:
+        try:
+            parsed = _parse_bool_envtoml(file_val)
+        except ValueError:
+            die(f"{cfg}: telemetry={file_val!r} is not a boolean")
+        if parsed is not None:
+            return parsed
+    return TELEMETRY_DEFAULT
+
+
+def resolve_telemetry_subdir(repo_root: Path,
+                             cli_value: str | None = None) -> str:
+    """Resolve the telemetry event subdirectory name. Order:
+    --telemetry-dir CLI flag → CENTELLA_TELEMETRY_DIR env var →
+    telemetry_dir in centella.toml → TELEMETRY_SUBDIR_DEFAULT ("events").
+    The value is a plain directory name (or relative path) appended to
+    the run dir — not validated against the filesystem at resolve time."""
+    if cli_value and cli_value.strip():
+        return cli_value.strip()
+    env = os.environ.get(TELEMETRY_SUBDIR_ENV, "").strip()
+    if env:
+        return env
+    cfg = repo_root / TELEMETRY_SUBDIR_FILE
+    file_val = _read_toml_key(cfg, "telemetry_dir")
+    if file_val is not None and file_val.strip():
+        return file_val.strip()
+    return TELEMETRY_SUBDIR_DEFAULT
+
+
+def resolve_judge_dir(repo_root: Path, cli_value: str | None = None) -> str:
+    """Resolve the judge output directory name. Order:
+    --judge-dir CLI flag → CENTELLA_JUDGE_DIR env var →
+    judge_dir in centella.toml → JUDGE_DIR_DEFAULT ("judge-out").
+    The value is a plain directory name (or relative path) appended to
+    the run dir — not validated against the filesystem at resolve time."""
+    if cli_value and cli_value.strip():
+        return cli_value.strip()
+    env = os.environ.get(JUDGE_DIR_ENV, "").strip()
+    if env:
+        return env
+    cfg = repo_root / JUDGE_DIR_FILE
+    file_val = _read_toml_key(cfg, "judge_dir")
+    if file_val is not None and file_val.strip():
+        return file_val.strip()
+    return JUDGE_DIR_DEFAULT
+
+
+def resolve_heal_dir(repo_root: Path, cli_value: str | None = None) -> str:
+    """Resolve the heal output directory name. Order:
+    --heal-dir CLI flag → CENTELLA_HEAL_DIR env var →
+    heal_dir in centella.toml → HEAL_DIR_DEFAULT ("heal-out").
+    The value is a plain directory name (or relative path) appended to
+    the run dir — not validated against the filesystem at resolve time."""
+    if cli_value and cli_value.strip():
+        return cli_value.strip()
+    env = os.environ.get(HEAL_DIR_ENV, "").strip()
+    if env:
+        return env
+    cfg = repo_root / HEAL_DIR_FILE
+    file_val = _read_toml_key(cfg, "heal_dir")
+    if file_val is not None and file_val.strip():
+        return file_val.strip()
+    return HEAL_DIR_DEFAULT
+
+
+def resolve_heal_max_rounds(repo_root: Path, cli_value: int | None = None) -> int:
+    """Resolve the heal-loop max-iterations cap. Order:
+    --heal-max-rounds CLI flag → CENTELLA_HEAL_MAX_ROUNDS env var →
+    heal_max_rounds in centella.toml → HEAL_MAX_ROUNDS_DEFAULT (10).
+    An invalid (non-positive) value in env or file is rejected via die()."""
+    if cli_value is not None:
+        return cli_value
+    env = os.environ.get(HEAL_MAX_ROUNDS_ENV, "").strip()
+    if env:
+        try:
+            v = int(env)
+        except ValueError:
+            die(f"{HEAL_MAX_ROUNDS_ENV}={env!r} is not a positive integer")
+        if v <= 0:
+            die(f"{HEAL_MAX_ROUNDS_ENV}={env!r} must be a positive integer")
+        return v
+    cfg = repo_root / HEAL_MAX_ROUNDS_FILE
+    file_val = _read_toml_key(cfg, "heal_max_rounds")
+    if file_val is not None:
+        try:
+            v = int(file_val)
+        except ValueError:
+            die(f"{cfg}: heal_max_rounds={file_val!r} is not a positive integer")
+        if v <= 0:
+            die(f"{cfg}: heal_max_rounds={file_val!r} must be a positive integer")
+        return v
+    return HEAL_MAX_ROUNDS_DEFAULT
+
+
+def resolve_heal_success_threshold(repo_root: Path,
+                                   cli_value: float | None = None) -> float:
+    """Resolve the heal-loop success pass-rate threshold. Order:
+    --heal-success-threshold CLI flag → CENTELLA_HEAL_SUCCESS_THRESHOLD env var →
+    heal_success_threshold in centella.toml → HEAL_SUCCESS_THRESHOLD_DEFAULT (0.9).
+    Value must be in (0, 1]; invalid values in env or file are rejected via die()."""
+    if cli_value is not None:
+        return cli_value
+    env = os.environ.get(HEAL_SUCCESS_THRESHOLD_ENV, "").strip()
+    if env:
+        try:
+            v = float(env)
+        except ValueError:
+            die(f"{HEAL_SUCCESS_THRESHOLD_ENV}={env!r} is not a float")
+        if not (0.0 < v <= 1.0):
+            die(f"{HEAL_SUCCESS_THRESHOLD_ENV}={env!r} must be in (0, 1]")
+        return v
+    cfg = repo_root / HEAL_SUCCESS_THRESHOLD_FILE
+    file_val = _read_toml_key(cfg, "heal_success_threshold")
+    if file_val is not None:
+        try:
+            v = float(file_val)
+        except ValueError:
+            die(f"{cfg}: heal_success_threshold={file_val!r} is not a float")
+        if not (0.0 < v <= 1.0):
+            die(f"{cfg}: heal_success_threshold={file_val!r} must be in (0, 1]")
+        return v
+    return HEAL_SUCCESS_THRESHOLD_DEFAULT
 
 
 async def run_proc(cmd: list[str], *, cwd: str | None = None,
@@ -2492,10 +2775,24 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
     return envelope
 
 
+def _capture_call(run_dir: Path, record: dict) -> None:
+    """Append one NDJSON record to calls.ndjson with fsync-per-line durability.
+
+    fsync ensures a hard-killed run leaves a clean, fully-written last line
+    rather than a partial line that would break NDJSON parsers."""
+    capture_path = run_dir / "calls.ndjson"
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    with capture_path.open("a") as f:
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
                    cwd: str, allowed_tools: str, max_turns: int, autonomous: bool,
                    caps: dict, st: "State", model: str, sid: str,
-                   add_dirs: list[str] | None = None) -> dict:
+                   add_dirs: list[str] | None = None,
+                   _suppress_capture: bool = False) -> dict:
     """Run one headless Claude Code worker and return its validated
     structured output.
 
@@ -2558,12 +2855,38 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
         retry_note = ("" if attempt == 1 else
                       f"\n\nYOUR PREVIOUS ATTEMPT FAILED: {last_problem} "
                       "Return output that conforms exactly to the required schema.")
+        _t0 = time.monotonic()
         envelope = await _invoke(build(retry_note), cwd, timeout,
                                  sid, centella_dir, verbosity,
                                  progress=_get_progress(st))
+        _latency_ms = int((time.monotonic() - _t0) * 1000)
 
         # record run-weight telemetry
         st.add_telemetry(envelope)
+
+        # capture NDJSON record — written on every attempt (success and failure)
+        # so a hard-killed run leaves a complete audit trail.
+        # Skipped when _suppress_capture=True (replay mode) so replays
+        # never pollute the captures stream.
+        if not _suppress_capture:
+            _usage = envelope.get("usage") or {}
+            _parsed_ok = envelope.get("structured_output") is not None
+            _success = not envelope.get("is_error") and _parsed_ok
+            _capture_call(st.run_dir, {
+                "call_id": str(uuid.uuid4()),
+                "run_id": st.run_id,
+                "call_type": schema_key,
+                "model": model,
+                "system_prompt": system_prompt,
+                "user_content": user_prompt + retry_note,
+                "response_content": str(envelope.get("result") or ""),
+                "parsed_ok": _parsed_ok,
+                "input_tokens": int(_usage.get("input_tokens") or 0),
+                "output_tokens": int(_usage.get("output_tokens") or 0),
+                "latency_ms": _latency_ms,
+                "success": _success,
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            })
 
         # surface non-clean exits — a worker that hit --max-turns exits 0 and
         # can still produce structured_output, but stopped mid-work
@@ -2597,6 +2920,106 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
         return structured
 
     raise WorkerError(f"worker failed schema-valid output twice: {last_problem}")
+
+
+async def replay_capture(record: dict, *,
+                         override_system_prompt: str | None = None,
+                         cwd: str | None = None) -> tuple[dict, dict]:
+    """Replay one captured call from a calls.ndjson record.
+
+    Given a single NDJSON record (as a dict), reconstructs the `claude_p()`
+    invocation with the captured `system_prompt`, `user_content`, `call_type`
+    (mapped to `schema_key`), `model`, and any other reproducible parameters.
+    Returns `(envelope, structured_output)` from the new invocation.
+
+    `override_system_prompt` lets the heal loop replay with a patched prompt
+    instead of the originally captured one.
+
+    Replays use a throw-away in-memory state and `_suppress_capture=True` so
+    they never pollute the original run's calls.ndjson — the capture stream is
+    the ground truth; replay is ephemeral analysis.
+
+    `cwd` defaults to the current working directory. The replay worker runs
+    non-autonomous (read-only tools) by default, matching the behaviour most
+    call types actually use; callers may not need write access for scoring.
+
+    The returned structured_output is the parsed object from the new envelope.
+    A WorkerError is raised if the replay call fails schema validation twice,
+    same as a live call.
+    """
+    call_type = record["call_type"]
+    system_prompt = override_system_prompt or record["system_prompt"]
+    user_prompt = record["user_content"]
+    model = record.get("model", MODEL_DEFAULT)
+
+    # Minimal in-memory state: no run dir needed because capture is suppressed.
+    # _suppress_capture=True prevents _capture_call from writing anywhere;
+    # add_telemetry is called but state.save() writes to a tempdir that is
+    # discarded after replay.
+    import tempfile
+    with tempfile.TemporaryDirectory() as _tmpdir:
+        tmp_run_dir = Path(_tmpdir) / "replay-run"
+        tmp_run_dir.mkdir()
+        tmp_state_path = tmp_run_dir / "state.json"
+        tmp_state_path.write_text("{}")
+
+        replay_st = _ReplayState(tmp_run_dir, tmp_state_path)
+        caps = dict(DEFAULT_CAPS)
+
+        structured = await claude_p(
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            schema_key=call_type,
+            cwd=cwd or os.getcwd(),
+            allowed_tools=INSPECT_TOOLS,
+            max_turns=40,
+            autonomous=False,
+            caps=caps,
+            st=replay_st,
+            model=model,
+            sid=f"replay-{call_type}",
+            _suppress_capture=True,
+        )
+    envelope = replay_st.last_envelope
+    return (envelope, structured)
+
+
+class _ReplayState:
+    """Minimal State-alike for replay_capture: no persistent writes.
+
+    Satisfies the interface claude_p() calls on the state object (bump_workers,
+    add_telemetry, .data, .run_id, .run_dir, .path) without touching .centella/.
+    All save() calls are no-ops. last_envelope captures the envelope returned
+    by _invoke so replay_capture can return (envelope, structured_output).
+    """
+
+    def __init__(self, run_dir: Path, state_path: Path) -> None:
+        self.run_dir = run_dir
+        self.path = state_path
+        self.run_id = "replay"
+        self.data: dict = {
+            "telemetry": {"calls": 0, "cost_usd": 0.0,
+                          "input_tokens": 0, "output_tokens": 0},
+            "verbosity": "quiet",
+        }
+        self.last_envelope: dict = {}
+
+    def save(self) -> None:
+        pass  # replay writes nothing
+
+    def bump_workers(self, caps: dict) -> None:
+        pass  # no budget tracking during replay
+
+    def add_telemetry(self, envelope: dict) -> None:
+        self.last_envelope = envelope
+        t = self.data.setdefault("telemetry", {"calls": 0, "cost_usd": 0.0,
+                                               "input_tokens": 0,
+                                               "output_tokens": 0})
+        t["calls"] += 1
+        t["cost_usd"] += float(envelope.get("total_cost_usd") or 0.0)
+        usage = envelope.get("usage") or {}
+        t["input_tokens"] += int(usage.get("input_tokens") or 0)
+        t["output_tokens"] += int(usage.get("output_tokens") or 0)
 
 
 # =========================================================================
@@ -2676,6 +3099,679 @@ class State:
         t["input_tokens"] += int(usage.get("input_tokens") or 0)
         t["output_tokens"] += int(usage.get("output_tokens") or 0)
         self.save()
+
+
+# =========================================================================
+# judge phase — LLM-scored review of captured call records
+# =========================================================================
+
+async def judge_capture(record: dict, models: dict[str, str],
+                        caps: dict, st: "State") -> dict:
+    """Run a judge worker against one captured call record.
+
+    The judge evaluates the record's response_content on three dimensions:
+    schema adherence, factual accuracy, and hallucination-freeness. Uses
+    claude_p() with schema_key="judge" and a deterministic sid derived from
+    the call_type and call_id so the per-worker log file is locatable.
+
+    Returns the structured judge output dict (validated against
+    SCHEMAS["judge"]).
+    """
+    call_type = record.get("call_type", "unknown")
+    call_id = record.get("call_id", "unknown")
+    sys_prompt = (PROMPTS / "judge.md").read_text()
+    user_prompt = (
+        "CALL RECORD TO JUDGE:\n"
+        f"call_type: {call_type}\n"
+        f"call_id: {call_id}\n"
+        f"model: {record.get('model', '')}\n\n"
+        "SYSTEM PROMPT (the instructions the worker was given):\n"
+        f"{record.get('system_prompt', '')}\n\n"
+        "USER CONTENT (the input the worker received):\n"
+        f"{record.get('user_content', '')}\n\n"
+        "RESPONSE CONTENT (what the worker produced):\n"
+        f"{record.get('response_content', '')}\n\n"
+        f"parsed_ok: {record.get('parsed_ok', False)}\n"
+        f"success: {record.get('success', False)}\n\n"
+        "Judge this call on the three dimensions and return your verdict."
+    )
+    # Judge workers are stateless observers — read-only tools only.
+    model = models.get("judge", models.get("validator", MODEL_DEFAULT))
+    st.bump_workers(caps)
+    return await claude_p(
+        user_prompt=user_prompt,
+        system_prompt=sys_prompt,
+        schema_key="judge",
+        cwd=os.getcwd(),
+        allowed_tools=INSPECT_TOOLS,
+        max_turns=20,
+        autonomous=False,
+        caps=caps,
+        st=st,
+        model=model,
+        sid=f"judge-{call_type}-{call_id[:8]}",
+    )
+
+
+async def phase_judge(run_dir: Path, judge_out_dir: Path,
+                      caps: dict, st: "State",
+                      models: dict[str, str],
+                      judge_call_types: list[str] | None = None) -> dict:
+    """Judge all captured call records in run_dir/calls.ndjson.
+
+    Reads each line of calls.ndjson, optionally filters by call_type when
+    `judge_call_types` is provided, then runs judge_capture() in parallel
+    under the existing asyncio.Semaphore(max_parallel) bound.
+
+    Each verdict is written to judge_out_dir/<call_id>.json. After all
+    judgments complete, an INDEX.json is written to judge_out_dir/ listing
+    every judged call with its call_id, call_type, and passed status.
+
+    Returns a dict with keys "judged" (count) and "index" (list of index
+    entries).
+    """
+    capture_path = run_dir / "calls.ndjson"
+    if not capture_path.exists():
+        log("phase_judge: no calls.ndjson found — nothing to judge")
+        return {"judged": 0, "index": []}
+
+    records: list[dict] = []
+    for line in capture_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            log(f"  phase_judge: skipping malformed NDJSON line: {line[:80]!r}")
+            continue
+        if judge_call_types and rec.get("call_type") not in judge_call_types:
+            continue
+        records.append(rec)
+
+    if not records:
+        log("phase_judge: no records to judge after filtering")
+        return {"judged": 0, "index": []}
+
+    judge_out_dir.mkdir(parents=True, exist_ok=True)
+    log(f"phase_judge: judging {len(records)} record(s)")
+
+    sem = asyncio.Semaphore(caps["max_parallel"])
+    index: list[dict] = []
+
+    async def judge_one(rec: dict) -> None:
+        async with sem:
+            call_id = rec.get("call_id", "unknown")
+            call_type = rec.get("call_type", "unknown")
+            verdict = await judge_capture(rec, models, caps, st)
+            verdict_path = judge_out_dir / f"{call_id}.json"
+            verdict_path.write_text(json.dumps(verdict, indent=2))
+            index.append({
+                "call_id": call_id,
+                "call_type": call_type,
+                "passed": verdict.get("passed", False),
+            })
+            status = "pass" if verdict.get("passed") else "FAIL"
+            log(f"  judge-{call_type}-{call_id[:8]}: {status}")
+
+    await gather_or_cancel(*(judge_one(r) for r in records))
+
+    # Sort index by call_id for stable output across parallel orderings.
+    index.sort(key=lambda e: e["call_id"])
+    (judge_out_dir / "INDEX.json").write_text(json.dumps(index, indent=2))
+    log(f"phase_judge: wrote {len(index)} verdict(s) to {judge_out_dir}")
+    return {"judged": len(index), "index": index}
+
+
+# =========================================================================
+# heal-loop — persistent state and three phase functions
+# =========================================================================
+
+class HealState:
+    """Persistent state for one heal-loop run scoped to a single call_type.
+
+    Layout on disk: <heal_dir>/<call_type>/state.json
+
+    Fields written to state.json:
+      failing_samples  — list of capture records the heal loop is working on
+      baseline         — {call_id: {"pass_rate": float, "verdicts": list}}
+                         noise-floor measured by heal_baseline
+      history          — list of iteration records appended by heal_replay_patched
+      best_so_far      — {pass_rate: float, iter_n: int} tracking the best arm
+    """
+
+    def __init__(self, heal_dir: Path, call_type: str) -> None:
+        self.heal_dir = heal_dir
+        self.call_type = call_type
+        self.state_dir = heal_dir / call_type
+        self.path = self.state_dir / "state.json"
+        self.failing_samples: list[dict] = []
+        self.baseline: dict = {}
+        self.history: list[dict] = []
+        self.best_so_far: dict = {}
+
+    def save(self) -> None:
+        """Atomic write via temp-file rename."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "failing_samples": self.failing_samples,
+            "baseline": self.baseline,
+            "history": self.history,
+            "best_so_far": self.best_so_far,
+        }
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(self.path)
+
+    def load(self) -> bool:
+        """Load state from disk. Returns True if file existed and was loaded."""
+        if not self.path.exists():
+            return False
+        data = json.loads(self.path.read_text())
+        self.failing_samples = data.get("failing_samples", [])
+        self.baseline = data.get("baseline", {})
+        self.history = data.get("history", [])
+        self.best_so_far = data.get("best_so_far", {})
+        return True
+
+
+async def heal_baseline(call_type: str, failing_records: list[dict], n: int,
+                        heal_dir: Path, caps: dict, st: "State",
+                        models: dict[str, str]) -> HealState:
+    """Run n unpatched replays per failing capture to establish a noise-floor.
+
+    For each record in failing_records, runs n replay_capture() calls with the
+    original system prompt (no override), judges each replay via judge_capture(),
+    and persists the per-sample pass rates + verdict list to
+    <heal_dir>/<call_type>/baseline/verdicts/.
+
+    Returns a HealState with failing_samples, baseline, and best_so_far set.
+    Replays run in parallel under asyncio.Semaphore(max_parallel).
+    """
+    hs = HealState(heal_dir, call_type)
+    hs.failing_samples = list(failing_records)
+
+    verdicts_dir = heal_dir / call_type / "baseline" / "verdicts"
+    verdicts_dir.mkdir(parents=True, exist_ok=True)
+
+    sem = asyncio.Semaphore(caps["max_parallel"])
+    baseline: dict = {}
+
+    async def _run_one(record: dict, replay_idx: int) -> dict:
+        """Run one replay+judge pair; return verdict dict."""
+        async with sem:
+            call_id = record["call_id"]
+            # Replay with original system prompt (no patch).
+            try:
+                envelope, _ = await replay_capture(record)
+            except Exception:
+                envelope = {}
+            # Build a synthetic record for the judge using the replayed output.
+            judge_record = dict(record)
+            judge_record["response_content"] = (
+                envelope.get("result") or record.get("response_content", "")
+            )
+            judge_record["parsed_ok"] = not envelope.get("is_error", True)
+            judge_record["success"] = not envelope.get("is_error", True)
+            verdict = await judge_capture(judge_record, models, caps, st)
+            # Write verdict file.
+            call_id = record["call_id"]
+            verdict_path = verdicts_dir / f"{call_id}-{replay_idx}.json"
+            verdict_path.write_text(json.dumps(verdict, indent=2))
+            return verdict
+
+    # Gather all (record, replay_idx) pairs.
+    tasks = []
+    for record in failing_records:
+        for idx in range(n):
+            tasks.append((record, idx))
+
+    results: list[tuple[dict, dict]] = []
+    coros = [_run_one(rec, idx) for rec, idx in tasks]
+    verdicts_flat = await gather_or_cancel(*coros)
+
+    # Aggregate per-sample pass rates.
+    task_idx = 0
+    for record in failing_records:
+        call_id = record["call_id"]
+        sample_verdicts = []
+        for idx in range(n):
+            sample_verdicts.append(verdicts_flat[task_idx])
+            task_idx += 1
+        passes = sum(1 for v in sample_verdicts if v.get("passed", False))
+        baseline[call_id] = {
+            "pass_rate": passes / n if n > 0 else 0.0,
+            "verdicts": sample_verdicts,
+        }
+
+    hs.baseline = baseline
+    overall_pass_rate = (
+        sum(v["pass_rate"] for v in baseline.values()) / len(baseline)
+        if baseline else 0.0
+    )
+    hs.best_so_far = {"pass_rate": overall_pass_rate, "iter_n": 0}
+    hs.save()
+    log(f"heal_baseline: {call_type}: {len(failing_records)} sample(s), "
+        f"n={n}, baseline pass_rate={overall_pass_rate:.2%}")
+    return hs
+
+
+def heal_apply_patch(call_type: str, iter_n: int, patch_text: str,
+                     anchor_match: str, heal_dir: Path,
+                     failing_records: list[dict]) -> list[Path]:
+    """Materialise per-sample patched prompts under iter-<N>/patched-prompts/.
+
+    For each record in failing_records, replaces the first occurrence of
+    `anchor_match` in the original system_prompt with `patch_text`, and writes
+    the result to <heal_dir>/<call_type>/iter-<N>/patched-prompts/<call_id>.txt.
+
+    Returns the list of written paths.
+    """
+    out_dir = heal_dir / call_type / f"iter-{iter_n}" / "patched-prompts"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for record in failing_records:
+        call_id = record["call_id"]
+        original = record.get("system_prompt", "")
+        patched = original.replace(anchor_match, patch_text, 1)
+        dest = out_dir / f"{call_id}.txt"
+        dest.write_text(patched)
+        written.append(dest)
+    log(f"heal_apply_patch: {call_type} iter-{iter_n}: "
+        f"wrote {len(written)} patched prompt(s)")
+    return written
+
+
+async def heal_replay_patched(call_type: str, iter_n: int, n: int,
+                              heal_dir: Path, caps: dict, st: "State",
+                              models: dict[str, str]) -> HealState:
+    """Run n patched replays per failing capture and append an iteration record.
+
+    Reads HealState from disk. For each failing sample, loads the patched
+    prompt from iter-<iter_n>/patched-prompts/<call_id>.txt, runs n
+    replay_capture() calls with that prompt override, judges each via
+    judge_capture(), computes the pass rate, and appends an iteration record
+    to hs.history. Updates hs.best_so_far if the pass rate improved.
+
+    Replays run in parallel under asyncio.Semaphore(max_parallel).
+    Returns the updated HealState.
+    """
+    hs = HealState(heal_dir, call_type)
+    if not hs.load():
+        raise FileNotFoundError(
+            f"HealState not found at {hs.path} — run heal_baseline first"
+        )
+
+    patched_dir = heal_dir / call_type / f"iter-{iter_n}" / "patched-prompts"
+    verdicts_dir = heal_dir / call_type / f"iter-{iter_n}" / "verdicts"
+    verdicts_dir.mkdir(parents=True, exist_ok=True)
+
+    sem = asyncio.Semaphore(caps["max_parallel"])
+
+    async def _run_one(record: dict, replay_idx: int,
+                       patched_prompt: str) -> dict:
+        async with sem:
+            try:
+                envelope, _ = await replay_capture(
+                    record, override_system_prompt=patched_prompt
+                )
+            except Exception:
+                envelope = {}
+            judge_record = dict(record)
+            judge_record["response_content"] = (
+                envelope.get("result") or record.get("response_content", "")
+            )
+            judge_record["parsed_ok"] = not envelope.get("is_error", True)
+            judge_record["success"] = not envelope.get("is_error", True)
+            verdict = await judge_capture(judge_record, models, caps, st)
+            call_id = record["call_id"]
+            verdict_path = verdicts_dir / f"{call_id}-{replay_idx}.json"
+            verdict_path.write_text(json.dumps(verdict, indent=2))
+            return verdict
+
+    # Build tasks: (record, patched_prompt, replay_idx).
+    tasks: list[tuple[dict, str, int]] = []
+    for record in hs.failing_samples:
+        call_id = record["call_id"]
+        prompt_path = patched_dir / f"{call_id}.txt"
+        if not prompt_path.exists():
+            log(f"  heal_replay_patched: missing patched prompt for {call_id}, "
+                f"skipping")
+            continue
+        patched_prompt = prompt_path.read_text()
+        for idx in range(n):
+            tasks.append((record, patched_prompt, idx))
+
+    coros = [_run_one(rec, idx, prompt) for rec, prompt, idx in tasks]
+    verdicts_flat: list[dict] = await gather_or_cancel(*coros)
+
+    # Aggregate per-sample pass rates for this iteration.
+    iter_scores: dict = {}
+    task_offset = 0
+    records_with_prompts = [
+        r for r in hs.failing_samples
+        if (patched_dir / f"{r['call_id']}.txt").exists()
+    ]
+    for record in records_with_prompts:
+        call_id = record["call_id"]
+        sample_verdicts = verdicts_flat[task_offset:task_offset + n]
+        task_offset += n
+        passes = sum(1 for v in sample_verdicts if v.get("passed", False))
+        iter_scores[call_id] = {
+            "pass_rate": passes / n if n > 0 else 0.0,
+            "verdicts": sample_verdicts,
+        }
+
+    overall_pass_rate = (
+        sum(v["pass_rate"] for v in iter_scores.values()) / len(iter_scores)
+        if iter_scores else 0.0
+    )
+
+    iter_record = {
+        "iter_n": iter_n,
+        "pass_rate": overall_pass_rate,
+        "scores": iter_scores,
+    }
+    hs.history.append(iter_record)
+
+    if overall_pass_rate > hs.best_so_far.get("pass_rate", 0.0):
+        hs.best_so_far = {"pass_rate": overall_pass_rate, "iter_n": iter_n}
+
+    hs.save()
+    log(f"heal_replay_patched: {call_type} iter-{iter_n}: "
+        f"pass_rate={overall_pass_rate:.2%}")
+    return hs
+
+
+def check_convergence(state: HealState, config: dict) -> str:
+    """Evaluate whether the heal loop has converged.
+
+    Returns one of:
+      SUCCESS          — best pass_rate >= config["success_threshold"]
+      TIMEOUT          — iterations exhausted (len(history) >= max_iterations)
+      BUDGET_EXHAUSTED — worker_count reached max_total_workers
+      PLATEAUED        — last plateau_window iterations all have |delta| < plateau_delta
+      REGRESSED        — every history entry's pass_rate is below the baseline
+      CONTINUE         — none of the above; keep iterating
+
+    `config` keys (all required):
+      success_threshold   float  — e.g. 0.9
+      max_iterations      int    — e.g. 10
+      plateau_window      int    — e.g. 3
+      plateau_delta       float  — e.g. 0.03
+      worker_count        int    — current worker invocation count
+      max_total_workers   int    — cap from caps dict
+
+    The convergence check is deterministic (DESIGN §12): it operates entirely
+    on measurements in HealState.history and best_so_far, with no model judgment.
+    """
+    history = state.history
+    best_pass_rate = state.best_so_far.get("pass_rate", 0.0)
+    success_threshold = config["success_threshold"]
+    max_iterations = config["max_iterations"]
+    plateau_window = config["plateau_window"]
+    plateau_delta = config["plateau_delta"]
+    worker_count = config.get("worker_count", 0)
+    max_total_workers = config.get("max_total_workers", DEFAULT_CAPS["max_total_workers"])
+
+    # SUCCESS: best arm already meets the target.
+    if best_pass_rate >= success_threshold:
+        return "SUCCESS"
+
+    # BUDGET_EXHAUSTED: worker cap reached before convergence.
+    if worker_count >= max_total_workers:
+        return "BUDGET_EXHAUSTED"
+
+    # TIMEOUT: iteration cap hit.
+    if len(history) >= max_iterations:
+        return "TIMEOUT"
+
+    # REGRESSED: every iteration was worse than baseline.
+    if history:
+        baseline_rate = (
+            sum(v["pass_rate"] for v in state.baseline.values()) / len(state.baseline)
+            if state.baseline else 0.0
+        )
+        if all(entry.get("pass_rate", 0.0) < baseline_rate for entry in history):
+            return "REGRESSED"
+
+    # PLATEAUED: the last plateau_window iterations all changed by less than plateau_delta.
+    if len(history) >= plateau_window:
+        recent = history[-plateau_window:]
+        rates = [entry.get("pass_rate", 0.0) for entry in recent]
+        deltas = [abs(rates[i] - rates[i - 1]) for i in range(1, len(rates))]
+        if all(d < plateau_delta for d in deltas):
+            return "PLATEAUED"
+
+    return "CONTINUE"
+
+
+def write_heal_report(call_type: str, state: HealState,
+                      best_patch_text: str = "") -> Path:
+    """Render a markdown heal report to <heal_dir>/<call_type>/healing-<call_type>.md.
+
+    The report includes:
+    - The best patch text (or 'none' when no patch improved on baseline)
+    - The number of iterations run
+    - A per-iteration history table with pass rates
+    - The baseline pass rate
+
+    Returns the path of the written file.
+    """
+    report_dir = state.state_dir
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"healing-{call_type}.md"
+
+    baseline_rate = (
+        sum(v["pass_rate"] for v in state.baseline.values()) / len(state.baseline)
+        if state.baseline else 0.0
+    )
+    best = state.best_so_far
+    best_rate = best.get("pass_rate", 0.0)
+    best_iter = best.get("iter_n", 0)
+    n_iterations = len(state.history)
+
+    lines = [
+        f"# Heal report: {call_type}",
+        "",
+        f"**Iterations run:** {n_iterations}  ",
+        f"**Baseline pass rate:** {baseline_rate:.1%}  ",
+        f"**Best pass rate:** {best_rate:.1%} (iter {best_iter})  ",
+        "",
+        "## Best patch",
+        "",
+        "```",
+        best_patch_text if best_patch_text else "(no patch improved on baseline)",
+        "```",
+        "",
+        "## Iteration history",
+        "",
+        "| iter | pass_rate |",
+        "|------|-----------|",
+    ]
+    for entry in state.history:
+        lines.append(f"| {entry.get('iter_n', '?')} | {entry.get('pass_rate', 0.0):.1%} |")
+
+    if not state.history:
+        lines.append("| — | — |")
+
+    lines.append("")
+    report_path.write_text("\n".join(lines))
+    log(f"write_heal_report: {call_type}: wrote {report_path}")
+    return report_path
+
+
+async def request_patch(state: HealState, iter_n: int,
+                        st: "State", caps: dict,
+                        models: dict[str, str]) -> tuple[str, str]:
+    """Invoke the patch-generator worker to propose a minimal prompt edit.
+
+    Builds a user_prompt containing:
+    - The current prompt body (resolved via resolve_prompt)
+    - The failing samples (response_content from each)
+    - The prior iteration history for context
+
+    Calls claude_p() with schema_key="patch_generator" and sid
+    `heal-patch-<call_type>-iter<N>`.
+
+    After the worker responds, validates that the returned `anchor` is a
+    literal substring of the resolved prompt body. If not, raises ValueError
+    — the heal loop must not apply a patch that cannot be cleanly located in
+    the prompt (per the prompts-are-advisory-code-enforces principle: this
+    check lives in code, not in the prompt).
+
+    Returns (anchor_match, patch_text) on success.
+    """
+    call_type = state.call_type
+    _, prompt_body, _ = resolve_prompt(call_type)
+    sys_prompt = (PROMPTS / "patch_generator.md").read_text()
+
+    # Build the failing samples section: only response_content is needed
+    # for the patch-generator to understand what went wrong.
+    sample_lines = []
+    for rec in state.failing_samples:
+        cid = rec.get("call_id", "?")
+        resp = rec.get("response_content", "")
+        sample_lines.append(f"call_id: {cid}\nresponse_content:\n{resp}")
+    samples_block = "\n---\n".join(sample_lines) if sample_lines else "(none)"
+
+    # Prior history: anchor/replacement/strategy/pass_rate for each iteration.
+    history_lines = []
+    for entry in state.history:
+        n = entry.get("iter_n", "?")
+        pr = entry.get("pass_rate", 0.0)
+        # patch text is not stored in history; only pass_rate and scores are.
+        history_lines.append(f"iter {n}: pass_rate={pr:.2%}")
+    history_block = "\n".join(history_lines) if history_lines else "(no prior iterations)"
+
+    user_prompt = (
+        f"CALL TYPE: {call_type}\n"
+        f"ITERATION: {iter_n}\n\n"
+        "CURRENT SYSTEM PROMPT:\n"
+        f"{prompt_body}\n\n"
+        "FAILING SAMPLES:\n"
+        f"{samples_block}\n\n"
+        "PRIOR ITERATION HISTORY:\n"
+        f"{history_block}\n\n"
+        "Propose a minimal patch to the system prompt that addresses the "
+        "failure mode. Return anchor, replacement, strategy, and pivot_reason."
+    )
+
+    model = models.get("heal", MODEL_DEFAULT_PER_WORKER.get("heal", MODEL_DEFAULT))
+    st.bump_workers(caps)
+    result = await claude_p(
+        user_prompt=user_prompt,
+        system_prompt=sys_prompt,
+        schema_key="patch_generator",
+        cwd=os.getcwd(),
+        allowed_tools=INSPECT_TOOLS,
+        max_turns=20,
+        autonomous=False,
+        caps=caps,
+        st=st,
+        model=model,
+        sid=f"heal-patch-{call_type}-iter{iter_n}",
+    )
+
+    anchor = result.get("anchor", "")
+    replacement = result.get("replacement", "")
+
+    # Code-enforced: anchor must be a literal substring of the prompt body.
+    # A patch that cannot be located would corrupt the prompt silently —
+    # the prompt is advisory but this application check is mechanical.
+    if anchor not in prompt_body:
+        raise ValueError(
+            f"request_patch: anchor {anchor!r} not found in resolved prompt "
+            f"for call_type={call_type!r} — cannot apply patch safely"
+        )
+
+    return anchor, replacement
+
+
+async def phase_heal(call_type: str, failing_records: list[dict],
+                     heal_dir: Path, caps: dict,
+                     st: "State", models: dict[str, str],
+                     request_patch_fn=None,
+                     n: int = HEAL_N_REPLAYS_DEFAULT,
+                     config: dict | None = None) -> str:
+    """Drive the full heal loop for one call_type.
+
+    Phases (per iteration):
+      1. Baseline (once): run n unpatched replays per record to measure noise-floor.
+      2. Loop:
+         a. request_patch_fn(state, iter_n) → (anchor_match, patch_text)
+         b. heal_apply_patch — materialise patched prompts
+         c. heal_replay_patched — run n replays with the patched prompt + judge
+         d. check_convergence — returns SUCCESS/PLATEAUED/TIMEOUT/BUDGET_EXHAUSTED/
+            REGRESSED/CONTINUE
+      3. write_heal_report — always written, even if the loop terminates early.
+
+    `request_patch_fn` is a callable taking (state: HealState, iter_n: int) and
+    returning (anchor_match: str, patch_text: str). When None (the default), the
+    real `request_patch` worker is used. Injecting a stub keeps this function
+    independently testable.
+
+    Note: the injected callable may be sync (for tests) or async. If it is a
+    sync stub with 2 arguments (state, iter_n), it is called directly. If it is
+    None, the real async `request_patch(state, iter_n, st, caps, models)` is
+    awaited — this is the production path.
+
+    Returns the terminal verdict string.
+    """
+    converge_config = dict({
+        "success_threshold": HEAL_SUCCESS_THRESHOLD_DEFAULT,
+        "max_iterations": HEAL_MAX_ROUNDS_DEFAULT,
+        "plateau_window": HEAL_PLATEAU_WINDOW_DEFAULT,
+        "plateau_delta": HEAL_PLATEAU_DELTA_DEFAULT,
+    }, **(config or {}))
+
+    # Merge in caps-derived fields so check_convergence has budget visibility.
+    converge_config.setdefault("worker_count", st.data.get("worker_count", 0))
+    converge_config.setdefault("max_total_workers",
+                               caps.get("max_total_workers",
+                                        DEFAULT_CAPS["max_total_workers"]))
+
+    log(f"phase_heal: {call_type}: starting heal loop "
+        f"(max_iter={converge_config['max_iterations']}, "
+        f"threshold={converge_config['success_threshold']:.0%}, "
+        f"n={n})")
+
+    hs = await heal_baseline(call_type, failing_records, n, heal_dir, caps, st, models)
+
+    best_patch_text: str = ""
+    verdict = "CONTINUE"
+    iter_n = 0
+
+    while verdict == "CONTINUE":
+        iter_n += 1
+        # Update worker_count snapshot before convergence check each iteration.
+        converge_config["worker_count"] = st.data.get("worker_count", 0)
+
+        # Invoke the patch generator: real worker (default) or injected stub.
+        if request_patch_fn is None:
+            anchor_match, patch_text = await request_patch(
+                hs, iter_n, st, caps, models)
+        elif asyncio.iscoroutinefunction(request_patch_fn):
+            anchor_match, patch_text = await request_patch_fn(hs, iter_n)
+        else:
+            anchor_match, patch_text = request_patch_fn(hs, iter_n)
+
+        heal_apply_patch(call_type, iter_n, patch_text, anchor_match,
+                         heal_dir, hs.failing_samples)
+        hs = await heal_replay_patched(call_type, iter_n, n, heal_dir,
+                                       caps, st, models)
+        converge_config["worker_count"] = st.data.get("worker_count", 0)
+        verdict = check_convergence(hs, converge_config)
+
+        # Track the patch text that produced the best result so far.
+        if hs.best_so_far.get("iter_n", 0) == iter_n:
+            best_patch_text = patch_text
+
+        log(f"phase_heal: {call_type} iter-{iter_n}: verdict={verdict}")
+
+    write_heal_report(call_type, hs, best_patch_text)
+    log(f"phase_heal: {call_type}: terminated with {verdict}")
+    return verdict
 
 
 # =========================================================================
@@ -4091,6 +5187,23 @@ def main() -> None:
         ap.add_argument(f"--model-{_w}", choices=MODEL_VALUES, metavar="ALIAS",
                         help=f"model alias for the {_w} worker — overrides "
                              f"--model, CENTELLA_MODEL, and centella.toml")
+    ap.add_argument("--judge-model", choices=MODEL_VALUES, metavar="ALIAS",
+                    help=f"model alias for the judge post-run worker "
+                         f"(default {MODEL_DEFAULT_PER_WORKER['judge']}); "
+                         f"also {MODEL_JUDGE_ENV} or model_judge in centella.toml")
+    ap.add_argument("--heal-model", choices=MODEL_VALUES, metavar="ALIAS",
+                    help=f"model alias for the heal post-run worker "
+                         f"(default {MODEL_DEFAULT_PER_WORKER['heal']}); "
+                         f"also {MODEL_HEAL_ENV} or model_heal in centella.toml")
+    ap.add_argument("--heal-max-rounds", type=int, metavar="N",
+                    help=f"maximum heal-loop iterations per call_type "
+                         f"(default {HEAL_MAX_ROUNDS_DEFAULT}); "
+                         f"also {HEAL_MAX_ROUNDS_ENV} or heal_max_rounds in centella.toml")
+    ap.add_argument("--heal-success-threshold", type=float, metavar="RATE",
+                    help=f"pass-rate threshold for heal-loop SUCCESS verdict "
+                         f"(default {HEAL_SUCCESS_THRESHOLD_DEFAULT}); "
+                         f"also {HEAL_SUCCESS_THRESHOLD_ENV} or "
+                         "heal_success_threshold in centella.toml")
     # Verbosity: explicit --verbosity wins; -v/-q stackable shortcuts
     # anchor to `normal` (the pre-streaming behavior). So `-v` = stream,
     # `-vv` = debug, `-q` = normal, `-qq` = quiet. See IMPLEMENTATION.md
@@ -4105,6 +5218,45 @@ def main() -> None:
     ap.add_argument("-q", "--quiet", action="count", default=0,
                     help="shortcut: -q=normal (pre-streaming behavior), "
                          "-qq=quiet (errors and phase boundaries only)")
+    # Telemetry knobs. --telemetry / --no-telemetry are a mutually exclusive
+    # pair; default None means "neither was passed" so the resolver falls
+    # through to env / TOML / TELEMETRY_DEFAULT.
+    _tel_grp = ap.add_mutually_exclusive_group()
+    _tel_grp.add_argument("--telemetry", dest="telemetry",
+                          action="store_true", default=None,
+                          help=f"enable telemetry (default on); also "
+                               f"{TELEMETRY_ENV}=1 or telemetry=true in "
+                               "centella.toml")
+    _tel_grp.add_argument("--no-telemetry", dest="telemetry",
+                          action="store_false",
+                          help=f"disable telemetry event writing; also "
+                               f"{TELEMETRY_ENV}=0 or telemetry=false in "
+                               "centella.toml")
+    ap.add_argument("--telemetry-dir", metavar="DIR",
+                    help=f"subdirectory name under the run dir for telemetry "
+                         f"NDJSON events (default '{TELEMETRY_SUBDIR_DEFAULT}'); "
+                         f"also {TELEMETRY_SUBDIR_ENV} or telemetry_dir in "
+                         "centella.toml")
+    ap.add_argument("--judge-dir", metavar="DIR",
+                    help=f"subdirectory name under the run dir for LLM judge "
+                         f"output (default '{JUDGE_DIR_DEFAULT}'); also "
+                         f"{JUDGE_DIR_ENV} or judge_dir in centella.toml")
+    ap.add_argument("--heal-dir", metavar="DIR",
+                    help=f"subdirectory name under the run dir for LLM self-heal "
+                         f"output (default '{HEAL_DIR_DEFAULT}'); also "
+                         f"{HEAL_DIR_ENV} or heal_dir in centella.toml")
+    ap.add_argument("--phase", choices=["judge", "heal"], metavar="PHASE",
+                    help="run a post-run skill phase against an existing run's "
+                         "captured LLM calls instead of starting a new run. "
+                         "PHASE must be 'judge' or 'heal'. Requires an existing "
+                         "run (use --run-id to select one when multiple runs "
+                         "exist, or omit when exactly one run is in flight). "
+                         "'judge' scores every captured call in calls.ndjson "
+                         "using the 3-dimensional LLM judge rubric and writes "
+                         "verdict files to <run-dir>/<judge-dir>/. "
+                         "'heal' reads the judge index for failing call_types "
+                         "and runs the self-heal loop for each, writing healing "
+                         "reports to <run-dir>/<heal-dir>/.")
     args = ap.parse_args()
 
     # --list short-circuits everything else: read .centella/runs/* and
@@ -4195,6 +5347,85 @@ def main() -> None:
     # → []. Re-attached to args so orchestrate() can fold it into state.
     args.inspect_dirs = resolve_inspect_dirs(
         repo_root, getattr(args, "inspect_dir", None))
+
+    # Resolve telemetry knobs. Re-attached to args so orchestrate() and any
+    # telemetry writer can read them without re-resolving.
+    args.telemetry = resolve_telemetry_enabled(repo_root, args.telemetry)
+    args.telemetry_subdir = resolve_telemetry_subdir(
+        repo_root, args.telemetry_dir)
+    args.judge_dir = resolve_judge_dir(repo_root, args.judge_dir)
+    args.heal_dir = resolve_heal_dir(repo_root, args.heal_dir)
+    args.heal_max_rounds = resolve_heal_max_rounds(
+        repo_root, getattr(args, "heal_max_rounds", None))
+    args.heal_success_threshold = resolve_heal_success_threshold(
+        repo_root, getattr(args, "heal_success_threshold", None))
+
+    # --phase judge|heal: post-run skill phases. Short-circuit the normal
+    # orchestrate() flow — just pick an existing run and run the skill.
+    if args.phase:
+        phase_run_id = resolve_run_id(centella_root, args.run_id)
+        phase_st = State(centella_root, phase_run_id)
+        if not phase_st.load():
+            die(f"no state.json found for run {phase_run_id!r}; "
+                f"the run may not have reached the execute phase yet")
+        phase_run_dir = phase_st.run_dir
+        judge_out_dir = phase_run_dir / args.judge_dir
+        heal_out_dir = phase_run_dir / args.heal_dir
+        if args.phase == "judge":
+            asyncio.run(phase_judge(phase_run_dir, judge_out_dir, caps,
+                                    phase_st, models))
+        else:  # heal
+            # Read judge INDEX.json to find failing call_types; if no index
+            # exists yet, run phase_judge first so heal has verdicts to
+            # act on.
+            index_path = judge_out_dir / "INDEX.json"
+            if not index_path.exists():
+                log("--phase heal: no judge INDEX.json found; running judge first")
+                asyncio.run(phase_judge(phase_run_dir, judge_out_dir, caps,
+                                        phase_st, models))
+            if index_path.exists():
+                try:
+                    index = json.loads(index_path.read_text())
+                except (OSError, ValueError) as e:
+                    die(f"--phase heal: could not read {index_path}: {e}")
+            else:
+                index = []
+            # Collect failing call_ids grouped by call_type.
+            failing_by_type: dict[str, list[str]] = {}
+            for entry in index:
+                if not entry.get("passed", True):
+                    ct = entry.get("call_type", "unknown")
+                    failing_by_type.setdefault(ct, []).append(
+                        entry.get("call_id", ""))
+            if not failing_by_type:
+                log("--phase heal: no failing captures in judge index; nothing to heal")
+                return
+            # Load the original capture records from calls.ndjson.
+            capture_path = phase_run_dir / "calls.ndjson"
+            all_captures: dict[str, dict] = {}
+            if capture_path.exists():
+                for line in capture_path.read_text().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        all_captures[rec.get("call_id", "")] = rec
+                    except (ValueError, AttributeError):
+                        pass
+            for call_type, failing_ids in sorted(failing_by_type.items()):
+                failing_records = [all_captures[cid] for cid in failing_ids
+                                   if cid in all_captures]
+                if not failing_records:
+                    log(f"--phase heal: {call_type}: no capture records found; skipping")
+                    continue
+                config = {
+                    "max_iterations": args.heal_max_rounds,
+                    "success_threshold": args.heal_success_threshold,
+                }
+                asyncio.run(phase_heal(call_type, failing_records, heal_out_dir,
+                                       caps, phase_st, models, config=config))
+        return
 
     # Signal handlers (DESIGN §6 / DESIGN §14): SIGTERM and SIGHUP raise
     # InterruptedBySignal so the same try/except machinery that catches

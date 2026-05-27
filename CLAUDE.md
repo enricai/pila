@@ -194,3 +194,10 @@ Before marking a change complete:
       renamed or removed a string used elsewhere.
 - [ ] `git diff --stat` — confirm the diff is scoped to what the change
       intended; no collateral edits.
+- [ ] `python3 -c 'import json; json.load(open(".claude-plugin/plugin.json"))'`
+      — if `.claude-plugin/plugin.json` was touched, confirm it is valid JSON
+      and all referenced skill/command paths still exist.
+- [ ] `python3 -c 'import json; [json.loads(l) for l in open(".centella/runs/<run>/calls.ndjson")]'`
+      — if the telemetry writer (`capture_llm_call`) was touched, confirm a
+      representative run produces a well-formed `calls.ndjson` (each line
+      valid JSON with at least `call_type`, `prompt`, and `response` keys).
