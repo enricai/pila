@@ -2880,16 +2880,35 @@ def _apply_reconciler_output(plans: list[dict], output: dict) -> list[dict]:
         # vanish its requires/provides/depends_on from the DAG. The
         # reconciler's prompt warns against this, but prompts are
         # advisory per CLAUDE.md "The central principle" — the
-        # mechanical guarantee lives here.
+        # mechanical guarantee lives here. Two failure modes to cover:
+        #   1. existing-vs-added: an added_subtask id collides with a
+        #      subtask the planners already produced.
+        #   2. added-vs-added: the reconciler emitted the same id twice
+        #      within added_subtasks itself. Both halves get silently
+        #      collapsed by schedule()'s dict-flatten if not caught here.
         existing_ids = {s["id"] for s in by_id.values()}
-        collisions = sorted({s["id"] for s in added if s["id"] in existing_ids})
-        if collisions:
+        ext_collisions = sorted({s["id"] for s in added if s["id"] in existing_ids})
+        seen: set[str] = set()
+        self_collisions: list[str] = []
+        for s in added:
+            sid = s["id"]
+            if sid in seen and sid not in self_collisions:
+                self_collisions.append(sid)
+            seen.add(sid)
+        if ext_collisions or self_collisions:
+            parts = []
+            if ext_collisions:
+                parts.append("collide with existing subtasks: "
+                             + ", ".join(ext_collisions))
+            if self_collisions:
+                parts.append("are duplicated within added_subtasks: "
+                             + ", ".join(sorted(self_collisions)))
             die(
-                "reconciler proposed added_subtasks whose id(s) collide "
-                "with existing subtasks: "
-                f"{', '.join(collisions)}. The scheduler merges by id; "
-                "an unchecked collision would silently drop one of the "
-                "subtasks from the DAG. Refine the task or re-run."
+                "reconciler proposed added_subtasks whose id(s) "
+                + "; ".join(parts)
+                + ". The scheduler merges by id; an unchecked collision "
+                "would silently drop one of the subtasks from the DAG. "
+                "Refine the task or re-run."
             )
         plans.append({
             "domain": "_reconciler",

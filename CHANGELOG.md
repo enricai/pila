@@ -16,9 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unresolvable gaps abort the run with the worker's diagnosis instead
   of the prior opaque "nothing provides X" error. Short-circuits with
   no worker invocation when planners already agreed (DESIGN.md §5,
-  §14). Reconciler-emitted subtask `id` collisions with existing
-  subtasks now fail loud — the prior silent-overwrite path through
-  `schedule()`'s dict-flatten would have lost a subtask from the DAG.
+  §14). Reconciler-emitted subtask `id` collisions — both with
+  existing subtasks and with other reconciler-emitted ids — now fail
+  loud; the prior silent-overwrite path through `schedule()`'s
+  dict-flatten would have lost a subtask from the DAG.
 
 ### Changed
 

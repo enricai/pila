@@ -250,6 +250,69 @@ def test_apply_dies_names_colliding_ids_in_error(centella, capsys):
     assert "feat-009" not in err
 
 
+def test_apply_dies_on_duplicate_added_subtask_self_collision(centella):
+    """The reconciler emitted two added_subtasks with the same id —
+    neither colliding with an existing subtask, but colliding with each
+    other. schedule()'s dict-flatten would silently drop one; this
+    must die() with the same fail-loud guarantee as the
+    existing-vs-added case. Pin the behavior so a future refactor of
+    the collision check (e.g., to a single-pass form) can't accidentally
+    drop the self-collision arm.
+    """
+    plans = [_plan("feature-implementation",
+                   {"id": "feat-001", "title": "existing"})]
+    out = {
+        "renames": [], "added_provides": [],
+        "added_subtasks": [
+            {"id": "feat-009", "title": "first",
+             "success_criteria_seed": "a", "_added_by_reconciler": True},
+            {"id": "feat-009", "title": "second",  # same id as the first
+             "success_criteria_seed": "b", "_added_by_reconciler": True},
+        ],
+        "unresolvable": [],
+    }
+    with pytest.raises(SystemExit) as exc:
+        centella._apply_reconciler_output(plans, out)
+    assert exc.value.code != 0
+    # Plans unmutated — the helper dies before appending the
+    # _reconciler pseudo-plan, so the existing plan is still alone.
+    assert len(plans) == 1
+    assert plans[0]["subtasks"][0]["id"] == "feat-001"
+
+
+def test_apply_dies_names_self_colliding_ids_in_error(centella, capsys):
+    """The die() message must use the 'duplicated within added_subtasks'
+    surface form (not the 'collide with existing subtasks' form) so a
+    user reading the error can tell self-collision apart from
+    existing-collision and trace it back to the right reconciler-output
+    array.
+    """
+    plans = [_plan("feature-implementation",
+                   {"id": "feat-001", "title": "existing"})]
+    out = {
+        "renames": [], "added_provides": [],
+        "added_subtasks": [
+            {"id": "feat-009", "title": "first",
+             "success_criteria_seed": "a", "_added_by_reconciler": True},
+            {"id": "feat-009", "title": "second",
+             "success_criteria_seed": "b", "_added_by_reconciler": True},
+            {"id": "feat-010", "title": "ok",
+             "success_criteria_seed": "c", "_added_by_reconciler": True},
+        ],
+        "unresolvable": [],
+    }
+    with pytest.raises(SystemExit):
+        centella._apply_reconciler_output(plans, out)
+    err = capsys.readouterr().err
+    # Self-collision surface form named; the non-colliding id is not.
+    assert "duplicated within added_subtasks" in err
+    assert "feat-009" in err
+    assert "feat-010" not in err
+    # And the self-collision case must NOT be misreported as an
+    # existing-vs-added collision (those use a different surface form).
+    assert "collide with existing subtasks" not in err
+
+
 def test_apply_combined_renames_provides_and_subtasks(centella):
     """Realistic case: all three mutation types applied in one call."""
     plans = [
