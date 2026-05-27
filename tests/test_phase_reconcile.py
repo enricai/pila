@@ -73,6 +73,98 @@ def test_short_circuit_no_unresolved_returns_plans_unchanged(centella, tmp_path)
     assert st.data.get("worker_count", 0) == 0
 
 
+def test_phase_reconcile_dies_on_planner_vs_planner_id_collision(centella, tmp_path):
+    """Two planners (different domains) both emit a subtask with id
+    `feat-001`. Each planner's prompt tells it to prefix its ids with
+    its domain, but the prompt is advisory per CLAUDE.md; if a planner
+    ignores the rule and the orchestrator doesn't catch it, schedule()'s
+    dict-flatten would silently overwrite — the same silent-data-loss
+    failure class as the reconciler-output collisions caught
+    downstream.
+
+    The check must fire BEFORE the short-circuit return (otherwise a
+    collision that doesn't manifest as an unresolved `requires` would
+    slip through), and BEFORE any reconciler mutation. This test pins
+    both invariants: the die() message names the colliding id AND every
+    domain that emitted it.
+    """
+    plans = [
+        _plan("feature-implementation",
+              {"id": "feat-001", "title": "feature side",
+               "provides": ["cap-a"]}),
+        _plan("testing",
+              # WRONG prefix — testing should emit `test-001`, not
+              # `feat-001`. The check must catch this regardless of
+              # whether `requires` happens to be resolved.
+              {"id": "feat-001", "title": "testing side",
+               "provides": ["cap-b"]}),
+    ]
+    st = _minimal_state(centella, tmp_path)
+    caps = {"max_total_workers": 40, "max_parallel": 4,
+            "confidence_rounds": 8}
+    models: dict[str, str] = {}
+
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(centella.phase_reconcile(plans, "task", st, caps, models))
+    assert exc.value.code != 0
+
+
+def test_phase_reconcile_collision_check_runs_before_short_circuit(centella, tmp_path):
+    """The planner-vs-planner check must run even when every `requires`
+    is already resolved — otherwise the short-circuit at
+    `if not unresolved: return plans` would let a collision slip
+    through. Pin by setting up plans with NO unresolved requires but
+    WITH a duplicate id across domains.
+    """
+    plans = [
+        _plan("feature-implementation",
+              {"id": "feat-001", "title": "x", "provides": ["cap-a"]}),
+        _plan("testing",
+              # Same id as feature-implementation's subtask, different
+              # domain — and `requires` is empty so there are zero
+              # unresolved tags. The short-circuit would otherwise
+              # return `plans` immediately without catching the
+              # collision.
+              {"id": "feat-001", "title": "y", "provides": []}),
+    ]
+    st = _minimal_state(centella, tmp_path)
+    caps = {"max_total_workers": 40, "max_parallel": 4,
+            "confidence_rounds": 8}
+    with pytest.raises(SystemExit):
+        asyncio.run(centella.phase_reconcile(plans, "task", st, {**caps}, {}))
+
+
+def test_phase_reconcile_collision_error_names_id_and_domains(centella, tmp_path, capsys):
+    """The die() message must name the colliding id AND every domain
+    that emitted it, so a user reading the error can trace it back to
+    the specific planners that misbehaved. Distinct surface form from
+    the reconciler-output collision error (which uses 'collide with
+    existing subtasks' / 'duplicated within added_subtasks').
+    """
+    plans = [
+        _plan("feature-implementation",
+              {"id": "feat-001", "title": "a"}),
+        _plan("testing",
+              {"id": "feat-001", "title": "b"}),
+        _plan("refactoring",
+              {"id": "feat-001", "title": "c"}),
+    ]
+    st = _minimal_state(centella, tmp_path)
+    caps = {"max_total_workers": 40, "max_parallel": 4,
+            "confidence_rounds": 8}
+    with pytest.raises(SystemExit):
+        asyncio.run(centella.phase_reconcile(plans, "task", st, caps, {}))
+    err = capsys.readouterr().err
+    # The colliding id and all three domains are named.
+    assert "feat-001" in err
+    assert "feature-implementation" in err
+    assert "testing" in err
+    assert "refactoring" in err
+    # Distinct surface form so this error is distinguishable from the
+    # reconciler-output collision errors.
+    assert "planner-vs-planner" in err
+
+
 def test_short_circuit_empty_plans(centella, tmp_path):
     """Defensive: empty plans list short-circuits without error."""
     plans: list = []

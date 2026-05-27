@@ -2836,9 +2836,12 @@ def _compute_unresolved_requires(plans: list[dict]) -> list[dict]:
 
 
 def _apply_reconciler_output(plans: list[dict], output: dict) -> list[dict]:
-    """Mutate `plans` per the reconciler's output. Returns the same
-    `plans` list (with in-place edits on existing subtasks plus an
-    appended `_reconciler` pseudo-plan for any added_subtasks).
+    """Mutate `plans` per the reconciler's output. On success, returns
+    the same `plans` list (with in-place edits on existing subtasks
+    plus an appended `_reconciler` pseudo-plan for any added_subtasks).
+    On an id-collision in `added_subtasks` (either with an existing
+    subtask or within added_subtasks itself), calls `die()` — the
+    pseudo-plan is never appended and `plans` is left unmutated.
 
     Renames rewrite a single `requires` entry on the named subtask.
     Added_provides append a tag to the named subtask's `provides`.
@@ -2927,6 +2930,40 @@ async def phase_reconcile(plans: list[dict], task: str, st: State,
     mechanically. Genuinely unresolvable gaps die.
 
     Returns the (possibly mutated) `plans` list, ready for `schedule()`."""
+    # Pre-condition: subtask ids are globally unique across plans. The
+    # planner prompt tells each domain to scope ids to itself with a
+    # domain-prefix, and the 8 CATEGORIES map to distinct prefixes
+    # (centella.py: CATEGORIES / _ID_PREFIXES), so in practice this
+    # invariant holds. But prompts are advisory per CLAUDE.md; if a
+    # planner ignores the rule, schedule()'s dict-flatten (line ~2997:
+    # `subtasks[s["id"]] = s`) would silently overwrite, vanishing the
+    # loser's requires/provides/depends_on from the DAG — the same
+    # silent-data-loss failure class as the reconciler-output collisions
+    # caught downstream. Catch it here, before any reconciler mutation
+    # and before the short-circuit (a collision that doesn't manifest as
+    # an unresolved `requires` would otherwise slip through).
+    id_owners: dict[str, list[str]] = {}
+    for plan in plans:
+        domain = plan.get("domain", "<unknown>")
+        for s in plan.get("subtasks", []):
+            id_owners.setdefault(s["id"], []).append(domain)
+    cross_collisions = {sid: owners for sid, owners in id_owners.items()
+                        if len(owners) > 1}
+    if cross_collisions:
+        bullets = "\n".join(
+            f"  • {sid!r} emitted by: {', '.join(owners)}"
+            for sid, owners in sorted(cross_collisions.items())
+        )
+        die(
+            "planner-vs-planner subtask id collision(s):\n"
+            f"{bullets}\n"
+            "Planners must emit globally unique subtask ids — by "
+            "convention, each domain prefixes its ids with the domain "
+            "(feat-, test-, bugfix-, …). schedule()'s by-id merge "
+            "would otherwise silently drop one of the subtasks from "
+            "the DAG. Refine the task or re-run."
+        )
+
     unresolved = _compute_unresolved_requires(plans)
     if not unresolved:
         # Common-case short-circuit: every `requires` already has a
