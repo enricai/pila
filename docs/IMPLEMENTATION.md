@@ -143,6 +143,17 @@ export CENTELLA_MODEL_HEAL=sonnet
 export CENTELLA_HEAL_MAX_ROUNDS=10
 export CENTELLA_HEAL_SUCCESS_THRESHOLD=0.9
 
+# Run post-run skill phases against an existing run's captured LLM calls.
+# --phase judge: score every call in calls.ndjson with the 3-dim judge rubric
+#   and write verdict files to <run-dir>/<judge-dir>/.
+# --phase heal: read the judge index for failing call_types and run the
+#   self-heal loop for each; if no judge index exists yet, runs judge first.
+# Use --run-id to select a run when multiple exist; auto-picks when only one.
+/path/to/centella/centella --phase judge --run-id fix-login-timeout-bug-b81e90
+/path/to/centella/centella --phase heal  --run-id fix-login-timeout-bug-b81e90
+# Combine with heal-loop knobs:
+/path/to/centella/centella --phase heal --heal-max-rounds 5 --heal-success-threshold 0.8
+
 # Recommended backstop for worker auto-compaction
 # (Claude Code CLI variable — not consumed by centella itself):
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70
