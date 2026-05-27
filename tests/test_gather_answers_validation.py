@@ -119,11 +119,13 @@ def test_no_defer_when_no_classifier_questions(centella, state, non_tty_stdin):
     assert not (state.path.parent / "pending-questions.json").exists()
 
 
-# --- --no-clarify "skips clarification entirely" (DESIGN §11) --------------
+# --- clarify default (asking is opt-in via --clarify) ---------------------
 
-def test_no_clarify_with_preference_satisfies_sot(centella, state):
-    """--no-clarify: source_of_truth comes from the resolved preference."""
+def test_default_mode_satisfies_sot_from_preference(centella, state):
+    """In the default mode (no --clarify), source_of_truth still comes
+    from the resolved preference. Asking is opt-in, but the preference
+    still fills the answer non-interactively."""
     state.data["source_of_truth_pref"] = "research"
-    state.data["no_clarify"] = True
+    state.data["clarify"] = False
     answers = centella.gather_answers(state, None)
     assert answers["source_of_truth"] == "research"

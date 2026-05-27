@@ -220,9 +220,11 @@ schema is documented in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) §8.
   `CENTELLA_MODEL=sonnet`.
 - `--max-workers N` — cap total `claude -p` subprocess count over the run.
 - `--max-parallel N` — cap concurrent implementers per wave.
-- `--no-clarify` — skip clarification entirely; intent questions are
-  dropped and source-of-truth is taken from the resolved preference
-  (default `both`).
+- `--clarify` — opt into surfacing intent questions to the user
+  (default: off). Without it the classifier's filter still runs but
+  surviving questions are dropped, and the implementer makes a
+  documented best-effort decision. Also `CENTELLA_CLARIFY` env var
+  and `clarify = true` in `centella.toml`.
 - `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70` — lower auto-compaction threshold
   for worker processes.
 

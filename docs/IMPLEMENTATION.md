@@ -83,11 +83,12 @@ export CENTELLA_NO_PUSH=1
 # worktrees continue to run all hooks normally.
 /path/to/centella/centella "task" --no-verify
 
-# Skip clarification entirely (DESIGN §11). Intent questions from the
-# classifier are dropped; the source-of-truth value is taken from the
-# resolved preference (CLI / CENTELLA_SOURCE_OF_TRUTH / centella.toml /
-# default `both`).
-/path/to/centella/centella "task" --no-clarify
+# Opt into clarification (DESIGN §11). Without --clarify (the default),
+# the classifier's intent questions are filtered and dropped — the
+# implementer makes a best-effort decision documented in its notes.
+# Pass --clarify to surface the surviving questions to the user
+# (interactively if a TTY, otherwise via pending-questions.json).
+/path/to/centella/centella "task" --clarify
 
 # Pre-supply clarification answers:
 /path/to/centella/centella "task" --answers answers.json
@@ -207,6 +208,41 @@ error.
 > The CLI/env > file order reflects that the CLI flag and env var are
 > session-scoped knobs (a user reaching for them is making a one-off
 > override), while `centella.toml` is the committed default for the repo.
+
+### Clarification preference
+
+By default centella runs without surfacing intent questions to the user
+(DESIGN §11). The classifier still runs the codebase→research filter and
+the implementer still applies it before any mid-execution decision —
+"no questions" never means "skip the rigor." Pass `--clarify` to opt
+into surfacing the surviving questions. Resolution order (highest
+priority first):
+
+1. **`--clarify`** CLI flag (action=`store_true`).
+2. **`CENTELLA_CLARIFY`** environment variable (boolean, parsed by
+   `_parse_bool_envtoml`: 1/0, true/false, yes/no, on/off).
+3. **`centella.toml` at the repo root** with `clarify = true`.
+4. **Default `False`.** No questions are surfaced; the implementer
+   makes a best-effort decision and documents it in
+   `investigation_notes`.
+
+An invalid value in env or file is rejected at startup via `die()` —
+same shape as `--source-of-truth` resolution. State files written
+before this flag existed (carrying `no_clarify`) cannot be resumed;
+re-run the task fresh under `--clarify` if you want questions.
+
+### Prompt loading and the shared filter fragment
+
+Worker prompts are loaded by `load_prompt(name)` in
+`orchestrator/centella.py` rather than `read_text()` directly. The
+helper expands any `{{include: _foo.md}}` placeholder by inlining the
+named fragment from `prompts/`. Fragments prefixed with `_` are
+internal includes — never standalone worker prompts. Today there is
+one fragment, `prompts/_clarification_filter.md`, included by
+`prompts/classifier.md` and `prompts/implementer.md`. It is the single
+source of truth for the codebase→research→ask wording shown to
+workers; DESIGN.md §11 is the architectural spec that the fragment
+must conform to.
 
 ### Confidence rounds
 
@@ -530,7 +566,7 @@ Maps to `DESIGN.md`: §7 (worker contract), §2 (CLI subprocess form).
 |-------|-------------|--------------|
 | Preflight | `preflight` | git identity, clean working tree, `claude` CLI version, live `claude -p` smoke test. Run-id collisions are detected later in the flow (filesystem side in `State.rename_to()` post-classify; git side in `setup-run.sh`'s branch-creation step) — they cannot be checked in preflight because the final `run_id` isn't known until phase_classify completes. Smoke test bypassed by `--skip-smoke`; preflight skipped entirely on `--resume` |
 | 1 Classify | `phase_classify` | one classifier worker → categories + questions. Returned categories are filtered against the 8-name whitelist in `CATEGORIES` (mirrors DESIGN §4); `die()` if none survive |
-| 0 Clarify | `gather_answers` | source-of-truth is satisfied non-interactively from the resolved preference (default `both`); if classifier intent questions remain and interactive: collect; non-interactive: write `pending-questions.json`, exit code 10; `--no-clarify` drops intent questions entirely per DESIGN §11 |
+| 0 Clarify | `gather_answers` | source-of-truth is satisfied non-interactively from the resolved preference (default `both`). Intent questions from the classifier are dropped by default; pass `--clarify` to surface them. With `--clarify` + interactive: collect; with `--clarify` + non-interactive: write `pending-questions.json`, exit code 10 (DESIGN §11) |
 | 2 Plan | `phase_plan` | one planner worker per category, awaited concurrently via `gather_or_cancel` (a small wrapper around `asyncio.gather` defined in `centella.py`) under an `asyncio.Semaphore(max_parallel)`; the first worker exception cancels its siblings and propagates to `main()` |
 | 2½ Reconcile | `phase_reconcile` | compute set of `requires` capability tags with no matching `provides` across merged planner output. If empty: short-circuit (no worker spawn, plan unchanged). Else: spawn one reconciler worker that emits renames / added_provides / added_subtasks / unresolvable. Orchestrator applies the first three mechanically; if `unresolvable` is non-empty, `die()` with the reconciler's diagnosis (DESIGN §5, §14). |
 | 3 Schedule | `schedule`, `validate_plan` | merge plans, build the global DAG, Kahn topological sort into waves; cycle → `die()` |
@@ -916,7 +952,7 @@ written somewhere in `orchestrator/centella.py`. The coupling test in
 | `answers` | dict[str, str] | user answers to classifier questions (and source-of-truth) |
 | `needs_source_of_truth` | bool | whether classifier asked for source-of-truth disambiguation |
 | `source_of_truth_pref` | str | resolved preference (`codebase` / `research` / `both`) |
-| `no_clarify` | bool | whether `--no-clarify` was passed |
+| `clarify` | bool | whether asking the user is allowed for this run (resolved from `--clarify` / `CENTELLA_CLARIFY` / `centella.toml` / default `False`) |
 | `verbosity` | str | resolved verbosity level (`quiet` / `normal` / `stream` / `debug`); re-resolved fresh on every run, including `--resume`, so the user can dial up or down without editing state |
 | `inspect_dirs` | list[str] | extra absolute paths granted to inspect-bucket workers (classifier, planner, reconciler) via `--add-dir`. Resolved from `--inspect-dir` / `CENTELLA_INSPECT_DIRS` / `inspect_dirs` in `centella.toml`; re-resolved fresh on every run, including `--resume`, so the user can add or remove paths without editing state. Empty list when nothing is configured |
 | `test_runner` | list[str] | detected short-circuit test command |

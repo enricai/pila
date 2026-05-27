@@ -654,6 +654,23 @@ codebase and research answer *how* to build something; they cannot answer
 *what* to build when that has genuinely not been decided. A fully-specified
 request leaves nothing for the filter to catch, so it runs with zero questions.
 
+The exact wording presented to workers lives in
+`prompts/_clarification_filter.md`. That file is the single source of truth
+and is included verbatim into the classifier and implementer prompts at load
+time. DESIGN.md (this section) is the architectural specification; the
+prompt fragment is the directly-loaded text. They must stay in agreement
+under CLAUDE.md's three-layer rule.
+
+By default centella does not surface intent questions to the user at all.
+Workers run the filter, treat anything that survives as a forced best-effort
+decision, and document it. Pass `--clarify` (or set `CENTELLA_CLARIFY=true`
+/ `clarify = true` in `centella.toml`) to opt into surfacing the surviving
+questions — interactively if a TTY is attached, otherwise via
+`pending-questions.json` and the standard deferred-resume flow. The
+no-questions default reflects that most intent questions are closable by
+deeper investigation, and that an LLM's instinct to ask is something the
+system has to push back against, not ride.
+
 When a feature task's request leaves the source of truth ambiguous, centella
 resolves it from a preference: `codebase` (build from existing patterns only),
 `research` (build from researched best-practice standards), or `both` (codebase
@@ -670,11 +687,10 @@ question does not apply, runs without it. Whichever path resolved the
 preference, its value becomes a setting carried to every planner and
 implementer, so the whole run draws from one consistent source of truth.
 
-When Centella runs in a context where it cannot block for an answer, the
-clarification step is non-blocking: it records the questions, exits with a
-distinct status, and lets the surrounding layer collect answers and resume. A
-mode that skips clarification entirely also exists, for the case where the
-caller has already guaranteed the task is fully specified.
+When Centella runs under `--clarify` in a context where it cannot block for
+an answer, the clarification step is non-blocking: it records the questions,
+exits with a distinct status, and lets the surrounding layer collect answers
+and resume.
 
 ### Mid-execution clarification
 
@@ -704,10 +720,10 @@ The same constraint that keeps Phase-1 questions narrow applies here: a
 question's `why_underivable` must be explicit and grounded in what the
 worker tried. Without that gate, a worker is incentivized to ask the user
 rather than do the investigative work the filter requires. The schema
-makes the field required, and the prompt forbids the exit when
-`--no-clarify` is in effect (the worker must make a best-effort decision
-and continue, the same way a Phase-1 run under `--no-clarify` defaults
-its source-of-truth resolution).
+makes the field required, and the prompt forbids the exit when `--clarify`
+is *not* in effect (the worker must make a best-effort decision and
+continue — the default mode, since most intent questions are closable by
+deeper investigation).
 
 A subtask has a single re-spawn budget — `subtask_continuations` — that is
 consumed by *both* context-exhaustion handoffs and mid-execution

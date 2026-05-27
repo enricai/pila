@@ -219,7 +219,7 @@ def test_phase_reconcile_uses_reconciler_model(centella):
 def test_phase_reconcile_uses_reconciler_prompt(centella):
     """The system prompt comes from prompts/reconciler.md."""
     src = inspect.getsource(centella.phase_reconcile)
-    assert '"reconciler.md"' in src
+    assert 'load_prompt("reconciler")' in src
 
 
 def test_phase_reconcile_dies_on_unresolvable(centella):

@@ -28,12 +28,12 @@ The orchestrator gives you, in your prompt:
    - `research` — read online sources only. Use WebSearch and WebFetch for
      current best-practice guidance, preferring primary sources. Treat the
      codebase as background context, not as a source of conventions.
-   - `both` — **codebase first; research only when the codebase is
-     insufficient.** Always read the codebase first to find existing
-     conventions. Only fall back to online research for things the codebase
-     does not cover (e.g. a new library the project has never used before,
-     or a domain the codebase is genuinely thin on). If the codebase
-     answers everything, do not run research.
+   - `both` — codebase first, research as fallback. Apply the
+     codebase→research filter (DESIGN §11 / the shared clarification
+     filter): exhaust the codebase before pulling from primary
+     sources, and only research what the codebase does not cover
+     (e.g. a new library the project has never used, or a domain
+     the codebase is genuinely thin on).
 
 2. **Decompose into the smallest independently verifiable units of change.** A
    subtask is correctly sized when:

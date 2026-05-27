@@ -14,7 +14,7 @@ Usage:
     centella "<task description>"
     centella --resume
     centella "<task>" --answers answers.json
-    centella "<task>" --no-clarify          # skip clarification entirely
+    centella "<task>" --clarify             # opt into surfacing intent questions
 
 Run it from the root of the target git repository.
 """
@@ -38,6 +38,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent       # centella plugin/repo root
 PROMPTS = ROOT / "prompts"
 SCRIPTS = ROOT / "scripts"
+
+# `{{include: _foo.md}}` placeholder pattern used by load_prompt() to embed
+# a shared prompt fragment into a worker prompt. Only files prefixed with
+# `_` are eligible — that prefix marks an internal include, never a
+# standalone worker prompt. One level deep; no recursion needed today.
+_PROMPT_INCLUDE_RE = re.compile(r"\{\{\s*include:\s*(_[a-z0-9_]+\.md)\s*\}\}")
+
+
+def load_prompt(name: str) -> str:
+    """Read prompts/<name>.md and expand any {{include: _foo.md}}
+    placeholders by inlining the named fragment. Replaces the prior
+    `(PROMPTS / f"{name}.md").read_text()` pattern so the
+    clarification-filter wording can live in one place
+    (prompts/_clarification_filter.md, included by both the classifier
+    and the implementer prompts). See DESIGN.md §11."""
+    raw = (PROMPTS / f"{name}.md").read_text()
+    return _PROMPT_INCLUDE_RE.sub(
+        lambda m: (PROMPTS / m.group(1)).read_text(), raw)
 
 # Minimum `claude` CLI version that supports `--json-schema` in `claude -p`
 # mode. Anthropic CHANGELOG v2.1.22 (2026-01-28): "Fixed structured outputs
@@ -79,7 +97,7 @@ STATE_FIELDS = (
     "blocked",
     "worker_count", "telemetry",
     "categories", "classifier_questions", "answers",
-    "needs_source_of_truth", "source_of_truth_pref", "no_clarify",
+    "needs_source_of_truth", "source_of_truth_pref", "clarify",
     "verbosity", "inspect_dirs",
     "test_runner",
     "integrator_failure", "integrator_warnings", "scope_warnings",
@@ -170,6 +188,15 @@ CONFIDENCE_ROUNDS_FILE = SOURCE_OF_TRUTH_FILE
 # hook-skipping would dilute the "user explicitly asked" semantics.
 NO_PUSH_ENV = "CENTELLA_NO_PUSH"
 NO_PUSH_FILE = SOURCE_OF_TRUTH_FILE
+
+# --clarify preference (DESIGN §11): opt into surfacing intent questions
+# to the user. Resolution order: --clarify CLI flag → CENTELLA_CLARIFY
+# env → clarify in centella.toml → default False. Same precedence and
+# parse rules as --no-push; mirrored env+TOML because "ask me questions"
+# is a stable per-user preference, unlike --no-verify (a per-invocation
+# safety override).
+CLARIFY_ENV = "CENTELLA_CLARIFY"
+CLARIFY_FILE = SOURCE_OF_TRUTH_FILE
 
 # Verbosity — see IMPLEMENTATION.md §2 "Verbosity". Four levels with
 # stackable -v/-q shortcuts following the clig.dev / cargo / kubectl
@@ -1376,32 +1403,54 @@ def _parse_bool_envtoml(value: str) -> bool | None:
     raise ValueError(value)
 
 
+def _resolve_bool_pref(repo_root: Path, cli_value: bool, *,
+                       env_var: str, file_key: str, file_name: str) -> bool:
+    """Shared resolution for `store_true` CLI flags that also have an
+    env-var and per-repo TOML mirror (see DESIGN §11 / §6 patterns).
+    Order: CLI True wins → env → file → False. Bad env or file values
+    `die()` at startup, not mid-run. Used by `resolve_no_push` and
+    `resolve_clarify`; keep one shape so they cannot drift."""
+    if cli_value:
+        return True
+    env = os.environ.get(env_var, "").strip()
+    if env:
+        try:
+            parsed = _parse_bool_envtoml(env)
+        except ValueError:
+            die(f"{env_var}={env!r} is not a boolean "
+                "(use 1/0, true/false, yes/no, on/off)")
+        if parsed is not None:
+            return parsed
+    cfg = repo_root / file_name
+    file_val = _read_toml_key(cfg, file_key)
+    if file_val is not None:
+        try:
+            parsed = _parse_bool_envtoml(file_val)
+        except ValueError:
+            die(f"{cfg}: {file_key}={file_val!r} is not a boolean")
+        if parsed is not None:
+            return parsed
+    return False
+
+
 def resolve_no_push(repo_root: Path, cli_value: bool) -> bool:
     """Resolve the --no-push preference. Order:
     --no-push CLI flag (action='store_true', so True if passed) →
     CENTELLA_NO_PUSH env var → no_push in centella.toml → False.
     `--no-verify` has no env/TOML mirror (see NO_PUSH_ENV comment)."""
-    if cli_value:
-        return True
-    env = os.environ.get(NO_PUSH_ENV, "").strip()
-    if env:
-        try:
-            parsed = _parse_bool_envtoml(env)
-        except ValueError:
-            die(f"{NO_PUSH_ENV}={env!r} is not a boolean "
-                "(use 1/0, true/false, yes/no, on/off)")
-        if parsed is not None:
-            return parsed
-    cfg = repo_root / NO_PUSH_FILE
-    file_val = _read_toml_key(cfg, "no_push")
-    if file_val is not None:
-        try:
-            parsed = _parse_bool_envtoml(file_val)
-        except ValueError:
-            die(f"{cfg}: no_push={file_val!r} is not a boolean")
-        if parsed is not None:
-            return parsed
-    return False
+    return _resolve_bool_pref(
+        repo_root, cli_value,
+        env_var=NO_PUSH_ENV, file_key="no_push", file_name=NO_PUSH_FILE)
+
+
+def resolve_clarify(repo_root: Path, cli_value: bool) -> bool:
+    """Resolve the --clarify preference. Order:
+    --clarify CLI flag (action='store_true', so True if passed) →
+    CENTELLA_CLARIFY env var → clarify in centella.toml → False.
+    See DESIGN §11 for the clarification semantics."""
+    return _resolve_bool_pref(
+        repo_root, cli_value,
+        env_var=CLARIFY_ENV, file_key="clarify", file_name=CLARIFY_FILE)
 
 
 def _positive_int(s: str) -> int:
@@ -2426,6 +2475,17 @@ def validate_resume_state(data: dict) -> None:
             "Inspect the run's state.json manually "
             "(under .centella/runs/<run-id>/).")
 
+    # Legacy state files from before `--no-clarify` was inverted to
+    # `--clarify` carry a `no_clarify` boolean. Centella does not migrate
+    # legacy state — re-run the task fresh. Catching this in the validator
+    # rather than letting the run silently use new semantics keeps the
+    # CHANGELOG contract honest.
+    if "no_clarify" in data:
+        die("state.json carries a legacy 'no_clarify' key from a run "
+            "started before --no-clarify was inverted to --clarify. "
+            "Centella does not migrate legacy state — re-run the task "
+            "fresh under the new flag semantics.")
+
     # waves is optional (absent if interrupted before scheduling); if present
     # it must be well-formed, and completed_waves must be in range.
     if "waves" in data:
@@ -3133,7 +3193,7 @@ async def judge_capture(record: dict, models: dict[str, str],
     """
     call_type = record.get("call_type", "unknown")
     call_id = record.get("call_id", "unknown")
-    sys_prompt = (PROMPTS / "judge.md").read_text()
+    sys_prompt = load_prompt("judge")
     user_prompt = (
         "CALL RECORD TO JUDGE:\n"
         f"call_type: {call_type}\n"
@@ -3638,7 +3698,7 @@ async def request_patch(state: HealState, iter_n: int,
     """
     call_type = state.call_type
     _, prompt_body, _ = resolve_prompt(call_type)
-    sys_prompt = (PROMPTS / "patch_generator.md").read_text()
+    sys_prompt = load_prompt("patch_generator")
 
     # Build the failing samples section: only response_content is needed
     # for the patch-generator to understand what went wrong.
@@ -3791,13 +3851,13 @@ async def phase_heal(call_type: str, failing_records: list[dict],
 # =========================================================================
 # phases
 # =========================================================================
-async def phase_classify(task: str, st: State, caps: dict, no_clarify: bool,
+async def phase_classify(task: str, st: State, caps: dict, clarify: bool,
                          models: dict[str, str]) -> dict:
     """Phase 1 (classify), which also produces the Phase 0 clarification
     questions: classify the task and surface only genuinely underivable
     (intent-level) questions."""
     log("phase 1: classifying task")
-    sys_prompt = (PROMPTS / "classifier.md").read_text()
+    sys_prompt = load_prompt("classifier")
     st.bump_workers(caps)
     result = await claude_p(
         user_prompt=f"TASK:\n{task}\n\nClassify it and apply the clarification filter.",
@@ -3809,7 +3869,7 @@ async def phase_classify(task: str, st: State, caps: dict, no_clarify: bool,
     cats = [c for c in result.get("categories", []) if c in CATEGORIES]
     if not cats:
         die("classifier returned no recognized categories")
-    questions = [] if no_clarify else result.get("questions", [])
+    questions = result.get("questions", []) if clarify else []
     st.data["categories"] = cats
     st.data["classifier_questions"] = questions
     st.data["needs_source_of_truth"] = bool(result.get("source_of_truth_question"))
@@ -3987,7 +4047,7 @@ async def phase_plan(task: str, st: State, caps: dict,
     cats = st.data["categories"]
     answers = st.data.get("answers", {})
     sot = answers.get("source_of_truth", "codebase")
-    sys_prompt = (PROMPTS / "planner.md").read_text()
+    sys_prompt = load_prompt("planner")
     # confidence_rounds is the worker-internal evidence-gate bound (DESIGN
     # §8 planner gate). The orchestrator does not enforce it — the planner
     # bounds itself — but passing it in the context blob is what makes the
@@ -4209,7 +4269,7 @@ async def phase_reconcile(plans: list[dict], task: str, st: State,
         "unresolved_requires": unresolved,
     }
 
-    sys_prompt = (PROMPTS / "reconciler.md").read_text()
+    sys_prompt = load_prompt("reconciler")
     user_prompt = (
         "RECONCILER INPUT:\n" + json.dumps(payload, indent=2) +
         "\n\nResolve every unresolved_requires entry per your "
@@ -4363,19 +4423,18 @@ async def run_implementer(sid: str, centella_dir: Path, caps: dict, st: State,
     both kinds of continuation up to the shared `subtask_continuations`
     cap: context-exhaustion handoffs and DESIGN §11 mid-execution
     clarifications."""
-    sys_prompt = (PROMPTS / "implementer.md").read_text()
+    sys_prompt = load_prompt("implementer")
     proc = await run_script("new-worktree.sh", sid, st.run_id)
     if proc.returncode != 0:
         raise WorkerError(f"worktree creation failed for {sid}: {proc.stderr.strip()}")
     worktree = proc.stdout.strip().splitlines()[-1]
 
     # DESIGN §11 mid-execution clarification: the worker may exit with
-    # `needs-clarification` only when --no-clarify is NOT in effect.
-    # Under --no-clarify the user has asked centella not to interrupt
-    # them, so the worker must make a best-effort decision and proceed
-    # (same semantics as Phase-1 under --no-clarify, which defaults the
-    # source-of-truth resolution instead of asking).
-    can_ask_user = not st.data.get("no_clarify", False)
+    # `needs-clarification` only when --clarify is in effect. Without
+    # --clarify (the default) the user has not opted into questions, so
+    # the worker must run the same codebase→research probe and make a
+    # documented best-effort decision instead of interrupting.
+    can_ask_user = st.data.get("clarify", False)
 
     up = [f"Execute subtask `{sid}`.",
           f"CENTELLA_DIR is {centella_dir} (absolute).",
@@ -4684,7 +4743,7 @@ async def integrate_wave(wave: list[str], results: dict[str, dict],
                 f"{proc.stderr.strip() or proc.stdout.strip() or 'no message'}")
         # exit 1 (conflict): staging worktree is mid-merge — hand to an integrator
         log(f"  conflict integrating {sid}; spawning integrator")
-        sys_prompt = (PROMPTS / "integrator.md").read_text()
+        sys_prompt = load_prompt("integrator")
         up = (f"Resolve the in-progress merge conflict in this worktree.\n"
               f"CENTELLA_DIR is {centella_dir}.\n"
               f"Incoming subtask: {sid}\n"
@@ -4999,6 +5058,7 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
         st.data["source_of_truth_pref"] = sot_pref
         st.data["verbosity"] = verbosity
         st.data["inspect_dirs"] = list(getattr(args, "inspect_dirs", []) or [])
+        st.data["clarify"] = bool(args.clarify)
         st.save()
         # Absorb --answers on resume too. The documented user flow for
         # a non-interactive deferred-question exit (Phase-1 or §11
@@ -5015,14 +5075,14 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
                    "source_of_truth_pref": sot_pref,
                    "verbosity": verbosity,
                    "inspect_dirs": list(getattr(args, "inspect_dirs", []) or []),
-                   "no_clarify": bool(args.no_clarify)}
+                   "clarify": bool(args.clarify)}
         st.save()
         await preflight(centella_dir, verbosity=verbosity,
                         skip_smoke=args.skip_smoke,
                         no_push=getattr(args, "no_push", False))
         supplied = (json.loads(Path(args.answers).read_text())
                     if args.answers else None)
-        await phase_classify(task, st, caps, args.no_clarify, models)
+        await phase_classify(task, st, caps, args.clarify, models)
         # Now that classification has chosen a category, promote the
         # bootstrap dir to its final per-run name (DESIGN §6 "The run
         # identifier"). The rename is atomic on POSIX same-filesystem;
@@ -5103,11 +5163,13 @@ def main() -> None:
                          "Exits without running orchestrate.")
     ap.add_argument("--answers", metavar="FILE",
                     help="JSON file of pre-supplied clarification answers")
-    ap.add_argument("--no-clarify", action="store_true",
-                    help="skip clarification entirely (DESIGN §11): drop "
-                         "intent questions and satisfy the source-of-truth "
-                         "from --source-of-truth / CENTELLA_SOURCE_OF_TRUTH / "
-                         "centella.toml if set, otherwise default to 'codebase'")
+    ap.add_argument("--clarify", action="store_true",
+                    help="opt into surfacing intent questions to the user "
+                         "(DESIGN §11). Without this flag (the default), the "
+                         "classifier's filter still runs but surviving "
+                         "questions are dropped and the implementer makes a "
+                         f"best-effort decision. Also {CLARIFY_ENV} env var "
+                         "or clarify=true in centella.toml.")
     ap.add_argument("--no-push", action="store_true",
                     help="skip the push and PR step at finalize. The run "
                          "completes with the run branch local-only; your "
@@ -5312,6 +5374,11 @@ def main() -> None:
     # preflight() / phase_finalize() see the resolved value uniformly via
     # `args.no_push` regardless of where the choice came from.
     args.no_push = resolve_no_push(repo_root, args.no_push)
+
+    # Resolve --clarify with the same shape as --no-push (DESIGN §11).
+    # Re-attach to args so orchestrate() folds it into state.json under
+    # the canonical "clarify" key.
+    args.clarify = resolve_clarify(repo_root, args.clarify)
 
     # Resolve --inspect-dir: CLI flags (repeatable) → CENTELLA_INSPECT_DIRS
     # env (colon-separated) → inspect_dirs in centella.toml (comma-separated)

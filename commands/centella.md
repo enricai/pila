@@ -17,10 +17,14 @@ clarification step if one occurs.
 
 ## Steps
 
-1. Run the orchestrator from the current repository root:
+1. Run the orchestrator from the current repository root. Pass
+   `--clarify` so the orchestrator surfaces classifier intent
+   questions through this Claude Code session rather than running
+   unattended — the user is here in chat, so this session is the
+   relay channel:
 
    ```
-   bash "${CLAUDE_PLUGIN_ROOT}/centella" "$ARGUMENTS"
+   bash "${CLAUDE_PLUGIN_ROOT}/centella" --clarify "$ARGUMENTS"
    ```
 
 2. **If it exits with code 10**, the orchestrator needs the user to answer
@@ -37,7 +41,7 @@ clarification step if one occurs.
    `CENTELLA_MODEL_<WORKER>`. Then resume:
 
    ```
-   bash "${CLAUDE_PLUGIN_ROOT}/centella" --resume --answers .centella/answers.json
+   bash "${CLAUDE_PLUGIN_ROOT}/centella" --clarify --resume --answers .centella/answers.json
    ```
 
    (If `--resume` reports the run had not reached scheduling, re-run without

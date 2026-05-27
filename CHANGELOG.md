@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`--no-clarify` is now `--clarify`; no-questions is the new
+  default.** The flag's polarity is inverted: by default centella runs
+  without surfacing intent questions to the user. The classifier's
+  codebase→research filter still runs and the implementer applies the
+  same filter before any mid-execution decision — "no questions" never
+  means "skip the rigor." Pass `--clarify` (or set
+  `CENTELLA_CLARIFY=true` / `clarify = true` in `centella.toml`) to
+  opt into surfacing the questions that survive the filter. **Breaking
+  for `--resume`:** runs started under the old flag carry `no_clarify`
+  in state.json and will fail resume validation. Re-run the task
+  fresh under the new flag.
+- **Clarification filter is DRY-ed across the prompts.** The wording
+  shown to workers now lives in a single shared fragment
+  (`prompts/_clarification_filter.md`), included into
+  `prompts/classifier.md` and `prompts/implementer.md` at load time
+  by a new `load_prompt()` helper in `orchestrator/centella.py`.
+  Previously the same filter was restated three times and could
+  drift. Worker-facing text now also pushes back explicitly on the
+  base model's training prior to ask questions liberally — ~90% of
+  apparent intent questions are closable by deeper investigation.
+
+### Added
+
+- `CENTELLA_CLARIFY` env var and `clarify` key in `centella.toml`
+  (same precedence as `--source-of-truth`: CLI > env > file > default
+  `False`). New helper `_resolve_bool_pref` factors the resolution
+  shape shared with `--no-push` to keep them from drifting.
+
 ### Removed
 
 - **`ask` source-of-truth value.** The four-value preference

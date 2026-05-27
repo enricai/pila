@@ -19,7 +19,7 @@ labels: bug
   <the exact `centella "..."` invocation, or the slash-command form>
   ```
 - **Repo state:** branch, roughly how dirty, any non-default `centella.toml`
-- **Other relevant flags:** `--source-of-truth`, `--model` / `--model-<worker>`, `--max-workers`, `--max-parallel`, `--no-clarify`, etc.
+- **Other relevant flags:** `--source-of-truth`, `--model` / `--model-<worker>`, `--max-workers`, `--max-parallel`, `--clarify`, etc.
 
 ## Environment
 

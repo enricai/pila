@@ -90,8 +90,8 @@ git clone https://github.com/enricai/centella.git
 # off). Affects only the final `git push`; worker commits still run hooks.
 /path/to/centella/centella "task" --no-verify
 
-# Skip the clarification phase entirely:
-/path/to/centella/centella "task" --no-clarify
+# Opt into intent questions (default: no questions are surfaced).
+/path/to/centella/centella "task" --clarify
 
 # Pre-supply clarification answers (JSON object):
 # Keys are question ids from the classifier, plus "source_of_truth"
@@ -155,7 +155,7 @@ Complete reference for every CLI flag, environment variable, and
 | `--no-push` | off | Skip the default push + PR at finalize. The run completes with the run branch local-only; your working branch is unchanged. Overrides `CENTELLA_NO_PUSH` / `centella.toml`. |
 | `--no-verify` | off | Pass `--no-verify` to the finalize `git push` only (skips pre-push hooks). Worker commits inside worktrees still run all hooks. The user's explicit override per CLAUDE.md's hooks principle. |
 | `--answers FILE` | — | JSON object of pre-supplied clarification answers (keyed by question `id`; may include `source_of_truth`). |
-| `--no-clarify` | off | Skip clarification entirely. Intent questions are dropped; source-of-truth is the resolved preference (`--source-of-truth` / env / file / default `both`). |
+| `--clarify` | off | Opt into surfacing intent questions to the user. Default: questions are dropped after the classifier's codebase→research filter, and the implementer makes a documented best-effort decision. Also `CENTELLA_CLARIFY` env var or `clarify = true` in `centella.toml`. |
 | `--max-workers N` | 40 | Cap on total `claude -p` invocations across the run. |
 | `--max-parallel N` | 4 | Cap on concurrent workers within a wave. |
 | `--confidence-rounds N` | 8 | Evidence-gate rounds the planner and implementer may run before exiting blocked (DESIGN §8). Overrides `CENTELLA_CONFIDENCE_ROUNDS` and `centella.toml`. |
@@ -177,6 +177,7 @@ Complete reference for every CLI flag, environment variable, and
 | `CENTELLA_CONFIDENCE_ROUNDS` | `confidence_rounds` | Evidence-gate rounds per worker (positive integer, default 8). Overridden by `--confidence-rounds`. |
 | `CENTELLA_VERBOSITY` | `verbosity` | Inline-output verbosity (`quiet` / `normal` / `stream` / `debug`, default `stream`). Overridden by `--verbosity`. `-v` / `-vv` / `-q` / `-qq` shortcuts override both. |
 | `CENTELLA_NO_PUSH` | `no_push` | Sticky opt-out from push + PR at finalize (truthy → skip). Overridden by `--no-push`. `--no-verify` has no env/TOML mirror — it is a per-invocation override only. |
+| `CENTELLA_CLARIFY` | `clarify` | Sticky opt-in to surfacing intent questions to the user (truthy → on). Overridden by `--clarify`. |
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | — | **Claude Code CLI variable**, not consumed by centella. Set to `70` to backstop worker auto-compaction. |
 
 ### Precedence
