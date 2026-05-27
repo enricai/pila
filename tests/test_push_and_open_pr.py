@@ -60,8 +60,8 @@ def test_push_and_open_pr_writes_run_json_on_failure(centella):
 
 
 def test_push_and_open_pr_push_failure_is_fatal(centella):
-    """Push failure calls die() — local merge is intact, but the run is
-    considered failed at the push step (the user must retry)."""
+    """Push failure calls die() — the run branch is intact, but the run
+    is considered failed at the push step (the user must retry)."""
     src = inspect.getsource(centella.push_and_open_pr)
     # The push failure branch dies; the PR failure branch returns.
     # Look for both: at least one `die(` call and at least one `return`

@@ -810,10 +810,10 @@ def _check_gh_cli(no_push: bool) -> None:
     """Preflight gate for the push + PR finalize step (DESIGN §6
     "Finalization"). Short-circuits silently when --no-push is set;
     otherwise verifies that `gh` is installed, authenticated, and the
-    repo has an `origin` remote — all things finalize.sh + push_and_open_pr
-    will need. Without this, a 40-worker run could complete successfully
-    and then fail at the very last step, leaving the user with merged
-    work but no PR."""
+    repo has an `origin` remote — all things `push_and_open_pr` will
+    need. Without this, a 40-worker run could complete successfully and
+    then fail at the very last step, leaving the user with a green run
+    branch but no PR."""
     if no_push:
         return
     if not shutil.which("gh"):
@@ -984,8 +984,9 @@ def _validate_run_json(data: dict) -> None:
 
 def compose_pr_body(state: dict, run_id: str) -> str:
     """Generate the PR body from run state + run_id. Deterministic given
-    the inputs; no I/O. Used by finalize.sh (commit 4) via a small
-    JSON-stdin protocol to avoid passing 4kb of body as a shell argument.
+    the inputs; no I/O. Used by `push_and_open_pr()`, piped to
+    `gh pr create --body-file -` to avoid passing 4kb of body as a
+    shell argument.
 
     Missing optional fields render as 'n/a' rather than the literal
     string 'None' — Python's f-string default would produce 'None' for
@@ -4876,14 +4877,16 @@ async def phase_execute(centella_dir: Path, st: State, caps: dict,
 async def push_and_open_pr(st: State, no_verify: bool) -> None:
     """Push the run branch to `origin` and open a PR via `gh pr create`.
 
-    Called from `phase_finalize` after the local merge succeeds, when
-    `--no-push` is NOT in effect. See DESIGN §6 "Finalization — Push and
-    PR" for the failure-handling contract:
+    Called from `phase_finalize` when `--no-push` is NOT in effect. The
+    run branch is the integration artifact; the PR is the proposed
+    integration into the working branch. Centella does not merge into
+    the working branch locally. See DESIGN §6 "Finalization" for the
+    failure-handling contract:
 
     - Push failure: capture stderr, write `push_error` to run.json,
-      log a multi-line message naming both branches and the retry
-      command, exit non-zero (die). Local merge is intact; user can
-      retry the push manually.
+      log a multi-line message naming the run branch (where the work
+      lives) and the working branch (unchanged), exit non-zero (die).
+      User can retry the push manually.
     - PR-creation failure: capture stderr, write `pr_error` to run.json,
       log a multi-line *warning* with the pushed-branch URL and the
       retry command, exit success (the run is complete; the PR is a
@@ -4912,7 +4915,7 @@ async def push_and_open_pr(st: State, no_verify: bool) -> None:
             f"git push failed for branch `{run_branch}`.\n"
             f"  Local state is intact:\n"
             f"    - run branch:     {run_branch}     (holds all wave merges)\n"
-            f"    - working branch: {working_branch}      (has the final merge commit)\n"
+            f"    - working branch: {working_branch}      (unchanged from run start; the intended PR base)\n"
             f"  Resolve and retry manually:\n"
             f"    git push -u origin {run_branch}"
             f"{' --no-verify' if no_verify else ''}\n"
@@ -4961,25 +4964,6 @@ async def phase_finalize(centella_dir: Path, st: State, no_push: bool,
         die(f"finalize failed (run branch is intact): {proc.stderr.strip()}")
     await run_script("cleanup.sh", "--run-id", st.run_id)
 
-    # verify the merge commit actually landed on the working branch
-    r = await run_proc(
-        ["git", "log", "--merges", "-1", "--format=%s", "HEAD"],
-    )
-    if r.returncode == 0 and "centella:" not in r.stdout:
-        log("  ⚠  finalize warning: centella merge commit not found at HEAD — "
-            "verify the working branch manually")
-
-    # verify the run branch and the working branch are now identical — a
-    # non-empty diff here means the merge silently dropped changes (data loss)
-    run_branch = compute_run_branch(st.run_id)
-    r = await run_proc(
-        ["git", "diff", "--stat", f"{run_branch}..HEAD"],
-    )
-    if r.returncode == 0 and r.stdout.strip():
-        log(f"  ⚠  finalize warning: working branch diverges from {run_branch} "
-            f"after merge:\n"
-            f"    {r.stdout.strip()}\n"
-            "    Some changes may not have merged. Inspect manually.")
     wc = st.data.get("worker_count", 0)
     nsub = len(st.data.get("subtask_status", {}))
     tel = st.data.get("telemetry", {})
@@ -4993,13 +4977,14 @@ async def phase_finalize(centella_dir: Path, st: State, no_push: bool,
 
     if no_push:
         log(f"skipped push and PR (--no-push); the run branch "
-            f"{compute_run_branch(st.run_id)} and the merged working "
-            "branch are local-only")
+            f"{compute_run_branch(st.run_id)} is local-only; "
+            "your working branch is unchanged")
     else:
         await push_and_open_pr(st, no_verify=no_verify)
 
     log(f"done — {nsub} subtasks, {len(st.data['waves'])} waves, "
-        f"{wc} worker invocations. Merged into the working branch.")
+        f"{wc} worker invocations. Work is on "
+        f"{compute_run_branch(st.run_id)}; working branch unchanged.")
     if tel:
         log(f"run weight: {tel.get('calls', 0)} claude -p calls, "
             f"{tel.get('input_tokens', 0):,} in / "
@@ -5139,9 +5124,9 @@ def main() -> None:
                          "centella.toml if set, otherwise default to 'codebase'")
     ap.add_argument("--no-push", action="store_true",
                     help="skip the push and PR step at finalize. The run "
-                         "completes with the local merge into the working "
-                         f"branch only. Also {NO_PUSH_ENV} env var or "
-                         "no_push in centella.toml.")
+                         "completes with the run branch local-only; your "
+                         f"working branch is unchanged. Also {NO_PUSH_ENV} "
+                         "env var or no_push in centella.toml.")
     ap.add_argument("--no-verify", action="store_true",
                     help="pass --no-verify to the finalize `git push` "
                          "(skips pre-push hooks). Worker commits inside "

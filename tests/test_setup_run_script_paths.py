@@ -119,7 +119,9 @@ def test_finalize_takes_run_id_arg():
     assert 'RUN_ID="${1:?usage: finalize.sh <run-id>}"' in src
 
 
-def test_finalize_merges_per_run_branch():
+def test_finalize_references_per_run_branch():
+    """finalize.sh resolves the per-run branch from ${RUN_ID}, not the
+    legacy global `centella/staging` branch."""
     src = _script("finalize.sh")
     assert 'BRANCH="centella/runs/${RUN_ID}"' in src
     # The legacy centella/staging branch is gone from executable lines.

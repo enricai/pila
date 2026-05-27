@@ -35,7 +35,7 @@ centella/
 │   ├── setup-run.sh               create per-run branch + worktree (idempotent)
 │   ├── new-worktree.sh            create/reuse a per-subtask worktree (per-run scoped)
 │   ├── integrate.sh               merge a subtask branch into the per-run branch
-│   ├── finalize.sh                merge run branch into working branch; push; open PR
+│   ├── finalize.sh                verify the run branch exists and is non-empty; ready for push
 │   └── cleanup.sh                 remove worktrees / branches (default: scoped to one run)
 ├── commands/centella.md            thin plugin skill — launches the orchestrator
 ├── skills/
@@ -69,8 +69,8 @@ Maps to `DESIGN.md`: §3 (architecture / phases), §2 (why a program, not a skil
 # List in-flight and completed runs in this repository:
 /path/to/centella/centella --list
 
-# Skip the default push + PR at finalize (run completes with the local merge
-# into the working branch only):
+# Skip the default push + PR at finalize (run completes with the run branch
+# local-only; the working branch is unchanged):
 /path/to/centella/centella "task" --no-push
 export CENTELLA_NO_PUSH=1
 
@@ -647,15 +647,6 @@ orchestrator only checks the outcome.
 | `check_integrator_commit()` | integrator merge commit touched `.centella/` files — non-fatal warning, recorded to `state.json` |
 | integrator status `design-conflict` / `failed` | unresolvable conflict — **terminal**: in-progress merge aborted, the run branch left clean at the last good wave, diagnosis saved, run stops |
 
-### Post-finalize checks
-Both are **non-fatal warnings** (logged, not `die()`) — the user is told to
-verify manually; the run does not abort.
-
-| Check | Catches | On failure |
-|-------|---------|-----------|
-| most-recent merge subject contains `'centella:'` (read from `git log --merges -1 --format=%s HEAD`) | finalize merged to the wrong branch | non-fatal warning |
-| `git diff --stat centella/runs/<run-id>..HEAD` empty | merge silently dropped changes | non-fatal warning |
-
 ### Resume integrity — `validate_resume_state()`
 Enforces (one half of) DESIGN §6's "the run branch is the resume contract"
 invariant — state.json's `waves`/`completed_waves` say *which* wave to
@@ -780,21 +771,21 @@ Every script takes a `RUN_ID` as its first positional argument (after any flags)
 | `setup-run.sh <run-id>` | Creates `centella/runs/<run-id>` **only if absent** — never force-resets it (an existing branch carries completed waves; resetting it would destroy resume state). Records the working branch (HEAD-at-run-start) to `.centella/runs/<run-id>/working-branch` on first run only. Adds the run-branch worktree at `.centella/runs/<run-id>/worktrees/staging` if missing. Appends `.centella/` to the repo's `.git/info/exclude` (idempotent). Safe on `--resume`. |
 | `new-worktree.sh <id> <run-id>` | Creates `centella/subtasks/<run-id>/<id>` worktree at `.centella/runs/<run-id>/worktrees/<id>` branched off the current `centella/runs/<run-id>` tip; reuses an existing worktree/branch if present (resume after handoff). Prints the absolute worktree path. The run-branch (`centella/runs/…`) and subtask-branch (`centella/subtasks/…`) prefixes are deliberately disjoint so neither is an ancestor ref of the other — git's loose ref store cannot hold a ref AT a path and another ref UNDER that same path simultaneously. |
 | `integrate.sh <id> <run-id>` | From repo root, inside the run-branch worktree (`.centella/runs/<run-id>/worktrees/staging`): `git merge --no-ff centella/subtasks/<run-id>/<id>`. Exit 0 clean; exit 1 on conflict, leaving the worktree mid-merge for an integrator; exit 2 on precondition failure (run-branch worktree or subtask branch missing) — `integrate_wave` treats exit 2 as fatal via `die()` and does *not* spawn an integrator, since the worktree-less case would fail in confusing ways. |
-| `finalize.sh <run-id>` | The *local-merge half* of finalize. Checks out the working branch (recorded by `setup-run.sh`), merges `centella/runs/<run-id>` into it. On conflict: `git merge --abort`, restore the working branch clean, exit non-zero with manual-merge instructions; run branch left intact. The push and PR step is **not** in this script — it lives in `push_and_open_pr()` in `centella.py` (see below) so it can compose the PR body with `compose_pr_body()`, write `run.json`, and emit Python-style multi-line failure messages. |
+| `finalize.sh <run-id>` | Run-branch verifier. Exits 0 if `refs/heads/centella/runs/<run-id>` exists and contains at least one commit beyond the working branch; exits non-zero with a diagnosis otherwise. The working branch is **never** modified — centella does not merge into it locally; the PR (opened by `push_and_open_pr()`) is the proposed integration. The push and PR step lives in `push_and_open_pr()` in `centella.py` (see below) so it can compose the PR body with `compose_pr_body()`, write `run.json`, and emit Python-style multi-line failure messages. |
 | `cleanup.sh [--run-id <id> \| --all-runs \| --bootstrap \| --legacy] [--branches]` | Default (no flag): scans `.centella/runs/*/state.json` for the most-recently-failed run (most recent without `finished_at`), confirms y/N, then removes only that run's worktrees + prunes git metadata. State dir stays as audit. `--run-id <id>` is an explicit single-run cleanup (worktrees only). `--all-runs` runs the same per-run cleanup across every run dir under `.centella/runs/` (excluding `_bootstrap-*`). `--bootstrap` removes orphaned `_bootstrap-*` directories (runs that died before classify completed; not enumerable by `discover_runs`). `--legacy` removes the pre-per-run layout (`.centella/state.json`, `.centella/worktrees/`, `centella/staging` branch). `--branches` (combinable with `--run-id` or `--all-runs`) additionally deletes the matching run branches (`centella/runs/<id>` and `centella/subtasks/<id>/*`); without `--branches`, branches are kept as an audit trail. State dirs are always preserved by `cleanup.sh` — full nuke-the-run is the Ctrl-C path in the orchestrator (`_cleanup_on_abnormal_exit(full_purge=True)`). |
 
 A run branch `centella/runs/<run-id>` is never reset once created — this is the invariant `--resume` depends on. See `DESIGN.md` §6 ("the run branch is the resume contract").
 
 ### Push and PR (Python; called from `phase_finalize`)
 
-The push + PR step is implemented in Python rather than in `finalize.sh`. It runs after `finalize.sh` succeeds, unless `--no-push` is in effect.
+The push + PR step is implemented in Python rather than in `finalize.sh`. It runs after `finalize.sh`'s verifier check succeeds, unless `--no-push` is in effect.
 
 | Function (centella.py) | Behavior |
 |--------|----------|
-| `push_and_open_pr(st, no_verify)` | Pushes `centella/runs/<run-id>` to `origin` (with `--no-verify` appended if the CLI flag was set), then opens a PR via `gh pr create --base <working-branch> --head centella/runs/<run-id> --title centella: <run-id> --body-file -` piping `compose_pr_body(st.data, st.run_id)`. Push failure dies non-zero with a multi-line message naming both branches, the captured stderr, and the exact retry command; updates `.centella/runs/<run-id>/run.json` with `push_error`. PR-creation failure is **non-fatal**: logs a warning with the pushed-branch URL and the retry command; updates `run.json` with `pr_error` and returns 0 (the run is complete; only the PR is missing). |
+| `push_and_open_pr(st, no_verify)` | Pushes `centella/runs/<run-id>` to `origin` (with `--no-verify` appended if the CLI flag was set), then opens a PR via `gh pr create --base <working-branch> --head centella/runs/<run-id> --title centella: <run-id> --body-file -` piping `compose_pr_body(st.data, st.run_id)`. Push failure dies non-zero with a multi-line message naming the run branch (where the work lives) and the working branch (unchanged from run start; the intended PR base), the captured stderr, and the exact retry command; updates `.centella/runs/<run-id>/run.json` with `push_error`. PR-creation failure is **non-fatal**: logs a warning with the pushed-branch URL and the retry command; updates `run.json` with `pr_error` and returns 0 (the run is complete; only the PR is missing). |
 | `_check_gh_cli(no_push)` | Preflight gate. Short-circuits silently when `--no-push` is set. Else verifies `shutil.which("gh")`, `gh auth status` exits 0, and `git remote get-url origin` succeeds. Each failure dies with an actionable message + the `--no-push` escape hatch. |
 
-`--no-push` skips the entire push + PR step (the run completes with the local merge only). CLI flag, `CENTELLA_NO_PUSH` env, `no_push = true` in `centella.toml` — same precedence pattern as `--source-of-truth`. `--no-verify` is CLI-only and only affects the push step (worker `git commit`s inside worktrees still run all hooks).
+`--no-push` skips the entire push + PR step (the run completes with the run branch local-only; the working branch is unchanged). CLI flag, `CENTELLA_NO_PUSH` env, `no_push = true` in `centella.toml` — same precedence pattern as `--source-of-truth`. `--no-verify` is CLI-only and only affects the push step (worker `git commit`s inside worktrees still run all hooks).
 
 Maps to `DESIGN.md`: §6 (Finalization — Push and PR).
 
@@ -818,7 +809,7 @@ coordination state.
     └── <run-id>/                    (or _bootstrap-<6hex> pre-classify)
         ├── state.json               run state — see field table below
         ├── run.json                 sidecar — see field table below
-        ├── working-branch           the branch finalize.sh returns to (HEAD-at-run-start)
+        ├── working-branch           the branch HEAD-at-run-start; used as the PR base (centella does not merge into it locally)
         ├── plan.json                merged planner output
         ├── subtasks/<id>.json       per-subtask spec handed to each implementer
         ├── criteria/<id>.md         frozen success criteria, sha256-locked
@@ -862,7 +853,7 @@ discovery without parsing the full `state.json`):
 |-------|-------|-------|
 | `run_id` | str | the run identifier (matches the directory name and the branch suffix) |
 | `branch` | str | the run branch — always `centella/runs/<run_id>` |
-| `working_branch` | str | the branch HEAD-at-run-start; the PR base and the finalize merge target |
+| `working_branch` | str | the branch HEAD-at-run-start; used as the PR base (centella does not merge into it locally) |
 | `started_at` | ISO-8601 str | wall-clock start time (also mirrored in `state.json`) |
 | `finished_at` | ISO-8601 str \| null | wall-clock end time, set at finalize success |
 | `task` | str | the task description (mirrored from `state.json`) |

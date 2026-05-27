@@ -131,9 +131,9 @@ by worktree isolation. See [README "Safety"](../README.md#safety) and
 
 ## Step 5 — Reviewing the run branch
 
-Before phase 6 merges anything into your working branch, **review the
-run branch yourself**. This is what the run-branch-as-integration-buffer
-(DESIGN §6) buys you:
+Before phase 6 opens a PR proposing to merge into your working branch,
+**review the run branch yourself**. This is what the
+run-branch-as-integration-buffer (DESIGN §6) buys you:
 
 ```bash
 git log centella/runs/<run-id> --oneline
@@ -148,12 +148,15 @@ branch, or abandon and `./scripts/cleanup.sh --run-id <run-id> --branches`.
 
 ## Step 6 — Finalization
 
-Phase 6 merges `centella/runs/<run-id>` into your working branch (the
-branch you were on when you invoked Centella, recorded in
-`.centella/runs/<run-id>/working-branch`) and runs post-merge sanity
-checks. The per-subtask branches under `centella/subtasks/<run-id>/` and
-the run branch `centella/runs/<run-id>` remain in your repo as an audit
-trail. Each worker's full commit history is preserved on its
+Phase 6 verifies `centella/runs/<run-id>` is non-empty, pushes it to
+`origin`, and opens a PR via `gh pr create --base <working-branch>
+--head centella/runs/<run-id>`. Your working branch (the branch you
+were on when you invoked Centella, recorded in
+`.centella/runs/<run-id>/working-branch`) is **not** modified locally —
+review and merge the PR on GitHub when you're satisfied. The
+per-subtask branches under `centella/subtasks/<run-id>/` and the run
+branch `centella/runs/<run-id>` remain in your repo as an audit trail.
+Each worker's full commit history is preserved on its
 `centella/subtasks/<run-id>/<subtask-id>` branch.
 
 When you no longer need the audit trail:

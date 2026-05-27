@@ -59,9 +59,12 @@ Any defect that violates the documented isolation or enforcement boundary:
 - **Command injection** — unquoted or unsanitized expansion in
   `scripts/*.sh` that lets a task description, repo name, or filename
   inject shell commands
-- **Auto-merge bypass** — any defect causing `centella/*` branches to
-  merge into the working branch without the documented phase-6 gates,
-  or causing the staging-branch validation step to be skipped
+- **Auto-merge bypass** — any defect causing a subtask branch to land
+  on the run branch (`centella/runs/<id>`) without the documented
+  integrator gates, or causing the run-branch validation step to be
+  skipped. (Phase 6 does not merge into the working branch — it pushes
+  the run branch and opens a PR; the human review on that PR is the
+  user-facing safety boundary.)
 - **Schema bypass** — any path where a worker's output is consumed
   without passing through its `SCHEMAS` entry (see CLAUDE.md "Mandatory
   requirements")
@@ -76,7 +79,7 @@ report them as security issues:
   bounded by worktree isolation. Review staging before merging.
 - **A worker's commit being merged into staging by the integrator** —
   the integrator does exactly that by design; the safety boundary is at
-  the working-branch merge in phase 6, not at staging.
+  the user's review of the phase-6 PR, not at staging.
 - **Running on a repository whose `claude` CLI is misconfigured** —
   Centella does not validate the user's `claude` credentials or
   permissions; this is upstream of the orchestrator.

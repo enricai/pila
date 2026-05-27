@@ -44,7 +44,8 @@ centella "<task>"
    ├─ Phase 4  Create centella/runs/<run-id> branch + worktree (per-run unique)
    ├─ Phase 5  Per wave: implement (parallel, isolated worktrees) → claude -p each
    │           integrate into the run branch; validate the run branch
-   └─ Phase 6  Merge run branch → working branch; push + open PR; cleanup
+   └─ Phase 6  Push run branch; open PR against working branch; cleanup
+               (working branch not modified locally)
 ```
 
 For the full rationale — why the orchestrator is a script rather than a plugin
@@ -77,8 +78,8 @@ git clone https://github.com/enricai/centella.git
 # List in-flight and completed runs in this repository:
 /path/to/centella/centella --list
 
-# Skip the default push + PR at finalize (run completes with the local
-# merge into the working branch only):
+# Skip the default push + PR at finalize (run completes with the run
+# branch local-only; your working branch is unchanged):
 /path/to/centella/centella "task" --no-push
 
 # Skip pre-push hooks at finalize (the user's explicit override; defaults
@@ -146,7 +147,7 @@ Complete reference for every CLI flag, environment variable, and
 | `--resume` | — | Resume an interrupted run. Auto-picks if exactly one run exists; requires `--run-id` if multiple. |
 | `--run-id ID` | — | Select a specific run by id (e.g., for `--resume` when multiple runs are in flight). |
 | `--list` | — | Enumerate in-flight and completed runs in this repository (run id, started, status, branch). |
-| `--no-push` | off | Skip the default push + PR at finalize. The run completes with the local merge only. Overrides `CENTELLA_NO_PUSH` / `centella.toml`. |
+| `--no-push` | off | Skip the default push + PR at finalize. The run completes with the run branch local-only; your working branch is unchanged. Overrides `CENTELLA_NO_PUSH` / `centella.toml`. |
 | `--no-verify` | off | Pass `--no-verify` to the finalize `git push` only (skips pre-push hooks). Worker commits inside worktrees still run all hooks. The user's explicit override per CLAUDE.md's hooks principle. |
 | `--answers FILE` | — | JSON object of pre-supplied clarification answers (keyed by question `id`; may include `source_of_truth`). |
 | `--no-clarify` | off | Skip clarification entirely. Intent questions are dropped; source-of-truth is resolved from `--source-of-truth` / env / file, otherwise defaults to `codebase`. |
@@ -257,7 +258,7 @@ live `claude` binary would be needed; out of scope for the current suite).
 | `scripts/setup-run.sh` | Create per-run branch + worktree (`centella/runs/<run-id>`) |
 | `scripts/new-worktree.sh` | Create per-subtask branch + worktree off the run branch |
 | `scripts/integrate.sh` | Merge a subtask branch into the run branch |
-| `scripts/finalize.sh` | Merge the run branch into the working branch (local merge only — the push + PR step lives in Python's `push_and_open_pr`, called from `phase_finalize` unless `--no-push`) |
+| `scripts/finalize.sh` | Verify the run branch is non-empty and ready to push (the working branch is not modified locally — the push + PR step lives in Python's `push_and_open_pr`, called from `phase_finalize` unless `--no-push`) |
 | `scripts/cleanup.sh` | Remove worktrees for one run (default `--run-id`) or all runs (`--all-runs`). State dir always preserved as audit. `--branches` also deletes the matching `centella/runs/<id>` run branch and `centella/subtasks/<id>/*` subtask branches. `--bootstrap` removes orphaned `_bootstrap-*` dirs (runs that died before classify completed). `--legacy` removes the pre-per-run layout. |
 | `centella` | Executable entry-point wrapper |
 | `commands/centella.md` | Thin plugin skill — reachable as `/centella` from Claude Code |
@@ -278,11 +279,12 @@ can also pass `--no-push` to keep finalize fully local.
 
 The run writes only to `.centella/runs/<run-id>/` (auto-excluded from git
 via `.git/info/exclude`) and to `centella/runs/<run-id>` plus
-`centella/subtasks/<run-id>/<subtask-id>` branches until Phase 6, when it merges into
-your working branch and (unless `--no-push`) pushes the run branch to
-`origin`. After a run, the run branches are kept as an audit trail. Remove
-them with `scripts/cleanup.sh --run-id <id> --branches` (or `--all-runs
---branches` for an audit cleanup across every past run).
+`centella/subtasks/<run-id>/<subtask-id>` branches. Phase 6 (unless
+`--no-push`) pushes the run branch to `origin` and opens a PR against
+your working branch — your working branch itself is never modified
+locally. After a run, the run branches are kept as an audit trail.
+Remove them with `scripts/cleanup.sh --run-id <id> --branches` (or
+`--all-runs --branches` for an audit cleanup across every past run).
 
 ## Troubleshooting
 

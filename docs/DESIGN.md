@@ -86,8 +86,9 @@ Orchestrator (deterministic — owns all control flow, caps, state)
 │   ├─ Implement — one implementer per subtask               → workers (parallel)
 │   ├─ Integrate each result into the run branch; on conflict → 1 integrator worker
 │   └─ Validate the integrated run branch result
-└─ Phase 6   Merge the run branch into the working branch;
-             push the run branch and open a PR; clean up
+└─ Phase 6   Verify the run branch; push it and open a PR against the
+             working branch; clean up. (Working branch is not modified
+             locally — the PR is the proposed integration.)
 ```
 
 **Why classification precedes clarification.** Phase 1 runs before Phase 0
@@ -357,28 +358,28 @@ Two outcomes are not failures of the integrator but facts about the work:
 
 ### Finalization
 
-The final step merges the run branch into the user's working branch and then
-optionally shares the result with the world.
+The final step turns the completed run branch into a reviewable artifact
+and never touches the user's working branch.
 
-**Local merge.** The run branch is merged into the working branch — the one
-and only point at which the working branch changes. If the working branch
-received commits *during* the run it may have diverged from where the run
-branch started, and this final merge can itself conflict. If it does, the
-merge is aborted cleanly — the working branch is restored, not left in a
-half-merged state — and the run reports the situation with the run branch
-preserved for a manual merge. The principle is consistent throughout: the
-user's own branch is never left broken by Centella.
+**The run branch is the integration artifact.** Every wave's work is
+already integrated on `centella/runs/<run-id>`. Centella does not merge
+the run branch into the working branch locally — that would duplicate the
+same change in two places (a local commit and a PR) and put the working
+branch in a state the user did not request. The working branch is the same
+ref at the end of a run as it was at the start; the PR is the proposal to
+change that.
 
-**Push and PR.** After a successful local merge, the run branch is pushed
-to `origin` and a pull request is opened via `gh pr create` against the
-working branch (the branch HEAD-at-run-start). The PR title is the run id;
-the body is generated deterministically from the run state — task, category,
-source-of-truth, wave count, worker count, run timestamps. This is the
-single point at which Centella reaches the network; everything before is
-local. Two flags control it:
+**Push and PR.** The run branch is pushed to `origin` and a pull request
+is opened via `gh pr create` against the working branch (the branch
+HEAD-at-run-start). The PR title is the run id; the body is generated
+deterministically from the run state — task, category, source-of-truth,
+wave count, worker count, run timestamps. This is the single point at
+which centella reaches the network; everything before is local. Two flags
+control it:
 
 - `--no-push` skips both the push and the PR; the run completes with the
-  local merge only.
+  run branch local-only. The user can inspect, push, or open a PR manually
+  whenever they choose.
 - `--no-verify` passes `--no-verify` to `git push`, skipping pre-push hooks.
   Worker commits inside worktrees continue to run all hooks normally — only
   the push gate is affected. This is the per-invocation explicit user
@@ -390,7 +391,8 @@ not pretend the run failed: the local work is intact and reachable on the
 run branch. The orchestrator records what was attempted and what failed in
 a per-run sidecar (`run.json` — `pushed_at`, `push_error`, `pr_url`,
 `pr_error`). Push failure exits non-zero with a multi-line message that
-names both branches (run branch and working branch), shows the captured
+names the run branch (where the work lives) and the working branch
+(unchanged from run start, but the intended PR base), shows the captured
 stderr, and gives the exact retry command. PR-creation failure is treated
 as non-fatal: the push has already succeeded, so the user receives a
 warning with the GitHub URL of the pushed branch and the exact `gh pr

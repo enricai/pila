@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
-# finalize.sh <run-id> — merge the completed run branch into the working branch.
+# finalize.sh <run-id> — verify the run branch is ready to push.
 #
 # Run from the repo root after every wave is integrated and the run branch
-# is green. Leaves the repo checked out on the working branch.
+# is green. The working branch is NOT modified locally — centella does not
+# merge into it. The PR opened by `push_and_open_pr()` (in centella.py) is
+# the proposed integration into the working branch.
 #
-# Push and PR are added in a subsequent commit. For now this script does
-# the same local merge it always did, just against centella/runs/<run-id>
-# instead of the global centella/staging.
-#
-# If the merge conflicts — which happens only if the working branch received
-# commits DURING the centella run, so it has diverged from where the run
-# branch was branched — the merge is aborted cleanly: the working branch
-# is restored to its pre-finalize state, and the script exits non-zero. The
-# orchestrator reports this; centella/runs/<run-id> is intact and the run
-# can be finalized manually.
+# This script's job is narrow: confirm `centella/runs/<run-id>` exists and
+# has at least one commit beyond the working branch. If it doesn't, the
+# orchestrator dies before attempting the push.
 set -euo pipefail
 
 RUN_ID="${1:?usage: finalize.sh <run-id>}"
@@ -32,21 +27,24 @@ if ! git show-ref --verify --quiet "refs/heads/${BRANCH}"; then
   exit 2
 fi
 
-CURRENT="$(git rev-parse --abbrev-ref HEAD)"
-if [ "$CURRENT" != "$WORKING_BRANCH" ]; then
-  git checkout "$WORKING_BRANCH"
+# The PR base must exist locally for the rev-list comparison below; if the
+# user renamed or deleted it after the run started, surface that distinctly
+# rather than letting it look like an "already caught up" state.
+if ! git show-ref --verify --quiet "refs/heads/${WORKING_BRANCH}"; then
+  echo "error: working branch ${WORKING_BRANCH} (recorded at run start) no longer exists — " >&2
+  echo "       recreate it (e.g. \`git branch ${WORKING_BRANCH} <commit>\`) before retrying" >&2
+  exit 2
 fi
 
-# Attempt the merge. On conflict, abort it so the working branch is left
-# clean rather than mid-merge with conflict markers.
-if git merge --no-ff -m "centella: integrate completed run into ${WORKING_BRANCH}" "$BRANCH"; then
-  echo "finalized: ${BRANCH} merged into ${WORKING_BRANCH}"
-  exit 0
-else
-  git merge --abort 2>/dev/null || true
-  echo "error: finalize merge conflicts — ${WORKING_BRANCH} diverged from" >&2
-  echo "       ${BRANCH} during the run. The merge was aborted;" >&2
-  echo "       ${WORKING_BRANCH} is clean and ${BRANCH} is intact." >&2
-  echo "       Resolve by merging ${BRANCH} into ${WORKING_BRANCH} manually." >&2
+# Confirm the run branch has work the working branch doesn't already have.
+# `git rev-list --count <working>..<run>` counts commits reachable from the
+# run branch but not from the working branch. Zero means the run produced
+# no work — likely a misconfiguration the user should see.
+AHEAD="$(git rev-list --count "${WORKING_BRANCH}..${BRANCH}")"
+if [ "${AHEAD}" = "0" ]; then
+  echo "error: ${BRANCH} has no commits beyond ${WORKING_BRANCH} — nothing to push" >&2
   exit 1
 fi
+
+echo "finalized: ${BRANCH} ready to push (${AHEAD} commit(s) ahead of ${WORKING_BRANCH})"
+exit 0
