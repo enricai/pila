@@ -44,6 +44,17 @@ def test_path_like_string_but_missing_file(centella, tmp_path):
     assert centella.resolve_task_argument(str(missing)) == str(missing)
 
 
+def test_very_long_literal_string_treated_as_literal(centella, tmp_path,
+                                                     monkeypatch):
+    # A task string longer than NAME_MAX (255 bytes on macOS/Linux)
+    # makes Path.is_file() raise OSError(ENAMETOOLONG) instead of
+    # returning False. resolve_task_argument must treat this as a
+    # literal task, not crash.
+    monkeypatch.chdir(tmp_path)
+    long_task = "Rebrand the site " + ("x" * 300)
+    assert centella.resolve_task_argument(long_task) == long_task
+
+
 def test_empty_file_dies(centella, tmp_path):
     f = tmp_path / "task.md"
     f.write_text("")

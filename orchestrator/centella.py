@@ -1281,7 +1281,17 @@ def resolve_task_argument(raw: str) -> str:
     silently swallowed.
     """
     p = Path(raw)
-    if p.is_file() and p.suffix.lower() in TASK_FILE_SUFFIXES:
+    # A long literal task is one path component over NAME_MAX (255 bytes
+    # on macOS/Linux), which makes stat() raise ENAMETOOLONG instead of
+    # returning a "not found" result that is_file() would surface as
+    # False. Any stat failure means we cannot confirm a file, so treat
+    # `raw` as the literal task — same outcome as the missing-file path.
+    try:
+        is_task_file = (p.is_file()
+                        and p.suffix.lower() in TASK_FILE_SUFFIXES)
+    except OSError:
+        is_task_file = False
+    if is_task_file:
         contents = p.read_text().strip()
         if not contents:
             die(f"task file {raw!r} is empty")
