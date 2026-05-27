@@ -7,5 +7,6 @@
   "license": "MIT",
   "homepage": "https://github.com/enricai/centella",
   "keywords": ["orchestration", "automation", "headless", "worktrees", "claude-p"],
-  "commands": ["./commands/"]
+  "commands": ["./commands/"],
+  "skills": ["./skills/"]
 }
