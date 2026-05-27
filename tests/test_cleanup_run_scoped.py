@@ -1,11 +1,18 @@
 """Source-text pins for the run-scoped cleanup.sh modes.
 
-cleanup.sh in commit 5 supports:
-- `--run-id <id> [--branches]` — single-run cleanup
-- `--all-runs [--branches]` — every per-run dir (excluding _bootstrap-*)
+cleanup.sh supports:
+- `--run-id <id> [--branches | --subtask-branches]` — single-run cleanup
+- `--all-runs [--branches | --subtask-branches]` — every per-run dir
+  (excluding _bootstrap-*)
 - `--bootstrap` — orphaned _bootstrap-* dirs
-- `--legacy` — pre-per-run layout (unchanged from commit 3)
+- `--legacy` — pre-per-run layout (unchanged from earlier commits)
 - no flag — most-recently-failed run, with y/N prompt
+
+`--subtask-branches` is the post-finalize default (invoked by
+phase_finalize): it deletes only the per-subtask branches and keeps
+centella/runs/<id> (the PR head). `--branches` is broader and deletes
+both the run branch and the subtask branches; they are mutually
+exclusive.
 
 Plus a small behavioral test: run cleanup.sh against a real tmp_path
 repo with a synthetic per-run dir and confirm the dir gets removed.

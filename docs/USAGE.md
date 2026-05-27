@@ -153,24 +153,27 @@ Phase 6 verifies `centella/runs/<run-id>` is non-empty, pushes it to
 --head centella/runs/<run-id>`. Your working branch (the branch you
 were on when you invoked Centella, recorded in
 `.centella/runs/<run-id>/working-branch`) is **not** modified locally —
-review and merge the PR on GitHub when you're satisfied. The
-per-subtask branches under `centella/subtasks/<run-id>/` and the run
-branch `centella/runs/<run-id>` remain in your repo as an audit trail.
-Each worker's full commit history is preserved on its
-`centella/subtasks/<run-id>/<subtask-id>` branch.
+review and merge the PR on GitHub when you're satisfied. The run branch
+`centella/runs/<run-id>` remains in your repo as the PR head until you
+merge the PR. The per-subtask branches `centella/subtasks/<run-id>/*`
+are **deleted automatically** at finalize — they were the mechanism for
+parallel implementer isolation and carry no information that isn't
+already in the run branch's merge graph. Each worker's full commit
+history is still reachable from the run branch (the integrator merges
+each subtask with `--no-ff`, so every worker's commits appear as a
+named merge bubble in `git log centella/runs/<run-id> --graph`).
 
-When you no longer need the audit trail:
+When you no longer need the run branch either (e.g., after the PR is
+merged on GitHub):
 
 ```bash
 ./scripts/cleanup.sh --run-id <run-id> --branches
 ```
 
-removes that run's worktrees and deletes both its run branch
-(`centella/runs/<run-id>`) and every subtask branch
-(`centella/subtasks/<run-id>/*`). The per-run state directory
-`.centella/runs/<run-id>/` is kept as a smaller audit trail; `rm -rf` it
-manually when you no longer need that either. For an audit cleanup
-across every past run, use `--all-runs --branches`.
+deletes the run branch and any remaining subtask branches. The per-run
+state directory `.centella/runs/<run-id>/` is kept as a smaller audit
+trail; `rm -rf` it manually when you no longer need that either. For an
+audit cleanup across every past run, use `--all-runs --branches`.
 
 ## What happens when something goes wrong
 

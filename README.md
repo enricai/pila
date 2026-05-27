@@ -355,9 +355,13 @@ and what happens when nothing is detected.
 
 **Can I see what each worker did?**
 Yes. Every worker commits to its own `centella/subtasks/<run-id>/<subtask-id>`
-branch and those branches survive the run. `git log centella/subtasks/<run-id>/<subtask-id>`
-is your per-worker audit trail; `scripts/cleanup.sh --run-id <id> --branches`
-removes one run's branches, `--all-runs --branches` removes all of them.
+branch during the run; at finalize, those branches are auto-deleted, but
+the integrator merges each one into the run branch with `--no-ff`, so
+every worker's commits remain reachable from `centella/runs/<run-id>` as a
+named merge bubble. `git log centella/runs/<run-id> --graph` is your
+per-worker audit trail. When you no longer need the run branch either,
+`scripts/cleanup.sh --run-id <id> --branches` removes it (and any
+leftover subtask branches); `--all-runs --branches` removes all of them.
 
 **Why not use the Claude Code SDK or the in-session Agent tool?**
 Two platform constraints make subprocess workers the right shape. See
