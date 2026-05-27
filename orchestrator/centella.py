@@ -3111,6 +3111,266 @@ async def phase_judge(run_dir: Path, judge_out_dir: Path,
 
 
 # =========================================================================
+# heal-loop — persistent state and three phase functions
+# =========================================================================
+
+class HealState:
+    """Persistent state for one heal-loop run scoped to a single call_type.
+
+    Layout on disk: <heal_dir>/<call_type>/state.json
+
+    Fields written to state.json:
+      failing_samples  — list of capture records the heal loop is working on
+      baseline         — {call_id: {"pass_rate": float, "verdicts": list}}
+                         noise-floor measured by heal_baseline
+      history          — list of iteration records appended by heal_replay_patched
+      best_so_far      — {pass_rate: float, iter_n: int} tracking the best arm
+    """
+
+    def __init__(self, heal_dir: Path, call_type: str) -> None:
+        self.heal_dir = heal_dir
+        self.call_type = call_type
+        self.state_dir = heal_dir / call_type
+        self.path = self.state_dir / "state.json"
+        self.failing_samples: list[dict] = []
+        self.baseline: dict = {}
+        self.history: list[dict] = []
+        self.best_so_far: dict = {}
+
+    def save(self) -> None:
+        """Atomic write via temp-file rename."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "failing_samples": self.failing_samples,
+            "baseline": self.baseline,
+            "history": self.history,
+            "best_so_far": self.best_so_far,
+        }
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(self.path)
+
+    def load(self) -> bool:
+        """Load state from disk. Returns True if file existed and was loaded."""
+        if not self.path.exists():
+            return False
+        data = json.loads(self.path.read_text())
+        self.failing_samples = data.get("failing_samples", [])
+        self.baseline = data.get("baseline", {})
+        self.history = data.get("history", [])
+        self.best_so_far = data.get("best_so_far", {})
+        return True
+
+
+async def heal_baseline(call_type: str, failing_records: list[dict], n: int,
+                        heal_dir: Path, caps: dict, st: "State",
+                        models: dict[str, str]) -> HealState:
+    """Run n unpatched replays per failing capture to establish a noise-floor.
+
+    For each record in failing_records, runs n replay_capture() calls with the
+    original system prompt (no override), judges each replay via judge_capture(),
+    and persists the per-sample pass rates + verdict list to
+    <heal_dir>/<call_type>/baseline/verdicts/.
+
+    Returns a HealState with failing_samples, baseline, and best_so_far set.
+    Replays run in parallel under asyncio.Semaphore(max_parallel).
+    """
+    hs = HealState(heal_dir, call_type)
+    hs.failing_samples = list(failing_records)
+
+    verdicts_dir = heal_dir / call_type / "baseline" / "verdicts"
+    verdicts_dir.mkdir(parents=True, exist_ok=True)
+
+    sem = asyncio.Semaphore(caps["max_parallel"])
+    baseline: dict = {}
+
+    async def _run_one(record: dict, replay_idx: int) -> dict:
+        """Run one replay+judge pair; return verdict dict."""
+        async with sem:
+            call_id = record["call_id"]
+            # Replay with original system prompt (no patch).
+            try:
+                envelope, _ = await replay_capture(record)
+            except Exception:
+                envelope = {}
+            # Build a synthetic record for the judge using the replayed output.
+            judge_record = dict(record)
+            judge_record["response_content"] = (
+                envelope.get("result") or record.get("response_content", "")
+            )
+            judge_record["parsed_ok"] = not envelope.get("is_error", True)
+            judge_record["success"] = not envelope.get("is_error", True)
+            verdict = await judge_capture(judge_record, models, caps, st)
+            # Write verdict file.
+            call_id = record["call_id"]
+            verdict_path = verdicts_dir / f"{call_id}-{replay_idx}.json"
+            verdict_path.write_text(json.dumps(verdict, indent=2))
+            return verdict
+
+    # Gather all (record, replay_idx) pairs.
+    tasks = []
+    for record in failing_records:
+        for idx in range(n):
+            tasks.append((record, idx))
+
+    results: list[tuple[dict, dict]] = []
+    coros = [_run_one(rec, idx) for rec, idx in tasks]
+    verdicts_flat = await gather_or_cancel(*coros)
+
+    # Aggregate per-sample pass rates.
+    task_idx = 0
+    for record in failing_records:
+        call_id = record["call_id"]
+        sample_verdicts = []
+        for idx in range(n):
+            sample_verdicts.append(verdicts_flat[task_idx])
+            task_idx += 1
+        passes = sum(1 for v in sample_verdicts if v.get("passed", False))
+        baseline[call_id] = {
+            "pass_rate": passes / n if n > 0 else 0.0,
+            "verdicts": sample_verdicts,
+        }
+
+    hs.baseline = baseline
+    overall_pass_rate = (
+        sum(v["pass_rate"] for v in baseline.values()) / len(baseline)
+        if baseline else 0.0
+    )
+    hs.best_so_far = {"pass_rate": overall_pass_rate, "iter_n": 0}
+    hs.save()
+    log(f"heal_baseline: {call_type}: {len(failing_records)} sample(s), "
+        f"n={n}, baseline pass_rate={overall_pass_rate:.2%}")
+    return hs
+
+
+def heal_apply_patch(call_type: str, iter_n: int, patch_text: str,
+                     anchor_match: str, heal_dir: Path,
+                     failing_records: list[dict]) -> list[Path]:
+    """Materialise per-sample patched prompts under iter-<N>/patched-prompts/.
+
+    For each record in failing_records, replaces the first occurrence of
+    `anchor_match` in the original system_prompt with `patch_text`, and writes
+    the result to <heal_dir>/<call_type>/iter-<N>/patched-prompts/<call_id>.txt.
+
+    Returns the list of written paths.
+    """
+    out_dir = heal_dir / call_type / f"iter-{iter_n}" / "patched-prompts"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for record in failing_records:
+        call_id = record["call_id"]
+        original = record.get("system_prompt", "")
+        patched = original.replace(anchor_match, patch_text, 1)
+        dest = out_dir / f"{call_id}.txt"
+        dest.write_text(patched)
+        written.append(dest)
+    log(f"heal_apply_patch: {call_type} iter-{iter_n}: "
+        f"wrote {len(written)} patched prompt(s)")
+    return written
+
+
+async def heal_replay_patched(call_type: str, iter_n: int, n: int,
+                              heal_dir: Path, caps: dict, st: "State",
+                              models: dict[str, str]) -> HealState:
+    """Run n patched replays per failing capture and append an iteration record.
+
+    Reads HealState from disk. For each failing sample, loads the patched
+    prompt from iter-<iter_n>/patched-prompts/<call_id>.txt, runs n
+    replay_capture() calls with that prompt override, judges each via
+    judge_capture(), computes the pass rate, and appends an iteration record
+    to hs.history. Updates hs.best_so_far if the pass rate improved.
+
+    Replays run in parallel under asyncio.Semaphore(max_parallel).
+    Returns the updated HealState.
+    """
+    hs = HealState(heal_dir, call_type)
+    if not hs.load():
+        raise FileNotFoundError(
+            f"HealState not found at {hs.path} — run heal_baseline first"
+        )
+
+    patched_dir = heal_dir / call_type / f"iter-{iter_n}" / "patched-prompts"
+    verdicts_dir = heal_dir / call_type / f"iter-{iter_n}" / "verdicts"
+    verdicts_dir.mkdir(parents=True, exist_ok=True)
+
+    sem = asyncio.Semaphore(caps["max_parallel"])
+
+    async def _run_one(record: dict, replay_idx: int,
+                       patched_prompt: str) -> dict:
+        async with sem:
+            try:
+                envelope, _ = await replay_capture(
+                    record, override_system_prompt=patched_prompt
+                )
+            except Exception:
+                envelope = {}
+            judge_record = dict(record)
+            judge_record["response_content"] = (
+                envelope.get("result") or record.get("response_content", "")
+            )
+            judge_record["parsed_ok"] = not envelope.get("is_error", True)
+            judge_record["success"] = not envelope.get("is_error", True)
+            verdict = await judge_capture(judge_record, models, caps, st)
+            call_id = record["call_id"]
+            verdict_path = verdicts_dir / f"{call_id}-{replay_idx}.json"
+            verdict_path.write_text(json.dumps(verdict, indent=2))
+            return verdict
+
+    # Build tasks: (record, patched_prompt, replay_idx).
+    tasks: list[tuple[dict, str, int]] = []
+    for record in hs.failing_samples:
+        call_id = record["call_id"]
+        prompt_path = patched_dir / f"{call_id}.txt"
+        if not prompt_path.exists():
+            log(f"  heal_replay_patched: missing patched prompt for {call_id}, "
+                f"skipping")
+            continue
+        patched_prompt = prompt_path.read_text()
+        for idx in range(n):
+            tasks.append((record, patched_prompt, idx))
+
+    coros = [_run_one(rec, idx, prompt) for rec, prompt, idx in tasks]
+    verdicts_flat: list[dict] = await gather_or_cancel(*coros)
+
+    # Aggregate per-sample pass rates for this iteration.
+    iter_scores: dict = {}
+    task_offset = 0
+    records_with_prompts = [
+        r for r in hs.failing_samples
+        if (patched_dir / f"{r['call_id']}.txt").exists()
+    ]
+    for record in records_with_prompts:
+        call_id = record["call_id"]
+        sample_verdicts = verdicts_flat[task_offset:task_offset + n]
+        task_offset += n
+        passes = sum(1 for v in sample_verdicts if v.get("passed", False))
+        iter_scores[call_id] = {
+            "pass_rate": passes / n if n > 0 else 0.0,
+            "verdicts": sample_verdicts,
+        }
+
+    overall_pass_rate = (
+        sum(v["pass_rate"] for v in iter_scores.values()) / len(iter_scores)
+        if iter_scores else 0.0
+    )
+
+    iter_record = {
+        "iter_n": iter_n,
+        "pass_rate": overall_pass_rate,
+        "scores": iter_scores,
+    }
+    hs.history.append(iter_record)
+
+    if overall_pass_rate > hs.best_so_far.get("pass_rate", 0.0):
+        hs.best_so_far = {"pass_rate": overall_pass_rate, "iter_n": iter_n}
+
+    hs.save()
+    log(f"heal_replay_patched: {call_type} iter-{iter_n}: "
+        f"pass_rate={overall_pass_rate:.2%}")
+    return hs
+
+
+# =========================================================================
 # phases
 # =========================================================================
 async def phase_classify(task: str, st: State, caps: dict, no_clarify: bool,
