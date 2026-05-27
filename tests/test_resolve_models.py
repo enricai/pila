@@ -56,17 +56,25 @@ def repo_root(tmp_path, monkeypatch):
 def test_all_unset_defaults_per_worker(centella, repo_root):
     """With no overrides, judgment workers default to opus and the
     implementer defaults to sonnet. Pins both the global default and
-    the per-worker override table together."""
+    the per-worker override table together.
+
+    resolve_models() also resolves the post-run skill workers (judge, heal);
+    we check only the WORKER_TYPES slice here so this test doesn't need
+    updating when additional post-run workers are added."""
     models = centella.resolve_models(repo_root, ns())
-    assert models == DEFAULTS
+    worker_slice = {w: models[w] for w in WORKERS}
+    assert worker_slice == DEFAULTS
     assert centella.MODEL_DEFAULT == "opus"
-    assert centella.MODEL_DEFAULT_PER_WORKER == {"implementer": "sonnet"}
+    # implementer, judge and heal are the current per-worker overrides.
+    assert centella.MODEL_DEFAULT_PER_WORKER.get("implementer") == "sonnet"
+    assert centella.MODEL_DEFAULT_PER_WORKER.get("judge") == "sonnet"
+    assert centella.MODEL_DEFAULT_PER_WORKER.get("heal") == "sonnet"
 
 
 def test_global_env_applies_to_every_worker(centella, repo_root, monkeypatch):
     monkeypatch.setenv("CENTELLA_MODEL", "opus")
     models = centella.resolve_models(repo_root, ns())
-    assert models == {w: "opus" for w in WORKERS}
+    assert {w: models[w] for w in WORKERS} == {w: "opus" for w in WORKERS}
 
 
 def test_per_worker_env_overrides_global_env(centella, repo_root, monkeypatch):
@@ -82,7 +90,7 @@ def test_per_worker_env_overrides_global_env(centella, repo_root, monkeypatch):
 def test_global_toml_applies_to_every_worker(centella, repo_root):
     (repo_root / "centella.toml").write_text("model = opus\n")
     models = centella.resolve_models(repo_root, ns())
-    assert models == {w: "opus" for w in WORKERS}
+    assert {w: models[w] for w in WORKERS} == {w: "opus" for w in WORKERS}
 
 
 def test_per_worker_toml_overrides_global_toml(centella, repo_root):
@@ -99,14 +107,14 @@ def test_env_beats_toml(centella, repo_root, monkeypatch):
     (repo_root / "centella.toml").write_text("model = haiku\n")
     monkeypatch.setenv("CENTELLA_MODEL", "opus")
     models = centella.resolve_models(repo_root, ns())
-    assert models == {w: "opus" for w in WORKERS}
+    assert {w: models[w] for w in WORKERS} == {w: "opus" for w in WORKERS}
 
 
 def test_global_cli_beats_global_env_and_toml(centella, repo_root, monkeypatch):
     (repo_root / "centella.toml").write_text("model = haiku\n")
     monkeypatch.setenv("CENTELLA_MODEL", "haiku")
     models = centella.resolve_models(repo_root, ns(model="opus"))
-    assert models == {w: "opus" for w in WORKERS}
+    assert {w: models[w] for w in WORKERS} == {w: "opus" for w in WORKERS}
 
 
 def test_per_worker_cli_beats_everything(centella, repo_root, monkeypatch):
@@ -205,13 +213,16 @@ def test_empty_env_treated_as_unset(centella, repo_root, monkeypatch):
     monkeypatch.setenv("CENTELLA_MODEL", "")
     monkeypatch.setenv("CENTELLA_MODEL_PLANNER", "   ")
     models = centella.resolve_models(repo_root, ns())
-    assert models == DEFAULTS
+    # Check only the WORKER_TYPES slice; post-run skill workers (judge, heal)
+    # also appear in the returned dict but are not part of DEFAULTS.
+    assert {w: models[w] for w in WORKERS} == DEFAULTS
 
 
 def test_every_alias_accepted_in_global_env(centella, repo_root, monkeypatch):
     for alias in centella.MODEL_VALUES:
         monkeypatch.setenv("CENTELLA_MODEL", alias)
-        assert centella.resolve_models(repo_root, ns()) == {w: alias for w in WORKERS}
+        models = centella.resolve_models(repo_root, ns())
+        assert {w: models[w] for w in WORKERS} == {w: alias for w in WORKERS}
 
 
 def test_worker_types_match_expected_set(centella):

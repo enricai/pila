@@ -201,11 +201,18 @@ MODEL_DEFAULT = "opus"
 # different default from MODEL_DEFAULT appear here.
 MODEL_DEFAULT_PER_WORKER = {
     "implementer": "sonnet",
+    "judge": "sonnet",
+    "heal": "sonnet",
 }
 MODEL_ENV = "CENTELLA_MODEL"
 MODEL_FILE = "centella.toml"
 WORKER_TYPES = ("classifier", "planner", "reconciler", "implementer",
                 "integrator", "validator")
+# Post-run skill workers — not in WORKER_TYPES because they don't run inside
+# the main orchestrate loop, but they do get dedicated model resolution via
+# --judge-model / --heal-model (and their env / TOML mirrors).
+MODEL_JUDGE_ENV = "CENTELLA_MODEL_JUDGE"
+MODEL_HEAL_ENV = "CENTELLA_MODEL_HEAL"
 
 # Telemetry enabled/disabled — see IMPLEMENTATION.md §2 "Telemetry".
 # Resolution order: --telemetry/--no-telemetry CLI → CENTELLA_TELEMETRY env →
@@ -236,6 +243,19 @@ JUDGE_DIR_FILE = "centella.toml"
 HEAL_DIR_DEFAULT = "heal-out"
 HEAL_DIR_ENV = "CENTELLA_HEAL_DIR"
 HEAL_DIR_FILE = "centella.toml"
+
+# Heal-loop convergence knobs — see IMPLEMENTATION.md §2 "Heal-loop convergence
+# parameters". User-tunable knobs use the standard CLI/env/TOML/default
+# resolution; non-user-tunable constants (window, delta, n) are fixed here.
+HEAL_MAX_ROUNDS_DEFAULT = 10        # max iterations per call_type
+HEAL_SUCCESS_THRESHOLD_DEFAULT = 0.9  # pass-rate bar for SUCCESS verdict
+HEAL_PLATEAU_WINDOW_DEFAULT = 3     # look-back window for plateau detection
+HEAL_PLATEAU_DELTA_DEFAULT = 0.03   # minimum improvement to avoid plateau
+HEAL_N_REPLAYS_DEFAULT = 5          # replays per sample per iteration
+HEAL_MAX_ROUNDS_ENV = "CENTELLA_HEAL_MAX_ROUNDS"
+HEAL_SUCCESS_THRESHOLD_ENV = "CENTELLA_HEAL_SUCCESS_THRESHOLD"
+HEAL_MAX_ROUNDS_FILE = "centella.toml"
+HEAL_SUCCESS_THRESHOLD_FILE = "centella.toml"
 
 
 def _source_of_truth_hint() -> str:
@@ -1467,6 +1487,23 @@ def resolve_models(repo_root: Path, args) -> dict[str, str]:
         per_worker_default = MODEL_DEFAULT_PER_WORKER.get(worker, MODEL_DEFAULT)
         models[worker] = (per_cli or global_cli or per_env or global_env
                           or per_file or global_file or per_worker_default)
+    # Judge and heal use dedicated flags (--judge-model / --heal-model) and
+    # dedicated env vars (CENTELLA_MODEL_JUDGE / CENTELLA_MODEL_HEAL) rather
+    # than the --model-<W> pattern — they're post-run skill workers that don't
+    # participate in the --model global-default resolution path. They still
+    # fall back to the global override so `--model sonnet` applies everywhere.
+    judge_cli = getattr(args, "judge_model", None)
+    judge_env = from_env(MODEL_JUDGE_ENV)
+    judge_file = from_file("model_judge")
+    models["judge"] = (judge_cli or judge_env or global_cli or global_env
+                       or judge_file or global_file
+                       or MODEL_DEFAULT_PER_WORKER.get("judge", MODEL_DEFAULT))
+    heal_cli = getattr(args, "heal_model", None)
+    heal_env = from_env(MODEL_HEAL_ENV)
+    heal_file = from_file("model_heal")
+    models["heal"] = (heal_cli or heal_env or global_cli or global_env
+                      or heal_file or global_file
+                      or MODEL_DEFAULT_PER_WORKER.get("heal", MODEL_DEFAULT))
     return models
 
 
@@ -1555,6 +1592,65 @@ def resolve_heal_dir(repo_root: Path, cli_value: str | None = None) -> str:
     if file_val is not None and file_val.strip():
         return file_val.strip()
     return HEAL_DIR_DEFAULT
+
+
+def resolve_heal_max_rounds(repo_root: Path, cli_value: int | None = None) -> int:
+    """Resolve the heal-loop max-iterations cap. Order:
+    --heal-max-rounds CLI flag → CENTELLA_HEAL_MAX_ROUNDS env var →
+    heal_max_rounds in centella.toml → HEAL_MAX_ROUNDS_DEFAULT (10).
+    An invalid (non-positive) value in env or file is rejected via die()."""
+    if cli_value is not None:
+        return cli_value
+    env = os.environ.get(HEAL_MAX_ROUNDS_ENV, "").strip()
+    if env:
+        try:
+            v = int(env)
+        except ValueError:
+            die(f"{HEAL_MAX_ROUNDS_ENV}={env!r} is not a positive integer")
+        if v <= 0:
+            die(f"{HEAL_MAX_ROUNDS_ENV}={env!r} must be a positive integer")
+        return v
+    cfg = repo_root / HEAL_MAX_ROUNDS_FILE
+    file_val = _read_toml_key(cfg, "heal_max_rounds")
+    if file_val is not None:
+        try:
+            v = int(file_val)
+        except ValueError:
+            die(f"{cfg}: heal_max_rounds={file_val!r} is not a positive integer")
+        if v <= 0:
+            die(f"{cfg}: heal_max_rounds={file_val!r} must be a positive integer")
+        return v
+    return HEAL_MAX_ROUNDS_DEFAULT
+
+
+def resolve_heal_success_threshold(repo_root: Path,
+                                   cli_value: float | None = None) -> float:
+    """Resolve the heal-loop success pass-rate threshold. Order:
+    --heal-success-threshold CLI flag → CENTELLA_HEAL_SUCCESS_THRESHOLD env var →
+    heal_success_threshold in centella.toml → HEAL_SUCCESS_THRESHOLD_DEFAULT (0.9).
+    Value must be in (0, 1]; invalid values in env or file are rejected via die()."""
+    if cli_value is not None:
+        return cli_value
+    env = os.environ.get(HEAL_SUCCESS_THRESHOLD_ENV, "").strip()
+    if env:
+        try:
+            v = float(env)
+        except ValueError:
+            die(f"{HEAL_SUCCESS_THRESHOLD_ENV}={env!r} is not a float")
+        if not (0.0 < v <= 1.0):
+            die(f"{HEAL_SUCCESS_THRESHOLD_ENV}={env!r} must be in (0, 1]")
+        return v
+    cfg = repo_root / HEAL_SUCCESS_THRESHOLD_FILE
+    file_val = _read_toml_key(cfg, "heal_success_threshold")
+    if file_val is not None:
+        try:
+            v = float(file_val)
+        except ValueError:
+            die(f"{cfg}: heal_success_threshold={file_val!r} is not a float")
+        if not (0.0 < v <= 1.0):
+            die(f"{cfg}: heal_success_threshold={file_val!r} must be in (0, 1]")
+        return v
+    return HEAL_SUCCESS_THRESHOLD_DEFAULT
 
 
 async def run_proc(cmd: list[str], *, cwd: str | None = None,
@@ -3370,6 +3466,196 @@ async def heal_replay_patched(call_type: str, iter_n: int, n: int,
     return hs
 
 
+def check_convergence(state: HealState, config: dict) -> str:
+    """Evaluate whether the heal loop has converged.
+
+    Returns one of:
+      SUCCESS          — best pass_rate >= config["success_threshold"]
+      TIMEOUT          — iterations exhausted (len(history) >= max_iterations)
+      BUDGET_EXHAUSTED — worker_count reached max_total_workers
+      PLATEAUED        — last plateau_window iterations all have |delta| < plateau_delta
+      REGRESSED        — every history entry's pass_rate is below the baseline
+      CONTINUE         — none of the above; keep iterating
+
+    `config` keys (all required):
+      success_threshold   float  — e.g. 0.9
+      max_iterations      int    — e.g. 10
+      plateau_window      int    — e.g. 3
+      plateau_delta       float  — e.g. 0.03
+      worker_count        int    — current worker invocation count
+      max_total_workers   int    — cap from caps dict
+
+    The convergence check is deterministic (DESIGN §12): it operates entirely
+    on measurements in HealState.history and best_so_far, with no model judgment.
+    """
+    history = state.history
+    best_pass_rate = state.best_so_far.get("pass_rate", 0.0)
+    success_threshold = config["success_threshold"]
+    max_iterations = config["max_iterations"]
+    plateau_window = config["plateau_window"]
+    plateau_delta = config["plateau_delta"]
+    worker_count = config.get("worker_count", 0)
+    max_total_workers = config.get("max_total_workers", DEFAULT_CAPS["max_total_workers"])
+
+    # SUCCESS: best arm already meets the target.
+    if best_pass_rate >= success_threshold:
+        return "SUCCESS"
+
+    # BUDGET_EXHAUSTED: worker cap reached before convergence.
+    if worker_count >= max_total_workers:
+        return "BUDGET_EXHAUSTED"
+
+    # TIMEOUT: iteration cap hit.
+    if len(history) >= max_iterations:
+        return "TIMEOUT"
+
+    # REGRESSED: every iteration was worse than baseline.
+    if history:
+        baseline_rate = (
+            sum(v["pass_rate"] for v in state.baseline.values()) / len(state.baseline)
+            if state.baseline else 0.0
+        )
+        if all(entry.get("pass_rate", 0.0) < baseline_rate for entry in history):
+            return "REGRESSED"
+
+    # PLATEAUED: the last plateau_window iterations all changed by less than plateau_delta.
+    if len(history) >= plateau_window:
+        recent = history[-plateau_window:]
+        rates = [entry.get("pass_rate", 0.0) for entry in recent]
+        deltas = [abs(rates[i] - rates[i - 1]) for i in range(1, len(rates))]
+        if all(d < plateau_delta for d in deltas):
+            return "PLATEAUED"
+
+    return "CONTINUE"
+
+
+def write_heal_report(call_type: str, state: HealState,
+                      best_patch_text: str = "") -> Path:
+    """Render a markdown heal report to <heal_dir>/<call_type>/healing-<call_type>.md.
+
+    The report includes:
+    - The best patch text (or 'none' when no patch improved on baseline)
+    - The number of iterations run
+    - A per-iteration history table with pass rates
+    - The baseline pass rate
+
+    Returns the path of the written file.
+    """
+    report_dir = state.state_dir
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"healing-{call_type}.md"
+
+    baseline_rate = (
+        sum(v["pass_rate"] for v in state.baseline.values()) / len(state.baseline)
+        if state.baseline else 0.0
+    )
+    best = state.best_so_far
+    best_rate = best.get("pass_rate", 0.0)
+    best_iter = best.get("iter_n", 0)
+    n_iterations = len(state.history)
+
+    lines = [
+        f"# Heal report: {call_type}",
+        "",
+        f"**Iterations run:** {n_iterations}  ",
+        f"**Baseline pass rate:** {baseline_rate:.1%}  ",
+        f"**Best pass rate:** {best_rate:.1%} (iter {best_iter})  ",
+        "",
+        "## Best patch",
+        "",
+        "```",
+        best_patch_text if best_patch_text else "(no patch improved on baseline)",
+        "```",
+        "",
+        "## Iteration history",
+        "",
+        "| iter | pass_rate |",
+        "|------|-----------|",
+    ]
+    for entry in state.history:
+        lines.append(f"| {entry.get('iter_n', '?')} | {entry.get('pass_rate', 0.0):.1%} |")
+
+    if not state.history:
+        lines.append("| — | — |")
+
+    lines.append("")
+    report_path.write_text("\n".join(lines))
+    log(f"write_heal_report: {call_type}: wrote {report_path}")
+    return report_path
+
+
+async def phase_heal(call_type: str, failing_records: list[dict],
+                     heal_dir: Path, caps: dict,
+                     st: "State", models: dict[str, str],
+                     request_patch,
+                     n: int = HEAL_N_REPLAYS_DEFAULT,
+                     config: dict | None = None) -> str:
+    """Drive the full heal loop for one call_type.
+
+    Phases (per iteration):
+      1. Baseline (once): run n unpatched replays per record to measure noise-floor.
+      2. Loop:
+         a. request_patch(state, iter_n) → (anchor_match, patch_text)
+         b. heal_apply_patch — materialise patched prompts
+         c. heal_replay_patched — run n replays with the patched prompt + judge
+         d. check_convergence — returns SUCCESS/PLATEAUED/TIMEOUT/BUDGET_EXHAUSTED/
+            REGRESSED/CONTINUE
+      3. write_heal_report — always written, even if the loop terminates early.
+
+    `request_patch` is a callable taking (state: HealState, iter_n: int) and
+    returning (anchor_match: str, patch_text: str). Injecting it keeps this
+    function independently testable with a stub — feat-009 wires in the real
+    patch-generator subagent.
+
+    Returns the terminal verdict string.
+    """
+    converge_config = dict({
+        "success_threshold": HEAL_SUCCESS_THRESHOLD_DEFAULT,
+        "max_iterations": HEAL_MAX_ROUNDS_DEFAULT,
+        "plateau_window": HEAL_PLATEAU_WINDOW_DEFAULT,
+        "plateau_delta": HEAL_PLATEAU_DELTA_DEFAULT,
+    }, **(config or {}))
+
+    # Merge in caps-derived fields so check_convergence has budget visibility.
+    converge_config.setdefault("worker_count", st.data.get("worker_count", 0))
+    converge_config.setdefault("max_total_workers",
+                               caps.get("max_total_workers",
+                                        DEFAULT_CAPS["max_total_workers"]))
+
+    log(f"phase_heal: {call_type}: starting heal loop "
+        f"(max_iter={converge_config['max_iterations']}, "
+        f"threshold={converge_config['success_threshold']:.0%}, "
+        f"n={n})")
+
+    hs = await heal_baseline(call_type, failing_records, n, heal_dir, caps, st, models)
+
+    best_patch_text: str = ""
+    verdict = "CONTINUE"
+    iter_n = 0
+
+    while verdict == "CONTINUE":
+        iter_n += 1
+        # Update worker_count snapshot before convergence check each iteration.
+        converge_config["worker_count"] = st.data.get("worker_count", 0)
+        anchor_match, patch_text = request_patch(hs, iter_n)
+        heal_apply_patch(call_type, iter_n, patch_text, anchor_match,
+                         heal_dir, hs.failing_samples)
+        hs = await heal_replay_patched(call_type, iter_n, n, heal_dir,
+                                       caps, st, models)
+        converge_config["worker_count"] = st.data.get("worker_count", 0)
+        verdict = check_convergence(hs, converge_config)
+
+        # Track the patch text that produced the best result so far.
+        if hs.best_so_far.get("iter_n", 0) == iter_n:
+            best_patch_text = patch_text
+
+        log(f"phase_heal: {call_type} iter-{iter_n}: verdict={verdict}")
+
+    write_heal_report(call_type, hs, best_patch_text)
+    log(f"phase_heal: {call_type}: terminated with {verdict}")
+    return verdict
+
+
 # =========================================================================
 # phases
 # =========================================================================
@@ -4783,6 +5069,23 @@ def main() -> None:
         ap.add_argument(f"--model-{_w}", choices=MODEL_VALUES, metavar="ALIAS",
                         help=f"model alias for the {_w} worker — overrides "
                              f"--model, CENTELLA_MODEL, and centella.toml")
+    ap.add_argument("--judge-model", choices=MODEL_VALUES, metavar="ALIAS",
+                    help=f"model alias for the judge post-run worker "
+                         f"(default {MODEL_DEFAULT_PER_WORKER['judge']}); "
+                         f"also {MODEL_JUDGE_ENV} or model_judge in centella.toml")
+    ap.add_argument("--heal-model", choices=MODEL_VALUES, metavar="ALIAS",
+                    help=f"model alias for the heal post-run worker "
+                         f"(default {MODEL_DEFAULT_PER_WORKER['heal']}); "
+                         f"also {MODEL_HEAL_ENV} or model_heal in centella.toml")
+    ap.add_argument("--heal-max-rounds", type=int, metavar="N",
+                    help=f"maximum heal-loop iterations per call_type "
+                         f"(default {HEAL_MAX_ROUNDS_DEFAULT}); "
+                         f"also {HEAL_MAX_ROUNDS_ENV} or heal_max_rounds in centella.toml")
+    ap.add_argument("--heal-success-threshold", type=float, metavar="RATE",
+                    help=f"pass-rate threshold for heal-loop SUCCESS verdict "
+                         f"(default {HEAL_SUCCESS_THRESHOLD_DEFAULT}); "
+                         f"also {HEAL_SUCCESS_THRESHOLD_ENV} or "
+                         "heal_success_threshold in centella.toml")
     # Verbosity: explicit --verbosity wins; -v/-q stackable shortcuts
     # anchor to `normal` (the pre-streaming behavior). So `-v` = stream,
     # `-vv` = debug, `-q` = normal, `-qq` = quiet. See IMPLEMENTATION.md
@@ -4922,6 +5225,10 @@ def main() -> None:
         repo_root, args.telemetry_dir)
     args.judge_dir = resolve_judge_dir(repo_root, args.judge_dir)
     args.heal_dir = resolve_heal_dir(repo_root, args.heal_dir)
+    args.heal_max_rounds = resolve_heal_max_rounds(
+        repo_root, getattr(args, "heal_max_rounds", None))
+    args.heal_success_threshold = resolve_heal_success_threshold(
+        repo_root, getattr(args, "heal_success_threshold", None))
 
     # Signal handlers (DESIGN §6 / DESIGN §14): SIGTERM and SIGHUP raise
     # InterruptedBySignal so the same try/except machinery that catches
