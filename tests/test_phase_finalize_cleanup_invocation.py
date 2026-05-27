@@ -26,11 +26,13 @@ def test_phase_finalize_invokes_cleanup_with_run_id(centella):
     no-arg mode, reads EOF from the orchestrator's non-tty stdin, and
     silently aborts — leaving every subtask worktree on disk."""
     src = inspect.getsource(centella.phase_finalize)
-    assert 'run_script("cleanup.sh", "--run-id", st.run_id)' in src, (
-        "phase_finalize must invoke cleanup.sh with --run-id st.run_id. "
-        "A bare `run_script(\"cleanup.sh\")` hits the interactive no-arg "
-        "path; the EOF read silently aborts the cleanup and the "
-        "worktrees survive."
+    assert 'run_script("cleanup.sh", "--run-id", st.run_id, "--subtask-branches")' in src, (
+        "phase_finalize must invoke cleanup.sh with --run-id st.run_id and "
+        "--subtask-branches. The --run-id avoids the interactive no-arg "
+        "path (which silently aborts non-interactively); the "
+        "--subtask-branches deletes per-subtask branches that are pure "
+        "clutter post-finalize while keeping centella/runs/<id> as the "
+        "PR head."
     )
 
 

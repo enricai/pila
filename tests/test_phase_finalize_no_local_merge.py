@@ -56,4 +56,4 @@ def test_phase_finalize_keeps_post_push_invariants(centella):
     src = inspect.getsource(centella.phase_finalize)
     assert 'st.data["finished_at"] = now()' in src
     assert "push_and_open_pr(st, no_verify=no_verify)" in src
-    assert 'run_script("cleanup.sh", "--run-id", st.run_id)' in src
+    assert 'run_script("cleanup.sh", "--run-id", st.run_id, "--subtask-branches")' in src

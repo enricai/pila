@@ -4962,7 +4962,7 @@ async def phase_finalize(centella_dir: Path, st: State, no_push: bool,
     proc = await run_script("finalize.sh", st.run_id)
     if proc.returncode != 0:
         die(f"finalize failed (run branch is intact): {proc.stderr.strip()}")
-    await run_script("cleanup.sh", "--run-id", st.run_id)
+    await run_script("cleanup.sh", "--run-id", st.run_id, "--subtask-branches")
 
     wc = st.data.get("worker_count", 0)
     nsub = len(st.data.get("subtask_status", {}))

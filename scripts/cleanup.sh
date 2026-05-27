@@ -5,12 +5,15 @@
 # touches more than one run at a time unless --all-runs is passed.
 #
 # Modes:
-#   cleanup.sh --run-id <id> [--branches]
+#   cleanup.sh --run-id <id> [--branches | --subtask-branches]
 #     Remove .centella/runs/<id>/worktrees/* and prune git metadata.
 #     With --branches also delete centella/runs/<id> and
 #     centella/subtasks/<id>/* branches.
+#     With --subtask-branches delete only the subtask branches and keep
+#     centella/runs/<id> (the post-finalize default — the run branch is
+#     the PR head and must outlive the orchestrator).
 #
-#   cleanup.sh --all-runs [--branches]
+#   cleanup.sh --all-runs [--branches | --subtask-branches]
 #     Same as above, applied to every directory under .centella/runs/
 #     (excluding _bootstrap-* — use --bootstrap for those).
 #
@@ -32,7 +35,12 @@ set -euo pipefail
 # --- helpers -------------------------------------------------------------
 
 clean_one_run() {
-  # Args: $1 = run_id, $2 = "1" if --branches was passed (delete branches too).
+  # Args: $1 = run_id
+  #       $2 = branch-scope: "0" = keep all branches (audit trail),
+  #                          "1" = delete run branch + subtask branches (--branches),
+  #                          "2" = delete subtask branches only, keep the run
+  #                                branch (--subtask-branches; the post-finalize
+  #                                default, since the run branch is the PR head).
   #
   # Removes ${run_dir}/worktrees/* (the worktree directories), prunes git
   # worktree metadata, and optionally deletes branches. The state dir
@@ -40,7 +48,7 @@ clean_one_run() {
   # as an audit trail. Full nuke-the-run-entirely is the Ctrl-C
   # (full_purge) path inside the orchestrator, not this script.
   local run_id="$1"
-  local rm_branches="$2"
+  local branch_scope="$2"
   local run_dir=".centella/runs/${run_id}"
 
   if [ -d "${run_dir}/worktrees" ]; then
@@ -54,26 +62,35 @@ clean_one_run() {
   fi
   git worktree prune
 
-  if [ "$rm_branches" = "1" ]; then
-    # Per-run branches live under two disjoint namespaces:
-    #   centella/runs/<run-id>           (the run branch itself)
-    #   centella/subtasks/<run-id>/<sid> (one branch per subtask)
-    # See DESIGN.md §3 for why the namespaces are split.
-    for b in $(git for-each-ref --format='%(refname:short)' \
-               "refs/heads/centella/runs/${run_id}" \
-               "refs/heads/centella/subtasks/${run_id}/"); do
-      git branch -D "$b" 2>/dev/null || true
-    done
-  fi
-
-  if [ "$rm_branches" = "1" ]; then
-    echo "cleanup: removed worktrees + branches for run ${run_id} "\
+  # Per-run branches live under two disjoint namespaces:
+  #   centella/runs/<run-id>           (the run branch itself)
+  #   centella/subtasks/<run-id>/<sid> (one branch per subtask)
+  # See DESIGN.md §3 for why the namespaces are split.
+  case "$branch_scope" in
+    1)  # --branches: delete both
+      for b in $(git for-each-ref --format='%(refname:short)' \
+                 "refs/heads/centella/runs/${run_id}" \
+                 "refs/heads/centella/subtasks/${run_id}/"); do
+        git branch -D "$b" 2>/dev/null || true
+      done
+      echo "cleanup: removed worktrees + branches for run ${run_id} "\
 "(state dir kept as audit trail at ${run_dir}; rm -rf manually if no longer needed)"
-  else
-    echo "cleanup: removed worktrees for run ${run_id} "\
+      ;;
+    2)  # --subtask-branches: delete subtask branches only
+      for b in $(git for-each-ref --format='%(refname:short)' \
+                 "refs/heads/centella/subtasks/${run_id}/"); do
+        git branch -D "$b" 2>/dev/null || true
+      done
+      echo "cleanup: removed worktrees + subtask branches for run ${run_id} "\
+"(run branch centella/runs/${run_id} and state dir kept; "\
+"pass --branches to delete the run branch too)"
+      ;;
+    *)  # default: keep both
+      echo "cleanup: removed worktrees for run ${run_id} "\
 "(branches centella/runs/${run_id} + centella/subtasks/${run_id}/* and state dir kept; "\
-"pass --branches to delete branches too)"
-  fi
+"pass --subtask-branches or --branches to delete branches too)"
+      ;;
+  esac
 }
 
 most_recent_failed_run() {
@@ -113,6 +130,7 @@ ALL_RUNS=false
 BOOTSTRAP=false
 LEGACY=false
 BRANCHES=false
+SUBTASK_BRANCHES=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -136,16 +154,27 @@ while [ $# -gt 0 ]; do
       BRANCHES=true
       shift
       ;;
+    --subtask-branches)
+      SUBTASK_BRANCHES=true
+      shift
+      ;;
     *)
       echo "cleanup.sh: unrecognized arg: $1" >&2
-      echo "usage: cleanup.sh [--run-id <id> | --all-runs | --bootstrap | --legacy] [--branches]" >&2
+      echo "usage: cleanup.sh [--run-id <id> | --all-runs | --bootstrap | --legacy] [--branches | --subtask-branches]" >&2
       exit 2
       ;;
   esac
 done
 
+if [ "$BRANCHES" = "true" ] && [ "$SUBTASK_BRANCHES" = "true" ]; then
+  echo "cleanup.sh: --branches and --subtask-branches are mutually exclusive" >&2
+  exit 2
+fi
+
+# Branch-scope: 0 = keep all, 1 = --branches, 2 = --subtask-branches
 BR_FLAG=0
 [ "$BRANCHES" = "true" ] && BR_FLAG=1
+[ "$SUBTASK_BRANCHES" = "true" ] && BR_FLAG=2
 
 # --- mode dispatch -------------------------------------------------------
 

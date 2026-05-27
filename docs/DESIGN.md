@@ -407,6 +407,20 @@ needs to be reviewed. Defaulting to push + PR turns every run into a
 reviewable artifact. `--no-push` exists for users running centella offline
 or in repositories without a GitHub remote.
 
+**Branch cleanup at finalize.** After the push + PR (or after the run
+completes under `--no-push`), the orchestrator deletes the per-subtask
+branches `centella/subtasks/<run-id>/*` automatically. They were the
+mechanism by which parallel implementers committed in isolation; once
+their work has been merged into the run branch their individual commit
+histories are still reachable from the run branch's `--no-ff` merges, so
+the named refs are pure clutter. The **run branch** itself
+(`centella/runs/<run-id>`) is *kept* — it is the PR head, and deleting it
+locally before the PR is merged would dangle the PR base reference. The
+per-run state directory (`state.json`, `run.json`, logs, criteria,
+checkpoints) is also kept as an audit trail. A user who wants to
+completely scrub a finished run can do so with
+`scripts/cleanup.sh --run-id <id> --branches`.
+
 ### Cleanup on abnormal exit
 
 A run can end abnormally three ways: the user hits Ctrl-C, an external

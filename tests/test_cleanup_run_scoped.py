@@ -172,6 +172,82 @@ def test_cleanup_run_id_removes_worktrees_but_preserves_state(tmp_path):
     ), "cleanup.sh --run-id must clear ${run_dir}/worktrees/*"
 
 
+def test_cleanup_subtask_branches_deletes_only_subtask_branches(tmp_path):
+    """End-to-end: `cleanup.sh --run-id <id> --subtask-branches` deletes
+    every `centella/subtasks/<id>/*` branch but keeps `centella/runs/<id>`
+    (the PR head). State dir and the run branch must both survive."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@x"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    (repo / "file").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+    run_id = "feat-test-bbb222"
+    run_dir = repo / ".centella" / "runs" / run_id
+    (run_dir / "worktrees").mkdir(parents=True)
+    (run_dir / "state.json").write_text('{"task": "test"}')
+
+    # Create the run branch + three subtask branches off of main.
+    subprocess.run(
+        ["git", "branch", f"centella/runs/{run_id}", "main"],
+        cwd=repo, check=True,
+    )
+    for sid in ("feat-001", "config-002", "feat-003"):
+        subprocess.run(
+            ["git", "branch", f"centella/subtasks/{run_id}/{sid}", "main"],
+            cwd=repo, check=True,
+        )
+
+    r = subprocess.run(
+        [str(CLEANUP_SH), "--run-id", run_id, "--subtask-branches"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert r.returncode == 0, f"cleanup.sh failed: {r.stderr}"
+
+    # The run branch must survive (it's the PR head).
+    refs = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/centella/"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.split()
+    assert f"centella/runs/{run_id}" in refs, (
+        "cleanup.sh --subtask-branches must NOT delete the run branch "
+        "(it's the PR head and must outlive the orchestrator)."
+    )
+    # Every subtask branch must be gone.
+    for sid in ("feat-001", "config-002", "feat-003"):
+        assert f"centella/subtasks/{run_id}/{sid}" not in refs, (
+            f"cleanup.sh --subtask-branches must delete "
+            f"centella/subtasks/{run_id}/{sid}"
+        )
+    # State dir survives.
+    assert (run_dir / "state.json").exists()
+
+
+def test_cleanup_branches_and_subtask_branches_mutually_exclusive(tmp_path):
+    """Passing both --branches and --subtask-branches must error with
+    exit 2 — they would otherwise conflict on whether to delete the
+    run branch."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "x").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "i"], cwd=repo, check=True)
+
+    r = subprocess.run(
+        [str(CLEANUP_SH), "--run-id", "anything",
+         "--branches", "--subtask-branches"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert r.returncode == 2, f"expected exit 2; got {r.returncode}"
+    assert "mutually exclusive" in r.stderr
+
+
 def test_cleanup_bootstrap_removes_orphans(tmp_path):
     """End-to-end: `cleanup.sh --bootstrap` removes orphaned bootstrap
     directories."""
