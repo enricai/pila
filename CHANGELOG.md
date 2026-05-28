@@ -71,7 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wall-clock + IANA tz; protocol path: Unix `resetsAt` timestamp),
   sleeps until the reset moment + 30s margin then `os.execvp`'s the
   launcher with `--resume --run-id <id>` for a fresh orchestrator
-  process with a fresh worker budget. When the parse fails (malformed
+  process. The `--max-workers` budget is NOT reset across the re-exec
+  (it persists via state.json's `worker_count`) so a run that
+  repeatedly hits the rate-limit still respects the user's cap. When
+  the parse fails (malformed
   time, unknown timezone, future format change), pila exits with code
   75 and prints the manual resume command — never a wrong-time sleep.
   CLI-only overrides on the original launch (`--model`,

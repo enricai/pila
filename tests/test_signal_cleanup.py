@@ -220,17 +220,56 @@ def test_main_keyboard_interrupt_no_full_purge():
     flag selection so a refactor can't silently regress Ctrl-C from
     'preserve and resume' back to the old 'throw it away' behavior
     (DESIGN §6 *Cleanup on abnormal exit*: every abnormal exit
-    preserves state and branches; only worktrees are torn down)."""
+    preserves state and branches; only worktrees are torn down).
+
+    Anchor on outer-try indentation (4 spaces) so an inner
+    `except KeyboardInterrupt` nested under a deeper indent — e.g.
+    the RateLimitedExit arm's sleep-interrupt guard — doesn't shadow
+    the outer clause."""
     body = _main_body()
-    # Find the except KeyboardInterrupt block.
+    # Find the OUTER except KeyboardInterrupt block (4-space indent).
     m = re.search(
-        r"except KeyboardInterrupt:(.*?)(?=^\s*except |^\s*finally:)",
+        r"\n    except KeyboardInterrupt:(.*?)(?=^\s*except |^\s*finally:)",
         body, re.DOTALL | re.MULTILINE,
     )
-    assert m, "could not locate except KeyboardInterrupt block in main()"
+    assert m, ("could not locate outer except KeyboardInterrupt block "
+               "in main() at the 4-space indent")
     block = m.group(1)
     assert "full_purge = False" in block
     assert "full_purge = True" not in block
+
+
+def test_main_rate_limit_sleep_catches_keyboard_interrupt():
+    """Ctrl-C during the auto-resume sleep must produce the friendly
+    'state preserved' log message, not a silent exit. The outer
+    KeyboardInterrupt arm of main() is reached *outside* the
+    RateLimitedExit arm — when the user Ctrl-C's while we're inside
+    `time.sleep` within the RateLimitedExit arm, the KeyboardInterrupt
+    would escape to Python's default handler without our friendly
+    message unless it's caught locally. Pin that the local catch
+    exists."""
+    body = _main_body()
+    # Find the OUTER except RateLimitedExit block (4-space indent).
+    # The lookahead anchors on the same outer-try indent to avoid
+    # truncating at inner `except BaseException` clauses nested inside
+    # the arm (e.g. the cleanup-failure guard).
+    m = re.search(
+        r"\n    except RateLimitedExit[^:]*:(.*?)(?=\n    except |\n    finally:)",
+        body, re.DOTALL,
+    )
+    assert m, ("could not locate outer except RateLimitedExit block in "
+               "main() at the 4-space indent")
+    block = m.group(1)
+    # The block must contain a local KeyboardInterrupt catch wrapping
+    # time.sleep — otherwise Ctrl-C during the wait silently kills the
+    # process without the user-facing "state preserved" message.
+    assert "time.sleep" in block
+    assert "except KeyboardInterrupt" in block, (
+        "RateLimitedExit arm must locally catch KeyboardInterrupt "
+        "around time.sleep so Ctrl-C during the auto-resume wait "
+        "produces the standard 'state preserved' message rather than "
+        "a silent exit."
+    )
 
 
 def test_main_interrupted_by_signal_no_full_purge():

@@ -841,6 +841,13 @@ _SESSION_LIMIT_RESET = re.compile(
     r"resets?\s+(\d{1,2}):(\d{2})\s*([ap]m)\s*\(([^)]+)\)",
     re.IGNORECASE)
 
+# Known `status` values for a `rate_limit_event` payload that mean the
+# limit has NOT been hit. Anything outside this set is treated as a
+# terminal rate-limit signal — defensive against future Anthropic
+# status strings ("exceeded", "denied", "blocked", etc.) without
+# hardcoding a guess at the terminal value.
+_RATE_LIMIT_ALLOWED_STATUSES = ("allowed", "allowed_warning")
+
 
 def detect_session_limit(text: str) -> RateLimitedExit | None:
     """Return a RateLimitedExit if `text` matches the Claude Code
@@ -850,9 +857,10 @@ def detect_session_limit(text: str) -> RateLimitedExit | None:
 
     Deliberately strict on the time-parse path: a wrong sleep is worse
     than no sleep, so we only return a reset_at when every step of the
-    parse succeeds (regex match, integer conversion, AM/PM
-    normalization, ZoneInfo lookup). Anything else → reset_at=None and
-    the user gets a manual --resume instruction."""
+    parse succeeds (regex match, integer conversion of hour and minute,
+    range checks on each, AM/PM normalization, ZoneInfo lookup).
+    Anything else → reset_at=None and the user gets a manual --resume
+    instruction."""
     if not _SESSION_LIMIT_PREFIX.search(text):
         return None
     reset_at: datetime | None = None
@@ -2730,11 +2738,15 @@ def _summarize_stream_event(sid: str, event: dict, verbosity: str) -> str | None
             bt = b.get("type")
             if bt == "text":
                 # First, inspect the text for a Claude Code session-limit /
-                # rate-limit message. Detection here is load-bearing: when
-                # the subscription limit is hit, claude -p returns the
-                # session-limit string as assistant text and then closes
-                # the session with subtype="success" — there is no other
-                # signal upstream of validate_result. See DESIGN §6
+                # rate-limit message. Detection here is load-bearing for
+                # the text path of the limit: when the subscription limit
+                # is hit, claude -p returns the session-limit string as
+                # assistant text and then closes the session with
+                # subtype="success" — without this check, validate_result
+                # would see a synthesized incomplete-handoff and the
+                # `_retryable_failure` safety net would be the only
+                # remaining defense. (The protocol-level path is handled
+                # below in the rate_limit_event branch.) See DESIGN §6
                 # *Cleanup on abnormal exit* for the auto-resume contract.
                 text = b.get("text") or ""
                 if (exc := detect_session_limit(text)):
@@ -2798,8 +2810,7 @@ def _summarize_stream_event(sid: str, event: dict, verbosity: str) -> str | None
         # defensive against future status strings ("exceeded",
         # "denied", "blocked", etc.) without hardcoding a guess.
         status = info.get("status")
-        allowed_statuses = ("allowed", "allowed_warning")
-        if status is not None and status not in allowed_statuses:
+        if status is not None and status not in _RATE_LIMIT_ALLOWED_STATUSES:
             reset_at: datetime | None = None
             resets_at_ts = info.get("resetsAt")
             rate_limit_type = info.get("rateLimitType", "?")
@@ -5970,8 +5981,10 @@ def main() -> None:
         # DESIGN §6 *Cleanup on abnormal exit*. Two paths:
         #   - reset_at parsed cleanly → run worktree-only cleanup,
         #     sleep until the moment + 30s margin, then os.execvp the
-        #     launcher with --resume for a fresh orchestrator process
-        #     and a fresh worker budget.
+        #     launcher with --resume for a fresh orchestrator process.
+        #     The `worker_count` cap is NOT reset — it persists in
+        #     state.json so a run repeatedly re-exec'ing through the
+        #     rate-limit still respects the user's --max-workers cap.
         #   - reset_at is None (parse failed or protocol-level event
         #     carried no time) → run cleanup, print the manual
         #     --resume instruction, exit 75 (EX_TEMPFAIL).
@@ -6000,13 +6013,31 @@ def main() -> None:
                 log(f"  cleanup before sleep failed (non-fatal): {ce}")
             # Skip the finally-block cleanup — we just did it.
             abnormal = False
-            time.sleep(wait_seconds)
-            launcher = str(ROOT / "pila")
-            log(f"  auto-resuming: exec {launcher} "
-                f"--resume --run-id {st.run_id}")
-            os.execvp(launcher,
-                      ["pila", "--resume", "--run-id", st.run_id])
-            # Unreachable: execvp replaces the process.
+            interrupted_during_sleep = False
+            try:
+                time.sleep(wait_seconds)
+            except KeyboardInterrupt:
+                # User Ctrl-C'd during the sleep — they don't want to
+                # wait for the auto-resume. State + branches are
+                # already preserved (cleanup ran before the sleep)
+                # so a manual --resume picks up cleanly. Emit the
+                # same friendly message the top-level KeyboardInterrupt
+                # arm would have printed, so the user doesn't see a
+                # silent exit after `sleeping until ...`. Sets the
+                # SIGINT exit code (130) the way the top-level arm
+                # does — `main()` returns through the normal flow.
+                log("interrupted by user (SIGINT) during rate-limit "
+                    f"sleep — state preserved (resume with --resume "
+                    f"--run-id {st.run_id})")
+                interrupted_during_sleep = True
+                exit_code = 130
+            if not interrupted_during_sleep:
+                launcher = str(ROOT / "pila")
+                log(f"  auto-resuming: exec {launcher} "
+                    f"--resume --run-id {st.run_id}")
+                os.execvp(launcher,
+                          ["pila", "--resume", "--run-id", st.run_id])
+                # Unreachable: execvp replaces the process.
         else:
             log(f"  could not parse reset time; "
                 f"resume manually: pila --resume --run-id {st.run_id}")

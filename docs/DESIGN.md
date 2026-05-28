@@ -479,7 +479,9 @@ the same path — so no orphan subprocesses remain. Then:
   message format, pila runs the worktree-only cleanup, sleeps until
   the reset moment + a small margin, then `os.execvp`'s the launcher
   with `--resume --run-id <id>` to start a fresh orchestrator
-  process with a fresh worker budget.
+  process. The `--max-workers` budget persists across the re-exec —
+  `worker_count` lives in state.json — so a run that repeatedly hits
+  the rate-limit still respects the user's cap.
 - If the reset clause didn't parse (malformed time, unknown
   timezone, or Anthropic changed the message format), pila runs
   the worktree-only cleanup, prints the literal message and the

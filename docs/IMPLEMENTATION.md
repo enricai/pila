@@ -890,7 +890,10 @@ time + IANA tz. Either source produces a `reset_at: datetime | None`
 message. `main()`'s `except RateLimitedExit` arm: when `reset_at` is
 set, run worktree cleanup, sleep until the moment + 30s margin, then
 `os.execvp` the launcher (`<PILA_HOME>/pila --resume --run-id <id>`)
-to start a fresh orchestrator process with a fresh worker budget;
+to start a fresh orchestrator process (the `--max-workers` budget is
+NOT reset across the re-exec: `worker_count` persists in state.json,
+so a run that repeatedly hits the rate-limit still respects the
+user's cap);
 when `reset_at` is None, print the literal message and the manual
 resume command, exit with code 75 (`EX_TEMPFAIL`).
 
