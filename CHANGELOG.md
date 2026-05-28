@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Ctrl-C is now resumable.** Earlier versions treated SIGINT as an
+  explicit "throw this away" gesture and ran a full purge — worktrees,
+  branches, and the run dir all deleted, `--resume` impossible.
+  Ctrl-C now follows the same conservative contract as every other
+  abnormal exit: worktrees are torn down (re-created idempotently on
+  resume), state.json + branches + checkpoints all survive. The
+  explicit full-purge gesture is `scripts/cleanup.sh --run-id <id>
+  --branches`. README, DESIGN.md §6, IMPLEMENTATION.md §5, and the
+  signal-cleanup pin test are updated to match.
 - **`max_total_workers` default 40 → 60.** Empirically (May 2026)
   18-subtask runs hit the cap mid-conformance, aborting with
   `worker budget exhausted`. Structural budget for an 18-subtask plan
@@ -49,6 +58,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Rate-limit-aware hard exit with optional auto-resume.** Pila now
+  detects the Claude Code subscription session-limit message
+  (`"You've hit your session limit · resets <time> (<tz>)"`) in worker
+  output, and the protocol-level `rate_limit_event` whose `status`
+  field falls outside the known-allowed set
+  `{"allowed", "allowed_warning"}` (defensive match against future
+  terminal status strings — Anthropic's terminal value is
+  internal/unobserved). Either signal raises a new `RateLimitedExit`;
+  main() runs the worktree-only cleanup (state + branches preserved)
+  and, when the reset clause parses unambiguously (text path:
+  wall-clock + IANA tz; protocol path: Unix `resetsAt` timestamp),
+  sleeps until the reset moment + 30s margin then `os.execvp`'s the
+  launcher with `--resume --run-id <id>` for a fresh orchestrator
+  process with a fresh worker budget. When the parse fails (malformed
+  time, unknown timezone, future format change), pila exits with code
+  75 and prints the manual resume command — never a wrong-time sleep.
+  CLI-only overrides on the original launch (`--model`,
+  `--max-workers`, etc.) are *not* propagated across the re-exec; set
+  them via env (`PILA_*`) or `pila.toml` if you want them to survive.
+  Empirical anchor: the verbatim message text matched identically
+  across three independent runs in May 2026, and the broad
+  `"rate-limit"` pattern false-matches legitimate worker text
+  discussing rate-limit code, so the detector keys only on the
+  literal marketing-copy prefix.
+- **Belt-and-suspenders retry for the
+  `incomplete-handoff`-with-missing-checkpoint case.** When the
+  rate-limit detector misses (e.g. Anthropic changes the message
+  format), the worker's empty-checkpoint envelope previously hit
+  `_retryable_failure` and was classified terminal. The retry
+  classifier now treats the validate_result line-2314 wording
+  (`checkpoint_path '...' does not exist on disk`) as retryable via a
+  prefix-match — tight enough that the sibling needs-clarification
+  case (line 2350) which shares both substrings stays terminal.
 - **Cross-planner file-overlap warning at plan-validation time.** When
   two planners both list the same path in `files_likely_touched`,
   pila now logs a warning right after reconciliation (before the

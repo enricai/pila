@@ -215,10 +215,12 @@ def test_main_calls_install_signal_handlers():
     assert "_install_signal_handlers()" in body
 
 
-def test_main_keyboard_interrupt_full_purge():
-    """SIGINT (KeyboardInterrupt) → full_purge=True. Pin the per-exception
-    flag selection so a refactor can't silently demote Ctrl-C from
-    'throw it away' to 'preserve and resume'."""
+def test_main_keyboard_interrupt_no_full_purge():
+    """SIGINT (KeyboardInterrupt) → full_purge=False. Pin the per-exception
+    flag selection so a refactor can't silently regress Ctrl-C from
+    'preserve and resume' back to the old 'throw it away' behavior
+    (DESIGN §6 *Cleanup on abnormal exit*: every abnormal exit
+    preserves state and branches; only worktrees are torn down)."""
     body = _main_body()
     # Find the except KeyboardInterrupt block.
     m = re.search(
@@ -227,7 +229,8 @@ def test_main_keyboard_interrupt_full_purge():
     )
     assert m, "could not locate except KeyboardInterrupt block in main()"
     block = m.group(1)
-    assert "full_purge = True" in block
+    assert "full_purge = False" in block
+    assert "full_purge = True" not in block
 
 
 def test_main_interrupted_by_signal_no_full_purge():
@@ -266,12 +269,19 @@ def test_main_system_exit_not_treated_as_unhandled():
     user already got the right error message."""
     body = _main_body()
     # Look for an `except SystemExit` block that appears before the
-    # catch-all `except BaseException` block.
-    sysexit_pos = body.find("except SystemExit")
-    base_pos = body.find("except BaseException")
+    # catch-all `except BaseException` block. Anchor on the outer
+    # try-block indentation (4 spaces) so an inner `except BaseException`
+    # nested under a deeper indent — e.g. the RateLimitedExit arm's
+    # cleanup-failure guard — doesn't shadow the outer clause.
+    sysexit_pos = body.find("\n    except SystemExit")
+    base_pos = body.find("\n    except BaseException")
     assert sysexit_pos != -1, (
         "main() must explicitly catch SystemExit so die() calls aren't "
         "mistakenly logged as unhandled exceptions"
+    )
+    assert base_pos != -1, (
+        "main() must have a catch-all except BaseException clause at "
+        "the outer try-block indent"
     )
     assert sysexit_pos < base_pos, (
         "except SystemExit must appear BEFORE except BaseException — "

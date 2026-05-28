@@ -490,6 +490,76 @@ def test_rate_limit_always_visible_at_debug(pila):
     assert pila._summarize_stream_event("x", event, "debug") is not None
 
 
+# ----- rate_limit_event: terminal status raises RateLimitedExit -----------
+
+def test_rate_limit_terminal_status_raises_with_parsed_reset_at(pila):
+    """A rate_limit_event whose `status` is anything outside the known-
+    allowed set raises RateLimitedExit and parses `resetsAt` (Unix
+    seconds) into a UTC reset_at. Defensive match against future
+    terminal status strings without hardcoding the value."""
+    import datetime as _dt
+    event = {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "exceeded",
+        "resetsAt": 1779941400,   # 2026-05-28T03:10:00Z
+        "rateLimitType": "five_hour",
+    }}
+    with pytest.raises(pila.RateLimitedExit) as ei:
+        pila._summarize_stream_event("x", event, "stream")
+    assert ei.value.reset_at is not None
+    assert ei.value.reset_at.tzinfo is _dt.timezone.utc
+    assert int(ei.value.reset_at.timestamp()) == 1779941400
+
+
+def test_rate_limit_terminal_status_no_reset_returns_none_reset(pila):
+    """If `resetsAt` is missing or malformed, we still raise (so the
+    user knows pila exited because of a rate-limit) but with
+    reset_at=None — no auto-resume, just the manual-resume fallback."""
+    event = {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "blocked",
+        # no resetsAt
+    }}
+    with pytest.raises(pila.RateLimitedExit) as ei:
+        pila._summarize_stream_event("x", event, "stream")
+    assert ei.value.reset_at is None
+
+
+def test_rate_limit_terminal_status_malformed_reset_returns_none(pila):
+    """Non-numeric resetsAt is treated as 'no usable reset time'."""
+    event = {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "denied",
+        "resetsAt": "not a number",
+    }}
+    with pytest.raises(pila.RateLimitedExit) as ei:
+        pila._summarize_stream_event("x", event, "stream")
+    assert ei.value.reset_at is None
+
+
+def test_rate_limit_allowed_does_not_raise(pila):
+    """`status='allowed'` is a routine accounting event — no raise."""
+    event = {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed",
+        "resetsAt": 1779941400,
+    }}
+    # Must return cleanly (the warning-log branch already dropped this
+    # at 'stream' verbosity).
+    assert pila._summarize_stream_event("x", event, "stream") is None
+
+
+def test_rate_limit_allowed_warning_does_not_raise(pila):
+    """`status='allowed_warning'` (threshold-crossing alert) surfaces a
+    warning log but must NOT raise — the limit has not yet been hit."""
+    event = {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed_warning",
+        "utilization": 0.91,
+        "surpassedThreshold": 0.9,
+        "resetsAt": 1779941400,
+    }}
+    out = pila._summarize_stream_event("x", event, "stream")
+    assert out is not None
+    assert "allowed_warning" in out
+    assert "91" in out
+
+
 # ----- result envelope -----------------------------------------------------
 
 def test_result_success_summary(pila):

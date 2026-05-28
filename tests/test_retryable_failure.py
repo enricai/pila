@@ -40,6 +40,67 @@ def test_terminal_strings_return_false(pila, reason):
     assert pila._retryable_failure(reason) is False
 
 
+# --- the checkpoint-missing branch ----------------------------------------
+
+def test_incomplete_handoff_missing_checkpoint_is_retryable(pila):
+    """The validate_result line-2314 message for an `incomplete-handoff`
+    worker that produced no checkpoint must be retryable. This is the
+    Claude Code session-limit / rate-limit safety net: when the
+    subscription cap is hit, claude -p returns the session-limit text
+    and the worker's envelope claims `incomplete-handoff` while pointing
+    at a checkpoint that was never written. The new prefix-match arm in
+    `_retryable_failure` catches it so the next attempt (on a fresh
+    process after the reset window, or even on the same process if
+    detect_session_limit upstream missed) is allowed to retry."""
+    reason = ("checkpoint_path '/Users/x/.pila/runs/r/checkpoints/feat-001.md' "
+              "does not exist on disk")
+    assert pila._retryable_failure(reason) is True
+
+
+def test_needs_clarification_missing_checkpoint_stays_terminal(pila):
+    """The validate_result line-2350 message (needs-clarification with a
+    missing checkpoint) shares both substrings 'checkpoint_path' and
+    'does not exist on disk' with the retryable line-2314 message, but
+    represents a genuinely-broken worker (the prompt requires both a
+    question AND a checkpoint; a worker that asks a question with no
+    work-in-progress to come back to is lying about its own status).
+    Must stay terminal — the prefix-match in `_retryable_failure`
+    disambiguates the two by anchoring on the start of the line-2314
+    wording (`checkpoint_path '...`)."""
+    reason = ("status='needs-clarification' but checkpoint_path "
+              "'/Users/x/.pila/runs/r/checkpoints/feat-001.md' "
+              "does not exist on disk")
+    assert pila._retryable_failure(reason) is False
+
+
+def test_needs_clarification_null_checkpoint_stays_terminal(pila):
+    """The validate_result line-2347 sibling case — checkpoint_path is
+    null entirely — was always terminal and stays terminal."""
+    reason = ("status='needs-clarification' but checkpoint_path is null "
+              "— the work-in-progress must survive the question")
+    assert pila._retryable_failure(reason) is False
+
+
+def test_checkpoint_missing_marker_matches_validate_result_string(pila):
+    """Coupling test for the new retryable branch — same spirit as
+    test_retryable_markers_match_check_strings above.
+
+    The new `reason.startswith("checkpoint_path '")` arm in
+    `_retryable_failure` must match the exact string `validate_result`
+    emits for the incomplete-handoff case. If `validate_result`'s
+    wording changes, this test fails and forces the retry classifier
+    to be updated in the same change."""
+    validate_src = inspect.getsource(pila.validate_result)
+    # Look for the exact f-string format that produces the line-2314
+    # message. The literal characters `checkpoint_path '` (with the
+    # trailing single quote) are what `_retryable_failure` keys on.
+    assert "checkpoint_path '{cp}' does not exist on disk" in validate_src, (
+        "validate_result no longer emits the incomplete-handoff "
+        "'checkpoint_path' format that _retryable_failure depends on. "
+        "Update both in the same change."
+    )
+
+
 # --- the coupling test ----------------------------------------------------
 
 def test_retryable_markers_match_check_strings(pila):

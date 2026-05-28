@@ -16,7 +16,7 @@ Pila inverts the relationship. **The model writes code. The program runs everyth
 - **Confidence is the only hard gate.** The implementer self-gates on evidence-anchored confidence in `root_cause` and `solution` (≥9 on both, see DESIGN.md §8) — falsifiers tested, contradictions reconciled, gaps named with concrete artifacts. A worker that cannot justify the score exits `blocked` with the gap analysis. Everything else — tests passing, lint clean, build green, per-criterion satisfaction — is best-effort: surfaced as advisory warnings on the subtask result, never escalated to `failed` or `blocked` by the orchestrator. The criteria file is the implementer's working note, not a gate.
 - **Workers must justify confidence with evidence, not feelings.** Before writing code, an implementer clears domain-specific evidence gates — file-and-line citations, reproductions, falsification attempts. A self-reported score without hard artifacts doesn't clear the bar.
 - **Parallel work that's actually safe.** Each implementer gets an isolated git worktree. Parallel writes never collide. Conflicts surface one wave at a time, close to the work that caused them.
-- **Resumable by design.** A reboot, network blip, budget cap, or external kill (SIGTERM from CI / systemd / a closed terminal) loses nothing — the run branch is the durable record, worktrees are torn down, and `--resume` picks up from the last completed wave. The one exception is Ctrl-C, which is treated as an explicit "throw this away" gesture: the run's branches, worktrees, and state dir are removed and `--resume` cannot recover it. (For a *resumable* abort, prefer `kill <pid>` over Ctrl-C.)
+- **Resumable by design.** A reboot, network blip, budget cap, the Claude Code subscription rate-limit, Ctrl-C, or an external kill (SIGTERM from CI / systemd / a closed terminal) all lose nothing — the run branch is the durable record, worktrees are torn down, and `--resume` picks up from the last completed wave. When the subscription rate-limit hits and the reset time is unambiguously parseable, pila even auto-resumes after the reset window without manual intervention. The explicit "throw this away" gesture is `scripts/cleanup.sh --run-id <id> --branches`, not Ctrl-C.
 - **Parallel-safe across runs.** Multiple `./pila` invocations in the same repository each get a unique `run_id` (a derived branch + state directory). Their branches, worktrees, and `.pila/` state never collide. Launch a fix and a feature in parallel without coordination.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -387,18 +387,27 @@ for an audit cleanup across every past run).
   The plugin skill at `commands/pila.md` handles this relay
   automatically when invoked as `/pila`.
 
-- **Run interrupted (Ctrl-C)** — Ctrl-C is treated as the user's explicit
-  "throw this away" gesture. The run's worktrees, branches, and state dir
-  are all removed (`pila/runs/<run-id>` and
-  `pila/subtasks/<run-id>/*` branches included). The run is
-  *not* resumable. If you want to abort temporarily and resume later, use
-  `kill <pid>` (SIGTERM) instead — see the next entry.
+- **Run interrupted (Ctrl-C, SIGTERM, SIGHUP, CI cancel, terminal close, reboot)** —
+  worktrees are torn down but state.json + branches are preserved.
+  Resume with `./pila --resume` (auto-picks if exactly one in-flight
+  run) or `./pila --resume --run-id <id>`. Run `pila --list` to see
+  what's in flight. The explicit "throw this away" command is
+  `scripts/cleanup.sh --run-id <id> --branches` — Ctrl-C alone is
+  always safely resumable.
 
-- **Run terminated by signal (SIGTERM, SIGHUP, CI cancel, terminal close, reboot)** —
-  worktrees are torn down but state.json + run branch are preserved.
-  Resume with `./pila --resume` (auto-picks if exactly one run) or
-  `./pila --resume --run-id <id>`. Run `pila --list` to see what's
-  in flight.
+- **Run hit the Claude Code subscription rate-limit** — pila detects
+  the session-limit message from `claude -p` and exits cleanly.
+  Worktrees are torn down; state and branches are preserved. When the
+  reset time can be parsed unambiguously, pila sleeps until the reset
+  window and auto-resumes itself. When it cannot (malformed time,
+  unfamiliar timezone, or a future format change), pila exits with
+  code 75 and prints the manual resume command — re-run that command
+  yourself once the rate-limit clears. Auto-resume passes only
+  `--resume --run-id <id>`; CLI-only overrides (`--model`,
+  `--max-workers`, etc.) on the original launch are *not* preserved
+  across an auto-resume. Set those via env (`PILA_*`) or `pila.toml`
+  if you want them to survive — both channels are re-resolved on
+  every `--resume`.
 
 - **A subtask reports `blocked`** — the implementer hit something it
   cannot resolve and bailed before integration. Read the blocker reason in

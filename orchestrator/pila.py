@@ -32,8 +32,9 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 ROOT = Path(__file__).resolve().parent.parent       # pila plugin/repo root
 PROMPTS = ROOT / "prompts"
@@ -793,9 +794,93 @@ class InterruptedBySignal(BaseException):
     cleanup with state and branches preserved (DESIGN §6).
 
     SIGINT keeps Python's default KeyboardInterrupt — caught separately
-    and triggers a full-purge cleanup (the user's explicit "throw this
-    away" gesture)."""
+    but follows the same worktree-only-cleanup contract (DESIGN §6
+    *Cleanup on abnormal exit*). The explicit "throw this away"
+    gesture is `scripts/cleanup.sh --run-id <id> --branches`, not
+    Ctrl-C."""
     pass
+
+
+class RateLimitedExit(BaseException):
+    """Raised when claude -p reports the Claude Code subscription
+    session-limit / rate-limit has been hit. Inherits BaseException so
+    it propagates through asyncio's gather and the broad
+    `except Exception` handlers without being swallowed — same pattern
+    as InterruptedBySignal.
+
+    Carries:
+      - reset_at: datetime | None — parsed from the literal Claude Code
+        message format when present. None means "could not parse
+        unambiguously"; main() prints the manual --resume command and
+        exits without auto-resume rather than guessing a wrong time.
+      - raw_message: str — the verbatim message text (or a synthesized
+        envelope for the protocol-level rate_limit_event path),
+        surfaced to the user on exit.
+
+    See DESIGN §6 *Cleanup on abnormal exit* for the auto-resume
+    contract."""
+    def __init__(self, reset_at: datetime | None, raw_message: str):
+        super().__init__(raw_message)
+        self.reset_at = reset_at
+        self.raw_message = raw_message
+
+
+# Literal Claude Code subscription rate-limit message format, observed
+# verbatim across three independent runs (barnacle/stackpulse/substack)
+# on 2026-05-27. Format:
+#   "You've hit your session limit · resets <h>:<mm><am|pm> (<IANA TZ>)"
+# Match case-insensitively but require the literal prefix — broader
+# patterns false-match legitimate assistant text discussing rate-
+# limiting code (a worker iterating on rate-limit handling could
+# legitimately write "the hot path is rate-limited"). The prefix is
+# Claude-Code-specific marketing copy; no other text plausibly
+# contains it.
+_SESSION_LIMIT_PREFIX = re.compile(
+    r"you've hit your session limit", re.IGNORECASE)
+_SESSION_LIMIT_RESET = re.compile(
+    r"resets?\s+(\d{1,2}):(\d{2})\s*([ap]m)\s*\(([^)]+)\)",
+    re.IGNORECASE)
+
+
+def detect_session_limit(text: str) -> RateLimitedExit | None:
+    """Return a RateLimitedExit if `text` matches the Claude Code
+    session-limit message format, else None. Parse failures of the
+    reset clause produce an exit with reset_at=None — the run still
+    exits cleanly, just without auto-resume.
+
+    Deliberately strict on the time-parse path: a wrong sleep is worse
+    than no sleep, so we only return a reset_at when every step of the
+    parse succeeds (regex match, integer conversion, AM/PM
+    normalization, ZoneInfo lookup). Anything else → reset_at=None and
+    the user gets a manual --resume instruction."""
+    if not _SESSION_LIMIT_PREFIX.search(text):
+        return None
+    reset_at: datetime | None = None
+    m = _SESSION_LIMIT_RESET.search(text)
+    if m:
+        hour_s, minute_s, ampm, tz_name = m.group(1), m.group(2), m.group(3), m.group(4)
+        try:
+            tz = ZoneInfo(tz_name)
+            h = int(hour_s)
+            mn = int(minute_s)
+            if not (0 <= mn < 60):
+                raise ValueError(f"minute out of range: {mn}")
+            if ampm.lower() == "pm" and h != 12:
+                h += 12
+            elif ampm.lower() == "am" and h == 12:
+                h = 0
+            if not (0 <= h < 24):
+                raise ValueError(f"hour out of range: {h}")
+            now = datetime.now(tz)
+            candidate = now.replace(hour=h, minute=mn, second=0, microsecond=0)
+            # Reset is always in the future; if the parsed time is
+            # earlier than now (or equal), it's tomorrow.
+            if candidate <= now:
+                candidate = candidate + timedelta(days=1)
+            reset_at = candidate
+        except (ValueError, ZoneInfoNotFoundError):
+            reset_at = None
+    return RateLimitedExit(reset_at=reset_at, raw_message=text)
 
 
 def _install_signal_handlers() -> None:
@@ -2644,13 +2729,23 @@ def _summarize_stream_event(sid: str, event: dict, verbosity: str) -> str | None
         for b in blocks:
             bt = b.get("type")
             if bt == "text":
+                # First, inspect the text for a Claude Code session-limit /
+                # rate-limit message. Detection here is load-bearing: when
+                # the subscription limit is hit, claude -p returns the
+                # session-limit string as assistant text and then closes
+                # the session with subtype="success" — there is no other
+                # signal upstream of validate_result. See DESIGN §6
+                # *Cleanup on abnormal exit* for the auto-resume contract.
+                text = b.get("text") or ""
+                if (exc := detect_session_limit(text)):
+                    raise exc
                 # Emit every non-empty line of the assistant's text as
                 # its own [<sid> text] entry, full-width (no
                 # truncation). Mid-cut sentences in earlier versions
                 # ate the part the user actually wanted to read. The
                 # per-worker .log file has the same content; this just
                 # surfaces it inline too.
-                for ln in (b.get("text") or "").splitlines():
+                for ln in text.splitlines():
                     ln = ln.strip()
                     if ln:
                         lines.append(f"  [{sid} text] {ln}")
@@ -2689,11 +2784,44 @@ def _summarize_stream_event(sid: str, event: dict, verbosity: str) -> str | None
 
     if t == "rate_limit_event":
         info = event.get("rate_limit_info", {}) or {}
+        # The actual Claude Code stream-json schema (verified from
+        # captured worker logs 2026-05-27): the payload carries
+        # `status` (observed values: "allowed", "allowed_warning"),
+        # `resetsAt` (Unix timestamp seconds), `rateLimitType`,
+        # `utilization` (float 0..1, present on warning events),
+        # `surpassedThreshold` (the *threshold value crossed*, e.g.
+        # 0.9 — NOT a boolean flag), `overageStatus`,
+        # `overageDisabledReason`, `isUsingOverage`. The terminal
+        # status value (when the limit is actually hit) is
+        # Anthropic-internal and unobserved by us; we treat any
+        # status not in the known-allowed set as terminal —
+        # defensive against future status strings ("exceeded",
+        # "denied", "blocked", etc.) without hardcoding a guess.
+        status = info.get("status")
+        allowed_statuses = ("allowed", "allowed_warning")
+        if status is not None and status not in allowed_statuses:
+            reset_at: datetime | None = None
+            resets_at_ts = info.get("resetsAt")
+            rate_limit_type = info.get("rateLimitType", "?")
+            if isinstance(resets_at_ts, (int, float)):
+                try:
+                    reset_at = datetime.fromtimestamp(
+                        resets_at_ts, tz=timezone.utc)
+                except (OSError, ValueError, OverflowError):
+                    reset_at = None
+            raw = (f"rate_limit_event status={status} "
+                   f"rateLimitType={rate_limit_type} "
+                   f"resetsAt={resets_at_ts}")
+            raise RateLimitedExit(reset_at=reset_at, raw_message=raw)
         # Surface threshold-crossings at stream; everything at debug.
+        # The boolean-or-numeric `surpassedThreshold` field is a
+        # threshold value (e.g. 0.9), not a boolean flag — truthy when
+        # present and non-zero, which is the right "this is a
+        # threshold-crossing event" signal for surfacing the warning.
         if info.get("surpassedThreshold") or verbosity == "debug":
-            util = int(float(info.get("utilization") or 0) * 100)
-            status = info.get("status", "?")
-            return f"  [{sid}] rate-limit {status} (util={util}%)"
+            util_frac = float(info.get("utilization") or 0)
+            util = int(util_frac * 100)
+            return f"  [{sid}] rate-limit {status or '?'} (util={util}%)"
         return None
 
     if t == "result":
@@ -4505,6 +4633,17 @@ def _retryable_failure(reason: str) -> bool:
     Retryable (corrective note can fix it):
       - branch had no commits ahead of the run branch
       - worktree left dirty (uncommitted changes)
+      - `incomplete-handoff` worker produced no checkpoint on disk
+        (the `validate_result` line-2314-style message). Two known
+        triggers: (a) the Claude Code session-limit / rate-limit case
+        where the worker did nothing because the subscription was
+        capped — primarily caught by `detect_session_limit()` upstream
+        but this is the safety net for a message-format change; (b) a
+        worker that hit `--max-turns` with no checkpoint written, which
+        `run_implementer` synthesizes into the same envelope shape (see
+        the WorkerError catch at the end of `run_implementer`). Both
+        are corrective-note cases — a fresh worker can plausibly do
+        better — not lies about status.
 
     Terminal (worker is broken/dishonest — terminate immediately, no retry):
       - cross-field invariant violation (worker lied about its own status)
@@ -4515,7 +4654,19 @@ def _retryable_failure(reason: str) -> bool:
     """
     retryable_markers = ("no commits ahead of the run",
                          "uncommitted change")
-    return any(m in reason for m in retryable_markers)
+    if any(m in reason for m in retryable_markers):
+        return True
+    # Prefix-match — not pair-match on "checkpoint_path" + "does not
+    # exist on disk" — because validate_result's needs-clarification
+    # check emits a *different* message that also contains both
+    # substrings (`status='needs-clarification' but checkpoint_path
+    # '...' does not exist on disk`) but represents a genuinely-broken
+    # worker that must stay non-retryable. Only the
+    # incomplete-handoff variant (`checkpoint_path '...' does not exist
+    # on disk`) is the session-limit-no-op signature.
+    if reason.startswith("checkpoint_path '"):
+        return True
+    return False
 
 
 # --- post-work conformance phase (DESIGN §9 *Post-work conformance*) -------
@@ -5814,14 +5965,64 @@ def main() -> None:
         st.save()
         exit_message = str(e)
         exit_code = 1
-    except KeyboardInterrupt:
-        # Ctrl-C → user's explicit "throw this away" gesture. Full purge:
-        # worktrees + branches + state dir all removed. asyncio.run
-        # already cancelled pending tasks and run_proc's CancelledError
-        # handler killed in-flight child processes.
+    except RateLimitedExit as e:
+        # Claude Code session-limit / rate-limit hit mid-worker. See
+        # DESIGN §6 *Cleanup on abnormal exit*. Two paths:
+        #   - reset_at parsed cleanly → run worktree-only cleanup,
+        #     sleep until the moment + 30s margin, then os.execvp the
+        #     launcher with --resume for a fresh orchestrator process
+        #     and a fresh worker budget.
+        #   - reset_at is None (parse failed or protocol-level event
+        #     carried no time) → run cleanup, print the manual
+        #     --resume instruction, exit 75 (EX_TEMPFAIL).
+        # Subprocess cleanup before sleep is handled by the existing
+        # asyncio cancellation chain (DESIGN §6, IMPLEMENTATION §5
+        # *Abnormal exit and rate-limit contract*): _invoke's
+        # BaseException guard kills the rate-limited claude -p child;
+        # sibling wave-tasks cancel through gather and each kills its
+        # own child.
         abnormal = True
-        full_purge = True
-        log("interrupted by user (SIGINT) — full purge of run state")
+        full_purge = False
+        st.save()
+        log(f"rate-limited: {e.raw_message}")
+        if e.reset_at is not None:
+            wait_seconds = max(
+                0,
+                int((e.reset_at - datetime.now(e.reset_at.tzinfo))
+                    .total_seconds())) + 30
+            log(f"  sleeping until {e.reset_at.isoformat()} "
+                f"(~{wait_seconds}s) then auto-resuming")
+            # Run cleanup now so the sleep doesn't hold worktrees
+            # occupied. State and branches preserved by full_purge=False.
+            try:
+                _cleanup_on_abnormal_exit(st, full_purge=False)
+            except BaseException as ce:
+                log(f"  cleanup before sleep failed (non-fatal): {ce}")
+            # Skip the finally-block cleanup — we just did it.
+            abnormal = False
+            time.sleep(wait_seconds)
+            launcher = str(ROOT / "pila")
+            log(f"  auto-resuming: exec {launcher} "
+                f"--resume --run-id {st.run_id}")
+            os.execvp(launcher,
+                      ["pila", "--resume", "--run-id", st.run_id])
+            # Unreachable: execvp replaces the process.
+        else:
+            log(f"  could not parse reset time; "
+                f"resume manually: pila --resume --run-id {st.run_id}")
+            exit_code = 75  # EX_TEMPFAIL
+    except KeyboardInterrupt:
+        # Ctrl-C → worktree cleanup only; state and branches preserved
+        # so the user can --resume. The explicit "throw this away"
+        # gesture is `scripts/cleanup.sh --run-id <id> --branches`,
+        # not Ctrl-C. asyncio.run already cancelled pending tasks and
+        # _invoke's / run_proc's BaseException handlers killed
+        # in-flight child processes (DESIGN §6).
+        abnormal = True
+        full_purge = False
+        st.save()
+        log("interrupted by user (SIGINT) — worktree cleanup; "
+            f"state preserved (resume with --resume --run-id {st.run_id})")
         exit_code = 130
     except InterruptedBySignal as e:
         # SIGTERM / SIGHUP → external orchestration (CI cancel, systemd

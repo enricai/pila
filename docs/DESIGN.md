@@ -434,31 +434,69 @@ completely scrub a finished run can do so with
 
 ### Cleanup on abnormal exit
 
-A run can end abnormally three ways: the user hits Ctrl-C, an external
+A run can end abnormally four ways: the user hits Ctrl-C, an external
 process sends a signal (SIGTERM/SIGHUP from CI, systemd, a terminal
-close), or an unhandled exception fires. In each case the orchestrator
-runs a cleanup pass before exiting, and the cleanup *scope* depends on
-the cause.
+close), an unhandled exception fires, or the Claude Code subscription
+rate-limit / session-limit is hit mid-worker. In each case the
+orchestrator runs a cleanup pass before exiting, and the cleanup
+*scope* is uniformly conservative — **state and branches are always
+preserved**; only worktrees are torn down. The run is always
+resumable via `--resume --run-id <id>` after any abnormal exit.
 
-**Ctrl-C (SIGINT) → full purge.** The user explicitly told pila to
-abort. Worktrees, run branch + per-subtask branches
-(`pila/runs/<run-id>` and `pila/subtasks/<run-id>/*`), and the
-per-run state directory are all removed. The run is gone; `--resume`
-cannot recover it.
+**Worktree-only cleanup, always.** Whether triggered by Ctrl-C,
+SIGTERM, SIGHUP, WorkerError, or any other exception:
 
-**SIGTERM, SIGHUP, WorkerError, any other exception → worktrees only.**
-The orchestrator was likely killed by something external (CI cancel,
-systemd stop, terminal close) rather than by the user's intent to abandon
-the run. State and the run branch are preserved so `--resume --run-id <id>`
-can continue once the underlying issue is fixed. Only the (re-creatable)
-worktrees are torn down to leave a clean filesystem.
+- Worktrees under `.pila/runs/<run-id>/worktrees/` are removed and
+  `git worktree prune` clears stale metadata. Worktrees are
+  disposable — `scripts/new-worktree.sh` re-creates them idempotently
+  on `--resume` from the deterministic branch names.
+- State.json, the run branch (`pila/runs/<run-id>`), and per-subtask
+  branches (`pila/subtasks/<run-id>/*`) all survive. Implementer
+  checkpoints under `.pila/runs/<run-id>/checkpoints/` survive too,
+  so in-flight subtasks resume from where they left off.
 
-Both paths use the same `_cleanup_on_abnormal_exit()` helper; the
-`full_purge` boolean parameter selects between them. The signal vs.
-exception classification happens in `main()`'s try/except: SIGINT keeps
-Python's default `KeyboardInterrupt`; SIGTERM and SIGHUP raise a
-dedicated `InterruptedBySignal` exception via handlers installed at
-program start. SIGINT and SIGHUP are POSIX-only — guarded with
+Earlier versions of pila gave Ctrl-C an explicit "throw this away"
+semantic with a full purge of state + branches + run dir. That made
+accidental Ctrl-C catastrophic — and it conflated user intent ("stop
+this run") with run lifecycle ("nuke the artifacts"). The two are
+now separate: Ctrl-C stops; `scripts/cleanup.sh --run-id <id>
+--branches` is the explicit full-purge gesture.
+
+**Rate-limited (RateLimitedExit) → auto-resume after the reset
+window.** When `claude -p` reports the subscription session-limit
+hit (delivered as assistant-text content in the verbatim format
+`"You've hit your session limit · resets <time> (<tz>)"`, or as a
+`rate_limit_event` whose `status` field reports a terminal value
+— anything outside the known-allowed set
+`{"allowed", "allowed_warning"}`), pila raises
+`RateLimitedExit(reset_at, raw)`.
+The exception propagates through the existing asyncio cancellation
+chain — `_invoke`'s `BaseException` guard kills the in-flight
+`claude -p` child and reaps it, sibling wave-tasks cancel through
+the same path — so no orphan subprocesses remain. Then:
+
+- If `reset_at` was parsed cleanly from the literal Claude Code
+  message format, pila runs the worktree-only cleanup, sleeps until
+  the reset moment + a small margin, then `os.execvp`'s the launcher
+  with `--resume --run-id <id>` to start a fresh orchestrator
+  process with a fresh worker budget.
+- If the reset clause didn't parse (malformed time, unknown
+  timezone, or Anthropic changed the message format), pila runs
+  the worktree-only cleanup, prints the literal message and the
+  manual resume command, and exits with code 75 (`EX_TEMPFAIL`).
+
+The auto-resume path is opt-in by message format: we only sleep
+when the reset time is unambiguously parseable. A parse failure
+must never produce a wrong-time sleep — the user gets a clean
+manual-resume instruction instead.
+
+`_cleanup_on_abnormal_exit(st, full_purge=False)` is the single
+helper for all four paths. The classification happens in `main()`'s
+try/except: SIGINT raises Python's default `KeyboardInterrupt`;
+SIGTERM and SIGHUP raise the dedicated `InterruptedBySignal`
+exception via handlers installed at program start; `RateLimitedExit`
+is raised inside the stream handler when the rate-limit message is
+detected. SIGINT and SIGHUP are POSIX-only — guarded with
 `hasattr(signal, ...)` so the orchestrator still runs on Windows
 (degraded: only SIGTERM-equivalent termination works).
 

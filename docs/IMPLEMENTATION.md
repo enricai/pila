@@ -859,9 +859,59 @@ finalization before re-raising — under an `asyncio.Semaphore` bounded by
 no lock — coroutines only interleave at `await` points, which never fall inside
 a `st.data[k] = v; st.save()` pair. `State.save()` still writes to a temp file
 then `os.replace()` for atomicity against process crash. On `KeyboardInterrupt`,
-`asyncio.run` cancels pending tasks; `run_proc`'s catch-all `BaseException`
-handler kills any in-flight child process before re-raising, so no `claude`
-or `git` subprocesses are orphaned.
+`SIGTERM`, or `RateLimitedExit`, `asyncio.run` cancels pending tasks;
+`run_proc`'s and `_invoke`'s catch-all `BaseException` handlers kill any
+in-flight child process before re-raising, so no `claude` or `git`
+subprocesses are orphaned.
+
+### Abnormal exit and rate-limit contract (DESIGN §6 *Cleanup on abnormal exit*)
+
+All abnormal exits — Ctrl-C, SIGTERM/SIGHUP, WorkerError, unhandled
+exception, or `RateLimitedExit` — route through
+`_cleanup_on_abnormal_exit(st, full_purge=False)`. **State.json, the
+run branch, per-subtask branches, and implementer checkpoints all
+survive**; only worktrees are removed (and re-created idempotently on
+`--resume` via `scripts/new-worktree.sh`).
+
+`RateLimitedExit` is raised by `detect_session_limit(text)` inside
+`_summarize_stream_event` when a worker stream contains the verbatim
+Claude Code subscription message
+`"You've hit your session limit · resets <h>:<mm><am|pm> (<IANA TZ>)"`,
+or by the same function's `rate_limit_event` branch when the
+protocol-level event's `status` field falls outside the known-allowed
+set `{"allowed", "allowed_warning"}` — a defensive match against
+future terminal status strings (Anthropic's terminal value, e.g.
+"exceeded" / "denied" / "blocked", is internal and unobserved by us;
+matching everything-not-allowed avoids hardcoding a guess that could
+go stale). The protocol-level path parses `resetsAt` (a Unix timestamp
+in seconds) into a UTC `reset_at`; the text path parses the wall-clock
+time + IANA tz. Either source produces a `reset_at: datetime | None`
+(parse failure → `None`, never a wrong-time guess) and the raw
+message. `main()`'s `except RateLimitedExit` arm: when `reset_at` is
+set, run worktree cleanup, sleep until the moment + 30s margin, then
+`os.execvp` the launcher (`<PILA_HOME>/pila --resume --run-id <id>`)
+to start a fresh orchestrator process with a fresh worker budget;
+when `reset_at` is None, print the literal message and the manual
+resume command, exit with code 75 (`EX_TEMPFAIL`).
+
+**Auto-resume override persistence.** The re-exec passes only
+`--resume --run-id <id>` as argv — any CLI overrides on the original
+launch (`--model`, `--max-workers`, `--confidence-rounds`,
+`--source-of-truth`, `--clarify`, `--no-push`) are **not** propagated
+to the fresh process. They fall back to env vars (`PILA_*`) and
+`pila.toml` settings, which are re-resolved on every `--resume`
+(see "Resume integrity" above). Users who rely on a non-default
+setting should configure it via env or `pila.toml` rather than a
+single CLI flag, so an auto-resume preserves it. A manual `--resume`
+(invoked by the user after the parse-failure exit-75 path) can
+re-supply CLI overrides as needed.
+
+Ctrl-C (SIGINT) is **resumable** — same contract as every other
+abnormal exit. The explicit "throw this away" gesture is
+`scripts/cleanup.sh --run-id <id> --branches`, not Ctrl-C. This was a
+behavior change from earlier versions of pila where Ctrl-C ran a full
+purge; the old design conflated user intent ("stop this run") with
+run lifecycle ("nuke the artifacts").
 
 ---
 
@@ -933,7 +983,8 @@ edit `_retryable_failure` and the check function in the same change.
 |---------|------|-----------------|
 | branch has no commits ahead of the run branch | Retryable | `"no commits ahead of the run"` from `check_branch_has_commits` |
 | worktree left dirty | Retryable | `"uncommitted change"` from the dirty-worktree check |
-| cross-field invariant violation | Terminal | `validate_result` |
+| `incomplete-handoff` worker produced no checkpoint on disk | Retryable | `reason.startswith("checkpoint_path '")` — the line-2314 prefix of `validate_result`'s incomplete-handoff check. Triggers in two known cases: (1) Claude Code session-limit / rate-limit no-op workers leave no checkpoint (primarily caught by `detect_session_limit()` upstream; this is the safety net for a message-format change), and (2) a worker that hit `--max-turns` with no checkpoint written, which `run_implementer`'s WorkerError handler synthesizes into the same envelope. Both are corrective-note cases. Prefix-match — *not* pair-match on `"checkpoint_path"` + `"does not exist on disk"` — because `validate_result`'s needs-clarification check (line 2350) emits a message containing both substrings but represents a genuinely-broken worker that must stay non-retryable. |
+| cross-field invariant violation (other) | Terminal | `validate_result` |
 | diff touched a protected path | Terminal | `check_diff_scope` |
 | worker-level error (timeout, schema-invalid twice) | Terminal | `WorkerError` path |
 
@@ -953,7 +1004,7 @@ Every script takes a `RUN_ID` as its first positional argument (after any flags)
 | `new-worktree.sh <id> <run-id>` | Creates `pila/subtasks/<run-id>/<id>` worktree at `.pila/runs/<run-id>/worktrees/<id>` branched off the current `pila/runs/<run-id>` tip; reuses an existing worktree/branch if present (resume after handoff). Prints the absolute worktree path. The run-branch (`pila/runs/…`) and subtask-branch (`pila/subtasks/…`) prefixes are deliberately disjoint so neither is an ancestor ref of the other — git's loose ref store cannot hold a ref AT a path and another ref UNDER that same path simultaneously. |
 | `integrate.sh <id> <run-id>` | From repo root, inside the run-branch worktree (`.pila/runs/<run-id>/worktrees/staging`): `git merge --no-ff pila/subtasks/<run-id>/<id>`. Exit 0 clean; exit 1 on conflict, leaving the worktree mid-merge for an integrator; exit 2 on precondition failure (run-branch worktree or subtask branch missing) — `integrate_wave` treats exit 2 as fatal via `die()` and does *not* spawn an integrator, since the worktree-less case would fail in confusing ways. |
 | `finalize.sh <run-id>` | Run-branch verifier. Exits 0 if `refs/heads/pila/runs/<run-id>` exists and contains at least one commit beyond the working branch; exits non-zero with a diagnosis otherwise. The working branch is **never** modified — pila does not merge into it locally; the PR (opened by `push_and_open_pr()`) is the proposed integration. The push and PR step lives in `push_and_open_pr()` in `pila.py` (see below) so it can compose the PR body with `compose_pr_body()`, write `run.json`, and emit Python-style multi-line failure messages. |
-| `cleanup.sh [--run-id <id> \| --all-runs \| --bootstrap] [--branches \| --subtask-branches]` | Default (no flag): scans `.pila/runs/*/state.json` for the most-recently-failed run (most recent without `finished_at`), confirms y/N, then removes only that run's worktrees + prunes git metadata. State dir stays as audit. `--run-id <id>` is an explicit single-run cleanup (worktrees only). `--all-runs` runs the same per-run cleanup across every run dir under `.pila/runs/` (excluding `_bootstrap-*`). `--bootstrap` removes orphaned `_bootstrap-*` directories (runs that died before classify completed; not enumerable by `discover_runs`). `--branches` (combinable with `--run-id` or `--all-runs`) additionally deletes the matching run branches *and* subtask branches (`pila/runs/<id>` and `pila/subtasks/<id>/*`). `--subtask-branches` deletes only the subtask branches and keeps `pila/runs/<id>` (the post-finalize default — the run branch is the PR head and must outlive the orchestrator). Without either flag, all branches are kept as an audit trail. State dirs are always preserved by `cleanup.sh` — full nuke-the-run is the Ctrl-C path in the orchestrator (`_cleanup_on_abnormal_exit(full_purge=True)`). |
+| `cleanup.sh [--run-id <id> \| --all-runs \| --bootstrap] [--branches \| --subtask-branches]` | Default (no flag): scans `.pila/runs/*/state.json` for the most-recently-failed run (most recent without `finished_at`), confirms y/N, then removes only that run's worktrees + prunes git metadata. State dir stays as audit. `--run-id <id>` is an explicit single-run cleanup (worktrees only). `--all-runs` runs the same per-run cleanup across every run dir under `.pila/runs/` (excluding `_bootstrap-*`). `--bootstrap` removes orphaned `_bootstrap-*` directories (runs that died before classify completed; not enumerable by `discover_runs`). `--branches` (combinable with `--run-id` or `--all-runs`) additionally deletes the matching run branches *and* subtask branches (`pila/runs/<id>` and `pila/subtasks/<id>/*`). `--subtask-branches` deletes only the subtask branches and keeps `pila/runs/<id>` (the post-finalize default — the run branch is the PR head and must outlive the orchestrator). Without either flag, all branches are kept as an audit trail. State dirs are always preserved by `cleanup.sh`. Ctrl-C and every other abnormal exit in the orchestrator also preserve state — they call `_cleanup_on_abnormal_exit(full_purge=False)`. There is no `full_purge=True` call site today; the flag is retained as a future hook for an explicit-purge gesture, but no current code path uses it. |
 
 A run branch `pila/runs/<run-id>` is never reset once created — this is the invariant `--resume` depends on. See `DESIGN.md` §6 ("the run branch is the resume contract").
 
