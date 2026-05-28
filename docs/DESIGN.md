@@ -764,6 +764,14 @@ progress — without depending on a channel that does not exist:
    again; the chain is capped. Exhausting the cap means the subtask was
    mis-scoped — it is reported as blocked for re-decomposition, not retried
    forever.
+5. **Involuntary handoffs reuse the same envelope.** A worker that hits the
+   per-process wall-clock cap (`worker_timeout_sec`, default 90 min) or that
+   produces no schema-valid result after retry is forced into the same
+   `incomplete-handoff` shape by the orchestrator. The successor is spawned
+   exactly as for a voluntary handoff and validates whatever partial
+   checkpoint exists. If no checkpoint was written, the missing-checkpoint
+   case routes through the corrective-retry path (see §13 caps) and is
+   bounded by the `failed_retries` cap rather than the handoff-chain cap.
 
 A lower auto-compaction threshold on the underlying CLI can be set as an
 independent backstop, but it is a parallel safeguard, not the mechanism — the
