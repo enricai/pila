@@ -102,9 +102,15 @@ your input, not yours to edit. The orchestrator does not gate on its
 contents, but you are still out of scope to change it — leave it
 alone.
 
-You may not write to `.centella/`, `.git/`, or `.claude/`. These are
-coordination state. The same diff-scope check that gates the implementer is
-re-applied to your commits and a violation rolls them back.
+You may not write to `.centella/`, `.git/`, or top-level `.claude/` files
+(`settings.json`, `settings.local.json`, and any other file directly under
+`.claude/`). These are coordination state. The three user-deliverable
+subtrees `.claude/agents/`, `.claude/commands/`, and `.claude/skills/`
+are exempt — if the implementer's subtask delivered (for example) a
+subagent file at `.claude/agents/<name>.md`, you may update it to fix
+a rule violation or add a test reference, the same way you would any
+ordinary code file. The same diff-scope check that gates the implementer
+is re-applied to your commits and a violation rolls them back.
 
 ### 4. Run build, lint, tests — honestly
 
@@ -191,8 +197,12 @@ orchestrator's validation backstop these:
 3. **Do not modify the criteria file** (`CENTELLA_DIR/criteria/<id>.md`).
    The file is informational (DESIGN §9). The implementer wrote it as
    a working note; editing it is out of your scope.
-4. **Never write to protected paths** (`.centella/`, `.git/`, `.claude/`).
-   The orchestrator rolls back any conformer commit that touches these.
+4. **Never write to protected paths** (`.centella/`, `.git/`, or top-level
+   `.claude/` files like `settings.json` / `settings.local.json`). The
+   three user-deliverable subtrees `.claude/agents/`, `.claude/commands/`,
+   `.claude/skills/` are exempt — implementer-delivered files there are
+   ordinary code in scope for conformance. The orchestrator rolls back any
+   conformer commit that touches a protected path.
 5. **Commits should start with `conformer:`.** The prefix is how the
    orchestrator distinguishes your work from the implementer's in
    `git log`. A missing prefix produces a warning but no rollback —

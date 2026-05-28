@@ -141,6 +141,32 @@ CATEGORY_ABBREV = {
     "documentation": "docs",
 }
 
+# Paths an implementer (or conformer) may never write to. `.centella/` and
+# `.git/` are coordination-only — the run state lives in the former, git
+# plumbing in the latter; neither is the implementer's surface. Inside
+# `.claude/`, the three documented user-deliverable subtrees are exempt
+# (`agents/`, `commands/`, `skills/`) because they ARE legitimate
+# deliverables — centella's own self-healing skill, for instance, instructs
+# consumers to write a subagent file at `.claude/agents/<name>.md`.
+# Top-level `.claude/` files (`settings.json`, `settings.local.json`,
+# any future per-session state) stay protected — they are coordination
+# and config, not deliverable customizations. See DESIGN §9.
+_PROTECTED_PREFIXES = (".centella/", ".git/")
+_CLAUDE_DELIVERABLE_PREFIXES = (
+    ".claude/agents/", ".claude/commands/", ".claude/skills/",
+)
+
+
+def is_protected_path(path: str) -> bool:
+    """Return True if `path` is a meta-directory the implementer must not
+    write to. See `_PROTECTED_PREFIXES` and `_CLAUDE_DELIVERABLE_PREFIXES`
+    for the rule."""
+    if any(path.startswith(p) for p in _PROTECTED_PREFIXES):
+        return True
+    if path.startswith(".claude/"):
+        return not any(path.startswith(p) for p in _CLAUDE_DELIVERABLE_PREFIXES)
+    return False
+
 _READ_BASE = "Read,Grep,Glob,WebSearch,WebFetch"
 # INSPECT_TOOLS is the read-only-with-shell bucket for classifier, planner,
 # and reconciler. These workers run in the real repo cwd (not a worktree),
@@ -2314,10 +2340,12 @@ async def check_diff_scope(sid: str, worktree: str, subtask: dict,
     if not touched:
         return None
 
-    # fatal: any changes to protected meta-directories are out of bounds
-    _PROTECTED = (".centella/", ".git/", ".claude/")
-    protected = [f for f in touched
-                 if any(f.startswith(p) for p in _PROTECTED)]
+    # fatal: any changes to protected meta-directories are out of bounds.
+    # `.claude/{agents,commands,skills}/` are exempt (documented Claude
+    # Code user-deliverable locations); top-level `.claude/` files
+    # (settings.json, settings.local.json) stay protected. See
+    # is_protected_path() for the rule.
+    protected = [f for f in touched if is_protected_path(f)]
     if protected:
         return (f"{sid}: diff touches protected path(s): {protected} — "
                 "implementers must not modify meta-directories")
@@ -4446,7 +4474,9 @@ def _retryable_failure(reason: str) -> bool:
 
     Terminal (worker is broken/dishonest — terminate immediately, no retry):
       - cross-field invariant violation (worker lied about its own status)
-      - diff touched a protected path (.centella/, .git/, .claude/)
+      - diff touched a protected path (.centella/, .git/, or any top-level
+        .claude/ file; the .claude/{agents,commands,skills}/ subtrees are
+        exempt per is_protected_path())
       - any worker-level error surfaced as a failure
     """
     retryable_markers = ("no commits ahead of the run",
@@ -4768,8 +4798,10 @@ async def _run_conformance_phase(sid: str, centella_dir: Path,
         # Empty diff (worker added no commits) is fine and common: a
         # well-formed result with no fixes is a legitimate "nothing to do."
         # check_diff_scope returns a string ONLY for a protected-path
-        # violation (.centella/.git/.claude/) — the scope-volume warning
-        # is logged side-channel and does not surface here.
+        # violation — .centella/, .git/, or top-level .claude/ files;
+        # .claude/{agents,commands,skills}/ are exempt per
+        # is_protected_path(). The scope-volume warning is logged
+        # side-channel and does not surface here.
         scope_err = await check_diff_scope(sid, worktree, subtask, st)
         if scope_err:
             discarded = await _uncommitted_paths(worktree)

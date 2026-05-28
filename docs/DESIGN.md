@@ -668,12 +668,19 @@ Two further disciplines apply, and they sit at the §12 axis:
   human and to telemetry.
 - **No backsliding.** The conformer can add commits but must not write to
   protected paths. The diff-scope check — no writes to `.centella/`,
-  `.git/`, `.claude/` — is re-run against the conformer's commits, on
-  the same protected paths and with the same terminality as it ran
-  against the implementer's commits. (Earlier iterations of this phase
-  also re-verified the criteria-file hash and rolled back conformer
-  commits that touched it; that check was removed when the criteria
-  lock was retired — §8.)
+  `.git/`, or `.claude/` *except for the user-deliverable subtrees*
+  `.claude/agents/`, `.claude/commands/`, and `.claude/skills/` — is
+  re-run against the conformer's commits, on the same protected paths
+  and with the same terminality as it ran against the implementer's
+  commits. The `.claude/` carve-out exists because those three subtrees
+  are the documented Claude Code customization locations: refusing to
+  write them would make centella unable to produce a subagent or
+  slash-command as a legitimate deliverable, even though `.claude/`
+  top-level files (`settings.json`, `settings.local.json`) are
+  coordination and must stay protected. (Earlier iterations of this
+  phase also re-verified the criteria-file hash and rolled back
+  conformer commits that touched it; that check was removed when the
+  criteria lock was retired — §8.)
 
 The phase is bounded by a separate cap from the evidence loop: the conformer
 gets a small number of orchestrator-level rounds (default 2) in which to

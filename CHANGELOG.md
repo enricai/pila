@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cost. `CENTELLA_MAX_WORKERS` env var and `max_workers` in
   `centella.toml` are new escape hatches (same precedence as
   `--confidence-rounds`: CLI > env > TOML > default).
+- **Protected-path scope narrowed.** The diff-scope check that gates
+  implementers and conformers previously rejected any write under
+  `.claude/` wholesale. It now protects only `.centella/`, `.git/`,
+  and top-level `.claude/` files (`settings.json`,
+  `settings.local.json`); the three documented Claude Code
+  user-deliverable subtrees (`.claude/agents/`, `.claude/commands/`,
+  `.claude/skills/`) are exempt. Centella's own self-healing skill
+  instructs downstream consumers to write subagent files at
+  `.claude/agents/<name>.md`; the over-broad protection previously
+  blocked the very pattern the skill teaches. DESIGN.md §9,
+  IMPLEMENTATION.md, and `prompts/conformer.md` are updated to match.
 - **`--no-clarify` is now `--clarify`; no-questions is the new
   default.** The flag's polarity is inverted: by default centella runs
   without surfacing intent questions to the user. The classifier's
