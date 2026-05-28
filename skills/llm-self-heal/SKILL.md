@@ -1,6 +1,6 @@
 ---
 name: llm-self-heal
-description: "Autonomous self-healing loop for centella worker prompts that produced captured failures. For each call_type with failures, runs a measured n=N baseline (unpatched), then iterates: invoke slm-patch-generator subagent → apply proposed patch → replay patched arm → score → check convergence (SUCCESS/PLATEAUED/BUDGET_EXHAUSTED/TIMEOUT/REGRESSED). Writes a healing-<call_type>.md report per call_type with the best patch and the iteration history. Production prompts in prompts/ stay manual — the skill proposes patches with measured evidence."
+description: "Autonomous self-healing loop for pila worker prompts that produced captured failures. For each call_type with failures, runs a measured n=N baseline (unpatched), then iterates: invoke slm-patch-generator subagent → apply proposed patch → replay patched arm → score → check convergence (SUCCESS/PLATEAUED/BUDGET_EXHAUSTED/TIMEOUT/REGRESSED). Writes a healing-<call_type>.md report per call_type with the best patch and the iteration history. Production prompts in prompts/ stay manual — the skill proposes patches with measured evidence."
 argument-hint: "<run-id-or-ndjson-path> [--call-type <name>] [--max-iterations <N>] [--n-replays <N>] [--success-threshold <0..1>]"
 allowed-tools:
   - Read
@@ -13,7 +13,7 @@ allowed-tools:
 ---
 
 <objective>
-Drive the autonomous heal loop for one or more centella `call_type`s that
+Drive the autonomous heal loop for one or more pila `call_type`s that
 produced failures in a judge-llm-batch run. The loop iterates:
 
 1. **Baseline** — run n=N unpatched replays per failing sample via
@@ -27,7 +27,7 @@ produced failures in a judge-llm-batch run. The loop iterates:
 
 **Output:** per call_type with failures, a heal report under the run's
 `<heal_subdir>/` directory (default `heal-out/`; configurable via
-`--heal-dir` / `CENTELLA_HEAL_DIR` / `centella.toml heal_dir`).
+`--heal-dir` / `PILA_HEAL_DIR` / `pila.toml heal_dir`).
 
 Production prompts in `prompts/` are NOT modified by this skill.
 Patches are proposed evidence — applying them is a separate manual step.
@@ -37,8 +37,8 @@ Patches are proposed evidence — applying them is a separate manual step.
 Arguments parsed from `$ARGUMENTS`:
 - First positional: `<run-id>` or path to a `calls.ndjson` file or its
   parent directory. If a run-id is given, the skill resolves
-  `.centella/runs/<run-id>/calls.ndjson` and the corresponding heal
-  output dir `.centella/runs/<run-id>/heal-out/`.
+  `.pila/runs/<run-id>/calls.ndjson` and the corresponding heal
+  output dir `.pila/runs/<run-id>/heal-out/`.
 - `--call-type <name>` (optional): heal only this call_type; default
   heals all call_types that have failing verdicts in the verdict files
   found under `judge-out/`.
@@ -46,7 +46,7 @@ Arguments parsed from `$ARGUMENTS`:
   verdict JSON files. Defaults to `<run-dir>/judge-out/`.
 - `--heal-dir <dir>` (optional): where to write heal-loop state and
   reports. Defaults to `<run-dir>/heal-out/` or the value resolved from
-  `CENTELLA_HEAL_DIR` / `centella.toml heal_dir`.
+  `PILA_HEAL_DIR` / `pila.toml heal_dir`.
 - `--max-iterations <N>` (default 10, `HEAL_MAX_ROUNDS_DEFAULT`):
   hard cap on loop iterations per call_type.
 - `--n-replays <N>` (default 5, `HEAL_N_REPLAYS_DEFAULT`): replays per
@@ -59,7 +59,7 @@ Arguments parsed from `$ARGUMENTS`:
   "small delta" threshold in pass-rate units.
 - `--model <alias>` (default `sonnet`, `MODEL_DEFAULT_PER_WORKER["heal"]`):
   model alias passed to `claude -p` for replay arms. Override via
-  `CENTELLA_MODEL_HEAL` or `--heal-model` on the main orchestrator, or
+  `PILA_MODEL_HEAL` or `--heal-model` on the main orchestrator, or
   pass `--model` directly to this skill invocation.
 
 All default values match IMPLEMENTATION.md §2 "Heal-loop convergence
@@ -67,8 +67,8 @@ parameters".
 </execution_context>
 
 <context>
-Centella records every `claude -p` worker invocation to
-`.centella/runs/<run-id>/calls.ndjson` (one line per call, appended
+Pila records every `claude -p` worker invocation to
+`.pila/runs/<run-id>/calls.ndjson` (one line per call, appended
 immediately after each call returns). The judge-llm-batch skill produces
 verdict JSON files in `judge-out/`. This skill consumes those verdicts
 to close the loop: it replays failing samples against patched prompts
@@ -112,7 +112,7 @@ This matches IMPLEMENTATION.md §8 "Coordination directory layout".
 Each replay runs `claude -p` with:
 - `--append-system-prompt <patched-prompt-text>` (the prompt under test)
 - `--json-schema <schema>` (the same schema used for this call_type in
-  the live orchestrator, per `SCHEMAS` in `orchestrator/centella.py`)
+  the live orchestrator, per `SCHEMAS` in `orchestrator/pila.py`)
 - `--model <model>` (the heal model alias)
 - User content from the captured `user_content` field
 
@@ -125,10 +125,10 @@ criterion — the same bar the live orchestrator uses.
 
 ## Step 1: Pre-flight
 
-- Confirm CWD contains `orchestrator/centella.py` and `prompts/`. If
-  not, abort: `llm-self-heal must run from the centella repo root`.
+- Confirm CWD contains `orchestrator/pila.py` and `prompts/`. If
+  not, abort: `llm-self-heal must run from the pila repo root`.
 - Resolve the input path. If a run-id string, check
-  `.centella/runs/<run-id>/calls.ndjson` exists. If a directory or
+  `.pila/runs/<run-id>/calls.ndjson` exists. If a directory or
   file path, resolve accordingly.
 - Confirm `judge-out/` (or `--verdict-dir`) contains at least one
   `*-verdicts.json` file with `pass=false` entries. If none, emit:
@@ -261,7 +261,7 @@ Then stop. Do not apply any patch to `prompts/`.
 <safety_constraints>
 - This skill reads NDJSON captures, verdict JSON, and prompt files
 - This skill writes only into `<heal-dir>/<call_type>/`
-- This skill does NOT modify `prompts/*.md` or `orchestrator/centella.py`
+- This skill does NOT modify `prompts/*.md` or `orchestrator/pila.py`
 - Patches are proposed with measured evidence — applying them is a
   separate manual step the user performs after reviewing the report
 - Replays make real `claude -p` calls using the user's subscription
@@ -274,19 +274,19 @@ Then stop. Do not apply any patch to `prompts/`.
 Heal all call_types with failures in a run:
 
 ```
-/centella:llm-self-heal fix-login-timeout-bug-b81e90
+/pila:llm-self-heal fix-login-timeout-bug-b81e90
 ```
 
 Heal only the implementer call_type:
 
 ```
-/centella:llm-self-heal fix-login-timeout-bug-b81e90 --call-type implementer
+/pila:llm-self-heal fix-login-timeout-bug-b81e90 --call-type implementer
 ```
 
 Heal with tighter budget:
 
 ```
-/centella:llm-self-heal fix-login-timeout-bug-b81e90 \
+/pila:llm-self-heal fix-login-timeout-bug-b81e90 \
   --call-type planner \
   --max-iterations 5 \
   --success-threshold 0.85

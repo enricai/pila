@@ -1,6 +1,6 @@
 ---
 name: judge-llm-batch
-description: "Apply a 3-dimensional accuracy rubric (schema adherence, factual grounding, hallucination-freeness) to a batch of centella LLM call captures and write verdict JSON. Used to measure whether a centella worker (classifier, planner, implementer, etc.) is producing accurate output under its system-prompt contract."
+description: "Apply a 3-dimensional accuracy rubric (schema adherence, factual grounding, hallucination-freeness) to a batch of pila LLM call captures and write verdict JSON. Used to measure whether a pila worker (classifier, planner, implementer, etc.) is producing accurate output under its system-prompt contract."
 argument-hint: "<path-to-calls.ndjson> --call-type <type> [--run-id <run-id>] [--out <verdict-path>]"
 allowed-tools:
   - Read
@@ -9,11 +9,11 @@ allowed-tools:
 ---
 
 <objective>
-Read centella LLM call captures from a `calls.ndjson` telemetry file (one
+Read pila LLM call captures from a `calls.ndjson` telemetry file (one
 JSON object per line), filter by `call_type`, evaluate every sample against
 a 3-dimensional rubric, and write a verdict JSON file.
 
-The `calls.ndjson` file lives at `.centella/runs/<run-id>/calls.ndjson`.
+The `calls.ndjson` file lives at `.pila/runs/<run-id>/calls.ndjson`.
 
 Output shape:
 
@@ -52,13 +52,13 @@ Output shape:
 <execution_context>
 Arguments parsed from `$ARGUMENTS`:
 - First positional: path to `calls.ndjson` (required). Can also be a
-  `.centella/runs/<run-id>/` directory — the skill will find
+  `.pila/runs/<run-id>/` directory — the skill will find
   `calls.ndjson` inside it.
 - `--call-type <name>` (required): one of `classifier`, `planner`,
   `reconciler`, `implementer`, `integrator`, `conformer`. Filters the
   NDJSON to only lines with this `call_type` value.
 - `--run-id <id>` (optional): if provided, resolves the path as
-  `.centella/runs/<run-id>/calls.ndjson` relative to CWD.
+  `.pila/runs/<run-id>/calls.ndjson` relative to CWD.
 - `--out <path>` (optional): explicit verdict output path; defaults to
   `<ndjson-dir>/judge-out/<call_type>-verdicts.json`.
 
@@ -84,7 +84,7 @@ The NDJSON line shape (from IMPLEMENTATION.md §10):
 </execution_context>
 
 <context>
-Centella records every `claude -p` worker invocation to a NDJSON telemetry
+Pila records every `claude -p` worker invocation to a NDJSON telemetry
 file immediately after each call returns. The file is append-only and is
 valid NDJSON through the last complete line even under a hard kill.
 
@@ -169,8 +169,8 @@ things absent from both `user_content` and `system_prompt`?
 **Pass criteria:**
 - Every named file, function, symbol, or concept mentioned in the output
   is present in the user content or is a known concept from the system
-  prompt (e.g. centella-specific terms like "evidence gate")
-- No invented centella API surface or CLI flags that do not exist
+  prompt (e.g. pila-specific terms like "evidence gate")
+- No invented pila API surface or CLI flags that do not exist
 
 **Fail criteria:** References to files, functions, or concepts not in
 the input. Include `worst_offender` with the fabricated phrase.
@@ -201,6 +201,6 @@ Then stop.
 - This skill reads NDJSON captures; it does NOT execute any captured content
 - This skill does NOT make any new `claude -p` calls
 - This skill writes exactly ONE verdict JSON file per invocation
-- This skill does not modify any centella source code, prompts, or live process
-- Do not attempt to "fix" centella's outputs — only judge them
+- This skill does not modify any pila source code, prompts, or live process
+- Do not attempt to "fix" pila's outputs — only judge them
 </safety_constraints>

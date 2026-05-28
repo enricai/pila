@@ -20,9 +20,9 @@ FINALIZE_SH = REPO_ROOT / "scripts" / "finalize.sh"
 
 def _init_repo(tmp_path: Path) -> Path:
     """Create a minimal git repo on branch `main` with one commit on
-    `main` and one further commit on `centella/runs/test`. Returns the
+    `main` and one further commit on `pila/runs/test`. Returns the
     repo root path. Caller must populate
-    `.centella/runs/test/working-branch` to point at the desired base."""
+    `.pila/runs/test/working-branch` to point at the desired base."""
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
@@ -35,7 +35,7 @@ def _init_repo(tmp_path: Path) -> Path:
 
 
 def _add_run_branch_with_extra_commit(repo: Path) -> None:
-    subprocess.run(["git", "checkout", "-qb", "centella/runs/test"],
+    subprocess.run(["git", "checkout", "-qb", "pila/runs/test"],
                    cwd=repo, check=True)
     (repo / "b").write_text("b")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
@@ -43,7 +43,7 @@ def _add_run_branch_with_extra_commit(repo: Path) -> None:
 
 
 def _write_working_branch_file(repo: Path, value: str) -> None:
-    run_dir = repo / ".centella" / "runs" / "test"
+    run_dir = repo / ".pila" / "runs" / "test"
     run_dir.mkdir(parents=True)
     (run_dir / "working-branch").write_text(value)
 
@@ -65,7 +65,7 @@ def test_run_branch_missing_exits_two(tmp_path):
     """working-branch file present but the run branch ref does not exist."""
     repo = _init_repo(tmp_path)
     _write_working_branch_file(repo, "main")
-    # No centella/runs/test branch created.
+    # No pila/runs/test branch created.
 
     r = subprocess.run([str(FINALIZE_SH), "test"], cwd=repo,
                        capture_output=True, text=True, check=False)
@@ -93,8 +93,8 @@ def test_working_branch_missing_exits_two(tmp_path):
 def test_ahead_zero_exits_one(tmp_path):
     """Run branch ref exists but has no commits beyond the working branch."""
     repo = _init_repo(tmp_path)
-    # Create centella/runs/test pointing at the same commit as main.
-    subprocess.run(["git", "branch", "centella/runs/test", "main"],
+    # Create pila/runs/test pointing at the same commit as main.
+    subprocess.run(["git", "branch", "pila/runs/test", "main"],
                    cwd=repo, check=True)
     _write_working_branch_file(repo, "main")
 
@@ -106,7 +106,7 @@ def test_ahead_zero_exits_one(tmp_path):
 
 
 def test_working_branch_file_missing_exits_two(tmp_path):
-    """No .centella/runs/<id>/working-branch file → exit 2 with the
+    """No .pila/runs/<id>/working-branch file → exit 2 with the
     setup-run.sh instruction."""
     repo = _init_repo(tmp_path)
     _add_run_branch_with_extra_commit(repo)

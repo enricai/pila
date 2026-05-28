@@ -1,8 +1,8 @@
-"""Tests for `centella --version`.
+"""Tests for `pila --version`.
 
 The version is read from `.claude-plugin/plugin.json`'s `version` field
 (single source of truth). The flag must exit 0 and print a string of the
-form `centella <semver>`.
+form `pila <semver>`.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CENTELLA_PY = REPO_ROOT / "orchestrator" / "centella.py"
+PILA_PY = REPO_ROOT / "orchestrator" / "pila.py"
 PLUGIN_JSON = REPO_ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 
@@ -21,12 +21,12 @@ MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 def test_version_flag_prints_plugin_json_version():
     expected = json.loads(PLUGIN_JSON.read_text())["version"]
     result = subprocess.run(
-        [sys.executable, str(CENTELLA_PY), "--version"],
+        [sys.executable, str(PILA_PY), "--version"],
         capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stderr
     # argparse prints --version output to stdout on Python 3.4+.
-    assert re.fullmatch(rf"centella {re.escape(expected)}\s*", result.stdout), (
+    assert re.fullmatch(rf"pila {re.escape(expected)}\s*", result.stdout), (
         f"unexpected --version output: {result.stdout!r}"
     )
     assert re.match(r"\d+\.\d+\.\d+", expected), (
@@ -36,7 +36,7 @@ def test_version_flag_prints_plugin_json_version():
 
 def test_marketplace_version_matches_plugin_version():
     # plugin.json is the single source of truth for --version
-    # (_read_version() in orchestrator/centella.py reads it). marketplace.json
+    # (_read_version() in orchestrator/pila.py reads it). marketplace.json
     # duplicates the field for Claude Code's plugin browser. Guard against the
     # two drifting at release time.
     plugin_version = json.loads(PLUGIN_JSON.read_text())["version"]

@@ -24,12 +24,12 @@ import pytest
 # helpers
 # ---------------------------------------------------------------------------
 
-def _make_heal_state(centella, tmp_path: Path, call_type: str = "classifier",
+def _make_heal_state(pila, tmp_path: Path, call_type: str = "classifier",
                      history: list | None = None,
                      baseline: dict | None = None,
                      best_so_far: dict | None = None):
     """Build a HealState with controlled field values (no file I/O)."""
-    hs = centella.HealState.__new__(centella.HealState)
+    hs = pila.HealState.__new__(pila.HealState)
     hs.call_type = call_type
     hs.state_dir = tmp_path / call_type
     hs.path = hs.state_dir / "state.json"
@@ -40,13 +40,13 @@ def _make_heal_state(centella, tmp_path: Path, call_type: str = "classifier",
     return hs
 
 
-def _base_config(centella, **overrides) -> dict:
+def _base_config(pila, **overrides) -> dict:
     """Default config dict for check_convergence, overridable per test."""
     cfg = {
-        "success_threshold": centella.HEAL_SUCCESS_THRESHOLD_DEFAULT,
-        "max_iterations": centella.HEAL_MAX_ROUNDS_DEFAULT,
-        "plateau_window": centella.HEAL_PLATEAU_WINDOW_DEFAULT,
-        "plateau_delta": centella.HEAL_PLATEAU_DELTA_DEFAULT,
+        "success_threshold": pila.HEAL_SUCCESS_THRESHOLD_DEFAULT,
+        "max_iterations": pila.HEAL_MAX_ROUNDS_DEFAULT,
+        "plateau_window": pila.HEAL_PLATEAU_WINDOW_DEFAULT,
+        "plateau_delta": pila.HEAL_PLATEAU_DELTA_DEFAULT,
         "worker_count": 0,
         "max_total_workers": 999,
     }
@@ -58,65 +58,65 @@ def _base_config(centella, **overrides) -> dict:
 # Criterion 9: importability
 # ---------------------------------------------------------------------------
 
-def test_convergence_symbols_importable(centella):
+def test_convergence_symbols_importable(pila):
     """check_convergence, write_heal_report, phase_heal must be importable."""
-    assert hasattr(centella, "check_convergence"), \
-        "check_convergence not in centella"
-    assert callable(centella.check_convergence)
-    assert hasattr(centella, "write_heal_report"), \
-        "write_heal_report not in centella"
-    assert callable(centella.write_heal_report)
-    assert hasattr(centella, "phase_heal"), \
-        "phase_heal not in centella"
-    assert callable(centella.phase_heal)
+    assert hasattr(pila, "check_convergence"), \
+        "check_convergence not in pila"
+    assert callable(pila.check_convergence)
+    assert hasattr(pila, "write_heal_report"), \
+        "write_heal_report not in pila"
+    assert callable(pila.write_heal_report)
+    assert hasattr(pila, "phase_heal"), \
+        "phase_heal not in pila"
+    assert callable(pila.phase_heal)
 
 
 # ---------------------------------------------------------------------------
 # Criterion 10: HEAL_* constants
 # ---------------------------------------------------------------------------
 
-def test_heal_constants_exist(centella):
+def test_heal_constants_exist(pila):
     """HEAL_* convergence constants must exist with the documented defaults."""
-    assert centella.HEAL_MAX_ROUNDS_DEFAULT == 10
-    assert centella.HEAL_SUCCESS_THRESHOLD_DEFAULT == 0.9
-    assert centella.HEAL_PLATEAU_WINDOW_DEFAULT == 3
-    assert centella.HEAL_PLATEAU_DELTA_DEFAULT == 0.03
-    assert centella.HEAL_N_REPLAYS_DEFAULT == 5
+    assert pila.HEAL_MAX_ROUNDS_DEFAULT == 10
+    assert pila.HEAL_SUCCESS_THRESHOLD_DEFAULT == 0.9
+    assert pila.HEAL_PLATEAU_WINDOW_DEFAULT == 3
+    assert pila.HEAL_PLATEAU_DELTA_DEFAULT == 0.03
+    assert pila.HEAL_N_REPLAYS_DEFAULT == 5
 
 
 # ---------------------------------------------------------------------------
 # Criterion 1: SUCCESS verdict
 # ---------------------------------------------------------------------------
 
-def test_check_convergence_success(centella, tmp_path):
+def test_check_convergence_success(pila, tmp_path):
     """Returns SUCCESS when best_so_far.pass_rate >= success_threshold."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.95, "iter_n": 1},
         baseline={"a": {"pass_rate": 0.5}},
         history=[{"iter_n": 1, "pass_rate": 0.95}],
     )
-    config = _base_config(centella)
-    assert centella.check_convergence(hs, config) == "SUCCESS"
+    config = _base_config(pila)
+    assert pila.check_convergence(hs, config) == "SUCCESS"
 
 
-def test_check_convergence_success_at_exact_threshold(centella, tmp_path):
+def test_check_convergence_success_at_exact_threshold(pila, tmp_path):
     """SUCCESS when pass_rate equals the threshold exactly."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.9, "iter_n": 1},
         baseline={"a": {"pass_rate": 0.5}},
         history=[{"iter_n": 1, "pass_rate": 0.9}],
     )
-    config = _base_config(centella)
-    assert centella.check_convergence(hs, config) == "SUCCESS"
+    config = _base_config(pila)
+    assert pila.check_convergence(hs, config) == "SUCCESS"
 
 
 # ---------------------------------------------------------------------------
 # Criterion 2: PLATEAUED verdict
 # ---------------------------------------------------------------------------
 
-def test_check_convergence_plateaued(centella, tmp_path):
+def test_check_convergence_plateaued(pila, tmp_path):
     """Returns PLATEAUED when last plateau_window entries all have
     |delta| < plateau_delta (0.03)."""
     # plateau_window=3 → need at least 3 history entries
@@ -127,16 +127,16 @@ def test_check_convergence_plateaued(centella, tmp_path):
         {"iter_n": 3, "pass_rate": 0.52},  # delta=0.01 < 0.03
     ]
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.52, "iter_n": 3},
         baseline={"a": {"pass_rate": 0.50}},
         history=history,
     )
-    config = _base_config(centella)
-    assert centella.check_convergence(hs, config) == "PLATEAUED"
+    config = _base_config(pila)
+    assert pila.check_convergence(hs, config) == "PLATEAUED"
 
 
-def test_check_convergence_not_plateaued_when_improving(centella, tmp_path):
+def test_check_convergence_not_plateaued_when_improving(pila, tmp_path):
     """Does NOT return PLATEAUED when improvement delta exceeds plateau_delta."""
     history = [
         {"iter_n": 1, "pass_rate": 0.50},
@@ -144,13 +144,13 @@ def test_check_convergence_not_plateaued_when_improving(centella, tmp_path):
         {"iter_n": 3, "pass_rate": 0.70},  # delta=0.10 >= 0.03
     ]
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.70, "iter_n": 3},
         baseline={"a": {"pass_rate": 0.50}},
         history=history,
     )
-    config = _base_config(centella)
-    result = centella.check_convergence(hs, config)
+    config = _base_config(pila)
+    result = pila.check_convergence(hs, config)
     assert result != "PLATEAUED", f"Unexpected PLATEAUED: {result}"
 
 
@@ -158,30 +158,30 @@ def test_check_convergence_not_plateaued_when_improving(centella, tmp_path):
 # Criterion 3: TIMEOUT verdict
 # ---------------------------------------------------------------------------
 
-def test_check_convergence_timeout(centella, tmp_path):
+def test_check_convergence_timeout(pila, tmp_path):
     """Returns TIMEOUT when len(history) >= max_iterations."""
     max_iter = 5
     history = [{"iter_n": i, "pass_rate": 0.50} for i in range(1, max_iter + 1)]
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.50, "iter_n": 5},
         baseline={"a": {"pass_rate": 0.40}},
         history=history,
     )
-    config = _base_config(centella, max_iterations=max_iter)
-    assert centella.check_convergence(hs, config) == "TIMEOUT"
+    config = _base_config(pila, max_iterations=max_iter)
+    assert pila.check_convergence(hs, config) == "TIMEOUT"
 
 
-def test_check_convergence_not_timeout_before_limit(centella, tmp_path):
+def test_check_convergence_not_timeout_before_limit(pila, tmp_path):
     """Does NOT return TIMEOUT when fewer than max_iterations entries."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.50, "iter_n": 1},
         baseline={"a": {"pass_rate": 0.40}},
         history=[{"iter_n": 1, "pass_rate": 0.50}],
     )
-    config = _base_config(centella, max_iterations=10)
-    result = centella.check_convergence(hs, config)
+    config = _base_config(pila, max_iterations=10)
+    result = pila.check_convergence(hs, config)
     assert result != "TIMEOUT", f"Should not be TIMEOUT: {result}"
 
 
@@ -189,28 +189,28 @@ def test_check_convergence_not_timeout_before_limit(centella, tmp_path):
 # Criterion 4: BUDGET_EXHAUSTED verdict
 # ---------------------------------------------------------------------------
 
-def test_check_convergence_budget_exhausted(centella, tmp_path):
+def test_check_convergence_budget_exhausted(pila, tmp_path):
     """Returns BUDGET_EXHAUSTED when worker_count >= max_total_workers."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.50, "iter_n": 1},
         baseline={"a": {"pass_rate": 0.40}},
         history=[{"iter_n": 1, "pass_rate": 0.50}],
     )
-    config = _base_config(centella, worker_count=10, max_total_workers=10)
-    assert centella.check_convergence(hs, config) == "BUDGET_EXHAUSTED"
+    config = _base_config(pila, worker_count=10, max_total_workers=10)
+    assert pila.check_convergence(hs, config) == "BUDGET_EXHAUSTED"
 
 
-def test_check_convergence_budget_not_exhausted(centella, tmp_path):
+def test_check_convergence_budget_not_exhausted(pila, tmp_path):
     """Does NOT return BUDGET_EXHAUSTED when under cap."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.50, "iter_n": 1},
         baseline={"a": {"pass_rate": 0.40}},
         history=[{"iter_n": 1, "pass_rate": 0.50}],
     )
-    config = _base_config(centella, worker_count=9, max_total_workers=10)
-    result = centella.check_convergence(hs, config)
+    config = _base_config(pila, worker_count=9, max_total_workers=10)
+    result = pila.check_convergence(hs, config)
     assert result != "BUDGET_EXHAUSTED", f"Should not be BUDGET_EXHAUSTED: {result}"
 
 
@@ -218,7 +218,7 @@ def test_check_convergence_budget_not_exhausted(centella, tmp_path):
 # Criterion 5: REGRESSED verdict
 # ---------------------------------------------------------------------------
 
-def test_check_convergence_regressed(centella, tmp_path):
+def test_check_convergence_regressed(pila, tmp_path):
     """Returns REGRESSED when every history entry pass_rate < baseline pass_rate."""
     baseline = {
         "a": {"pass_rate": 0.70},
@@ -230,16 +230,16 @@ def test_check_convergence_regressed(centella, tmp_path):
         {"iter_n": 2, "pass_rate": 0.65},
     ]
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.65, "iter_n": 2},
         baseline=baseline,
         history=history,
     )
-    config = _base_config(centella)
-    assert centella.check_convergence(hs, config) == "REGRESSED"
+    config = _base_config(pila)
+    assert pila.check_convergence(hs, config) == "REGRESSED"
 
 
-def test_check_convergence_not_regressed_when_one_improves(centella, tmp_path):
+def test_check_convergence_not_regressed_when_one_improves(pila, tmp_path):
     """Does NOT return REGRESSED when at least one history entry >= baseline."""
     baseline = {"a": {"pass_rate": 0.60}}
     history = [
@@ -247,26 +247,26 @@ def test_check_convergence_not_regressed_when_one_improves(centella, tmp_path):
         {"iter_n": 2, "pass_rate": 0.70},  # above → not all below
     ]
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.70, "iter_n": 2},
         baseline=baseline,
         history=history,
     )
-    config = _base_config(centella)
-    result = centella.check_convergence(hs, config)
+    config = _base_config(pila)
+    result = pila.check_convergence(hs, config)
     assert result != "REGRESSED", f"Should not be REGRESSED: {result}"
 
 
-def test_check_convergence_no_regression_without_history(centella, tmp_path):
+def test_check_convergence_no_regression_without_history(pila, tmp_path):
     """Does NOT return REGRESSED with empty history."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.0, "iter_n": 0},
         baseline={"a": {"pass_rate": 0.60}},
         history=[],
     )
-    config = _base_config(centella)
-    result = centella.check_convergence(hs, config)
+    config = _base_config(pila)
+    result = pila.check_convergence(hs, config)
     assert result != "REGRESSED"
 
 
@@ -274,44 +274,44 @@ def test_check_convergence_no_regression_without_history(centella, tmp_path):
 # Criterion 6: CONTINUE verdict
 # ---------------------------------------------------------------------------
 
-def test_check_convergence_continue(centella, tmp_path):
+def test_check_convergence_continue(pila, tmp_path):
     """Returns CONTINUE when none of the terminal conditions are met."""
     history = [
         {"iter_n": 1, "pass_rate": 0.50},
         {"iter_n": 2, "pass_rate": 0.60},  # improving, so not plateau
     ]
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.60, "iter_n": 2},
         baseline={"a": {"pass_rate": 0.40}},
         history=history,
     )
-    config = _base_config(centella, max_iterations=10, worker_count=0,
+    config = _base_config(pila, max_iterations=10, worker_count=0,
                           max_total_workers=999)
-    assert centella.check_convergence(hs, config) == "CONTINUE"
+    assert pila.check_convergence(hs, config) == "CONTINUE"
 
 
-def test_check_convergence_continue_with_no_history(centella, tmp_path):
+def test_check_convergence_continue_with_no_history(pila, tmp_path):
     """Returns CONTINUE immediately after baseline (empty history, no budget
     issue, pass_rate below threshold)."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         best_so_far={"pass_rate": 0.50, "iter_n": 0},
         baseline={"a": {"pass_rate": 0.50}},
         history=[],
     )
-    config = _base_config(centella)
-    assert centella.check_convergence(hs, config) == "CONTINUE"
+    config = _base_config(pila)
+    assert pila.check_convergence(hs, config) == "CONTINUE"
 
 
 # ---------------------------------------------------------------------------
 # Criterion 7: write_heal_report creates file
 # ---------------------------------------------------------------------------
 
-def test_write_heal_report_creates_file(centella, tmp_path):
+def test_write_heal_report_creates_file(pila, tmp_path):
     """write_heal_report creates healing-<call_type>.md in state_dir."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         call_type="classifier",
         best_so_far={"pass_rate": 0.80, "iter_n": 2},
         baseline={"a": {"pass_rate": 0.60}},
@@ -320,53 +320,53 @@ def test_write_heal_report_creates_file(centella, tmp_path):
             {"iter_n": 2, "pass_rate": 0.80},
         ],
     )
-    path = centella.write_heal_report("classifier", hs, "patch content here")
+    path = pila.write_heal_report("classifier", hs, "patch content here")
     assert path.exists(), f"Report not created at {path}"
     assert path.name == "healing-classifier.md"
 
 
-def test_write_heal_report_contains_best_patch(centella, tmp_path):
+def test_write_heal_report_contains_best_patch(pila, tmp_path):
     """Report content contains the best patch text."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         call_type="planner",
         best_so_far={"pass_rate": 0.75, "iter_n": 1},
         baseline={"x": {"pass_rate": 0.50}},
         history=[{"iter_n": 1, "pass_rate": 0.75}],
     )
     patch = "THIS IS THE BEST PATCH CONTENT"
-    path = centella.write_heal_report("planner", hs, patch)
+    path = pila.write_heal_report("planner", hs, patch)
     content = path.read_text()
     assert patch in content, f"Best patch text not found in report:\n{content}"
 
 
-def test_write_heal_report_contains_iteration_count(centella, tmp_path):
+def test_write_heal_report_contains_iteration_count(pila, tmp_path):
     """Report content mentions the number of iterations run."""
     n_iters = 3
     history = [{"iter_n": i, "pass_rate": 0.5 + i * 0.05} for i in range(1, n_iters + 1)]
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         call_type="implementer",
         best_so_far={"pass_rate": 0.65, "iter_n": n_iters},
         baseline={"z": {"pass_rate": 0.40}},
         history=history,
     )
-    path = centella.write_heal_report("implementer", hs, "patch")
+    path = pila.write_heal_report("implementer", hs, "patch")
     content = path.read_text()
     assert str(n_iters) in content, (
         f"Iteration count {n_iters} not found in report:\n{content}")
 
 
-def test_write_heal_report_no_patch_placeholder(centella, tmp_path):
+def test_write_heal_report_no_patch_placeholder(pila, tmp_path):
     """When no best patch text is given, report contains a placeholder."""
     hs = _make_heal_state(
-        centella, tmp_path,
+        pila, tmp_path,
         call_type="classifier",
         best_so_far={"pass_rate": 0.0, "iter_n": 0},
         baseline={},
         history=[],
     )
-    path = centella.write_heal_report("classifier", hs)
+    path = pila.write_heal_report("classifier", hs)
     content = path.read_text()
     assert "no patch" in content.lower() or "baseline" in content.lower(), (
         f"Expected placeholder in empty-patch report:\n{content}")
@@ -435,8 +435,8 @@ _CAPS = {
 _MODELS = {"judge": "opus"}
 
 
-def _make_state(centella, run_dir: Path):
-    st = centella.State.__new__(centella.State)
+def _make_state(pila, run_dir: Path):
+    st = pila.State.__new__(pila.State)
     st.run_id = "test-phase-heal"
     st.run_dir = run_dir
     st.path = run_dir / "state.json"
@@ -451,18 +451,18 @@ def _make_state(centella, run_dir: Path):
     return st
 
 
-def _patch_network(centella, monkeypatch):
+def _patch_network(pila, monkeypatch):
     """Stub out all network I/O (replay + judge invoke)."""
     async def fake_replay(record, *, override_system_prompt=None, cwd=None):
         return (_REPLAY_ENVELOPE, {"categories": ["bug-fixing"]})
 
-    monkeypatch.setattr(centella, "replay_capture", fake_replay)
+    monkeypatch.setattr(pila, "replay_capture", fake_replay)
 
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         return _JUDGE_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
 
 
 def _no_op_request_patch(hs, iter_n: int):
@@ -470,14 +470,14 @@ def _no_op_request_patch(hs, iter_n: int):
     return ("ANCHOR_HERE", f"FIXED_PATCH_iter{iter_n}")
 
 
-def test_phase_heal_stub_terminates_plateaued(centella, tmp_path, monkeypatch):
+def test_phase_heal_stub_terminates_plateaued(pila, tmp_path, monkeypatch):
     """phase_heal with a no-op stub terminates with PLATEAUED after
     plateau_window iterations (because the patch never improves pass_rate)."""
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
     records = _make_failing_records(2)
-    _patch_network(centella, monkeypatch)
+    _patch_network(pila, monkeypatch)
 
     # Use a small plateau window and max_iterations so the test is fast.
     config = {
@@ -488,7 +488,7 @@ def test_phase_heal_stub_terminates_plateaued(centella, tmp_path, monkeypatch):
     }
 
     verdict = asyncio.run(
-        centella.phase_heal(
+        pila.phase_heal(
             "classifier", records, heal_dir, _CAPS, st, _MODELS,
             _no_op_request_patch, n=1, config=config,
         )
@@ -503,13 +503,13 @@ def test_phase_heal_stub_terminates_plateaued(centella, tmp_path, monkeypatch):
         f"Expected a terminal verdict, got: {verdict!r}")
 
 
-def test_phase_heal_stub_writes_report(centella, tmp_path, monkeypatch):
+def test_phase_heal_stub_writes_report(pila, tmp_path, monkeypatch):
     """phase_heal writes a heal report regardless of the termination reason."""
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
     records = _make_failing_records(2)
-    _patch_network(centella, monkeypatch)
+    _patch_network(pila, monkeypatch)
 
     config = {
         "success_threshold": 0.99,
@@ -519,7 +519,7 @@ def test_phase_heal_stub_writes_report(centella, tmp_path, monkeypatch):
     }
 
     asyncio.run(
-        centella.phase_heal(
+        pila.phase_heal(
             "classifier", records, heal_dir, _CAPS, st, _MODELS,
             _no_op_request_patch, n=1, config=config,
         )

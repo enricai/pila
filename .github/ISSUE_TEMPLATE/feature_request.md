@@ -10,7 +10,7 @@ labels: enhancement
 
 ## Proposed solution
 
-<!-- What should Centella do instead? Concrete behavior, not just "support X". -->
+<!-- What should Pila do instead? Concrete behavior, not just "support X". -->
 
 ## Which layer would this touch?
 
@@ -29,7 +29,7 @@ labels: enhancement
 
 From `CLAUDE.md`:
 
-> Centella is small (~1600 LOC) and stays small.
+> Pila is small (~1600 LOC) and stays small.
 
 Does this feature preserve that? If it grows the orchestrator
 substantially, or pulls it toward generality at the cost of the

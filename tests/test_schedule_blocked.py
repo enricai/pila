@@ -60,7 +60,7 @@ def _blocked_plan(domain: str, gap: dict | None = None) -> dict:
     }
 
 
-def test_all_blocked_dies_with_informative_message(centella, capsys):
+def test_all_blocked_dies_with_informative_message(pila, capsys):
     """When every planner blocked, schedule() dies citing each blocked
     domain and pointing the user at the configurable knob and the gap
     field — not the generic 'no subtasks' message."""
@@ -69,7 +69,7 @@ def test_all_blocked_dies_with_informative_message(centella, capsys):
         _blocked_plan("bug-fixing"),
     ]
     with pytest.raises(SystemExit) as exc:
-        centella.schedule(plans)
+        pila.schedule(plans)
     assert exc.value.code != 0
     err = capsys.readouterr().err
     # Specific blocked domains are named so the user knows which planners
@@ -81,7 +81,7 @@ def test_all_blocked_dies_with_informative_message(centella, capsys):
     assert "gap_to_close" in err
 
 
-def test_partial_block_emits_warning_and_proceeds(centella, capsys):
+def test_partial_block_emits_warning_and_proceeds(pila, capsys):
     """When some planners block but at least one produced subtasks,
     schedule() must succeed AND log a WARNING naming the blocked
     domain(s). Silent loss of a domain is the footgun this test guards
@@ -90,7 +90,7 @@ def test_partial_block_emits_warning_and_proceeds(centella, capsys):
         _ready_plan("feature-implementation", _good_subtask("feat-001")),
         _blocked_plan("bug-fixing"),
     ]
-    subtasks, waves = centella.schedule(plans)
+    subtasks, waves = pila.schedule(plans)
     # Scheduling proceeded with the ready domain's subtasks.
     assert "feat-001" in subtasks
     assert any("feat-001" in wave for wave in waves)
@@ -101,20 +101,20 @@ def test_partial_block_emits_warning_and_proceeds(centella, capsys):
     assert "bug-fixing" in out
 
 
-def test_all_ready_no_warning(centella, capsys):
+def test_all_ready_no_warning(pila, capsys):
     """No blocked planners → no WARNING line. Sanity check that the
     warning fires only on the partial-block path, not unconditionally."""
     plans = [
         _ready_plan("feature-implementation", _good_subtask("feat-001")),
         _ready_plan("testing", _good_subtask("test-001")),
     ]
-    subtasks, _waves = centella.schedule(plans)
+    subtasks, _waves = pila.schedule(plans)
     assert set(subtasks.keys()) == {"feat-001", "test-001"}
     out = capsys.readouterr().out
     assert "WARNING" not in out
 
 
-def test_blocked_domain_without_subtasks_does_not_contribute_provides(centella):
+def test_blocked_domain_without_subtasks_does_not_contribute_provides(pila):
     """Sanity: a blocked planner has subtasks=[], so it provides nothing.
     A ready sibling that requires a capability the blocked planner would
     have provided will fail validate_plan (tested separately); schedule()
@@ -127,6 +127,6 @@ def test_blocked_domain_without_subtasks_does_not_contribute_provides(centella):
         _ready_plan("feature-implementation", _good_subtask("feat-001")),
         _blocked_plan("refactoring"),
     ]
-    subtasks, _waves = centella.schedule(plans)
+    subtasks, _waves = pila.schedule(plans)
     # Only the ready domain's subtask is in the merged map.
     assert list(subtasks.keys()) == ["feat-001"]

@@ -33,7 +33,7 @@ jobs:
 
       - name: AST parse orchestrator + tests
         run: |
-          python -c "import ast; ast.parse(open('orchestrator/centella.py').read())"
+          python -c "import ast; ast.parse(open('orchestrator/pila.py').read())"
           python -c "
           import ast, pathlib
           for p in pathlib.Path('tests').rglob('*.py'):

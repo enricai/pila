@@ -1,11 +1,11 @@
 {
-  "name": "centella",
-  "displayName": "Centella",
+  "name": "pila",
+  "displayName": "Pila",
   "version": "0.2.0",
   "description": "Deterministic, headless task orchestrator for Claude Code. Classifies a task, decomposes it into granular subtasks, schedules them into dependency-ordered waves, and executes each in an isolated git worktree under an evidence-gated implement/validate loop. Runs entirely on the Claude Code CLI/subscription via `claude -p` workers.",
   "author": { "name": "Andres Restrepo", "email": "andres@enricai.com", "url": "https://enricai.com" },
   "license": "MIT",
-  "homepage": "https://github.com/enricai/centella",
+  "homepage": "https://github.com/enricai/pila",
   "keywords": ["orchestration", "automation", "headless", "worktrees", "claude-p"],
   "commands": ["./commands/"],
   "skills": ["./skills/"]

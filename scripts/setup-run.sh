@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 # setup-run.sh <run-id> — initialize the per-run branch and worktree.
 #
-# Each centella invocation has a unique run_id; this script sets up the
+# Each pila invocation has a unique run_id; this script sets up the
 # directory and branch for that run. Records the current working branch,
-# creates `centella/runs/<run-id>` off the current HEAD, adds a worktree
-# at `.centella/runs/<run-id>/worktrees/staging`, and ensures `.centella/`
+# creates `pila/runs/<run-id>` off the current HEAD, adds a worktree
+# at `.pila/runs/<run-id>/worktrees/staging`, and ensures `.pila/`
 # is git-excluded.
 #
-# GENUINELY idempotent: if `centella/runs/<run-id>` already exists (a run
+# GENUINELY idempotent: if `pila/runs/<run-id>` already exists (a run
 # is in progress, or this is a --resume), the branch is LEFT WHERE IT IS.
 # It is never force-reset — doing so would discard every integration
 # commit from the waves already completed.
 #
 # Branch shape: the `runs/` segment is mandatory. Subtask branches live
-# under `centella/subtasks/<run-id>/<sid>` (a sibling namespace) so the
+# under `pila/subtasks/<run-id>/<sid>` (a sibling namespace) so the
 # run-branch and its subtask branches can never be parent/child refs in
 # git's loose ref store. See DESIGN.md §3 ("The run branch as an
 # integration buffer") for the loose-ref-store collision being avoided.
 set -euo pipefail
 
 RUN_ID="${1:?usage: setup-run.sh <run-id>}"
-RUN_DIR=".centella/runs/${RUN_ID}"
-BRANCH="centella/runs/${RUN_ID}"
+RUN_DIR=".pila/runs/${RUN_ID}"
+BRANCH="pila/runs/${RUN_ID}"
 STAGING_WT="${RUN_DIR}/worktrees/staging"
 WORKING_BRANCH_FILE="${RUN_DIR}/working-branch"
 
@@ -40,7 +40,7 @@ fi
 WORKING_BRANCH="$(cat "${WORKING_BRANCH_FILE}")"
 
 # Create the run branch ONLY if it does not already exist. An existing
-# centella/runs/<run-id> carries the integrated work of completed waves — never reset it.
+# pila/runs/<run-id> carries the integrated work of completed waves — never reset it.
 if git show-ref --verify --quiet "refs/heads/${BRANCH}"; then
   echo "run-branch: ${BRANCH} (existing — preserved, not reset)"
 else
@@ -53,9 +53,9 @@ if ! git worktree list --porcelain | grep -q "worktree .*/${STAGING_WT}$"; then
   git worktree add "${STAGING_WT}" "${BRANCH}" >/dev/null
 fi
 
-# Keep centella artifacts out of git without touching the user's tracked .gitignore.
+# Keep pila artifacts out of git without touching the user's tracked .gitignore.
 EXCLUDE_FILE="$(git rev-parse --git-dir)/info/exclude"
-grep -qxF '.centella/' "${EXCLUDE_FILE}" 2>/dev/null || echo '.centella/' >> "${EXCLUDE_FILE}"
+grep -qxF '.pila/' "${EXCLUDE_FILE}" 2>/dev/null || echo '.pila/' >> "${EXCLUDE_FILE}"
 
 echo "working-branch: ${WORKING_BRANCH}"
 echo "staging-worktree: $(cd "${STAGING_WT}" && pwd)"

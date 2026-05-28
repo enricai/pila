@@ -1,6 +1,6 @@
-# Contributing to Centella
+# Contributing to Pila
 
-Thanks for considering a contribution. Centella is small on purpose — a
+Thanks for considering a contribution. Pila is small on purpose — a
 single-file Python orchestrator (~1600 LOC) with no runtime dependencies and
 one dev dependency (`pytest`). A good contribution preserves that shape: a
 focused fix or a clearly-bounded feature that fits inside the documented
@@ -9,7 +9,7 @@ architecture, with tests and docs updated to match.
 ## Before you change anything: read the three-layer rule
 
 The repo separates *theory* (`docs/DESIGN.md`), *mechanism*
-(`docs/IMPLEMENTATION.md`), and *code* (`orchestrator/centella.py`), and
+(`docs/IMPLEMENTATION.md`), and *code* (`orchestrator/pila.py`), and
 the layers are **top-down canonical**: each layer derives from and conforms
 to the one above it. Precedence when they disagree: **DESIGN > IMPLEMENTATION
 > code**. The lower layer is the defect.
@@ -22,10 +22,10 @@ opening a PR that touches more than a single layer.
 ## Development setup
 
 ```bash
-git clone https://github.com/enricai/centella.git
-cd centella
+git clone https://github.com/enricai/pila.git
+cd pila
 pip install pytest         # the only dev dependency
-./centella --help          # smoke-check the entry point
+./pila --help          # smoke-check the entry point
 ```
 
 There is no `pyproject.toml`; contributors develop out of the checkout.
@@ -52,7 +52,7 @@ for any change:
       described there.
 - [ ] `docs/DESIGN.md` updated only if the architecture itself changed.
 - [ ] `pytest tests/` — all pass.
-- [ ] `python3 -c "import ast; ast.parse(open('orchestrator/centella.py').read())"`
+- [ ] `python3 -c "import ast; ast.parse(open('orchestrator/pila.py').read())"`
       as a static check.
 - [ ] `grep -rn <removed-string> .` — confirm no stragglers if the change
       renamed or removed a string used elsewhere.

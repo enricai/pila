@@ -14,13 +14,13 @@ import pytest
 
 
 @pytest.fixture
-def state(centella, tmp_path):
-    """A fresh State at a tmp_path/.centella/runs/<run-id>/, with a feature
+def state(pila, tmp_path):
+    """A fresh State at a tmp_path/.pila/runs/<run-id>/, with a feature
     task that needs source_of_truth and pref='both' (the new default)."""
-    centella_root = tmp_path / ".centella"
+    pila_root = tmp_path / ".pila"
     run_id = "test-run-aaa111"
-    (centella_root / "runs" / run_id).mkdir(parents=True)
-    st = centella.State(centella_root, run_id)
+    (pila_root / "runs" / run_id).mkdir(parents=True)
+    st = pila.State(pila_root, run_id)
     st.data = {
         "task": "test task",
         "categories": ["feature-implementation"],
@@ -44,9 +44,9 @@ def non_tty_stdin(monkeypatch):
     "existing-patterns",       # not in the enum
     "researched-standards",    # not in the enum
 ])
-def test_invalid_value_rejected(centella, state, capsys, bad_value):
+def test_invalid_value_rejected(pila, state, capsys, bad_value):
     with pytest.raises(SystemExit) as exc:
-        centella.gather_answers(state, {"source_of_truth": bad_value})
+        pila.gather_answers(state, {"source_of_truth": bad_value})
     assert exc.value.code != 0
     err = capsys.readouterr().err
     assert "is not one of" in err
@@ -54,34 +54,34 @@ def test_invalid_value_rejected(centella, state, capsys, bad_value):
 
 
 @pytest.mark.parametrize("value", ["codebase", "research", "both"])
-def test_valid_values_pass(centella, state, value):
-    answers = centella.gather_answers(state, {"source_of_truth": value})
+def test_valid_values_pass(pila, state, value):
+    answers = pila.gather_answers(state, {"source_of_truth": value})
     assert answers["source_of_truth"] == value
 
 
 # --- preference fills in source_of_truth without asking --------------------
 
 @pytest.mark.parametrize("pref", ["codebase", "research", "both"])
-def test_preference_satisfies_source_of_truth(centella, state, pref):
+def test_preference_satisfies_source_of_truth(pila, state, pref):
     """gather_answers fills source_of_truth from the resolved preference,
     without prompting the user or deferring to pending-questions.json."""
     state.data["source_of_truth_pref"] = pref
-    answers = centella.gather_answers(state, None)
+    answers = pila.gather_answers(state, None)
     assert answers["source_of_truth"] == pref
     assert not (state.path.parent / "pending-questions.json").exists()
 
 
-def test_default_preference_is_both(centella, state):
+def test_default_preference_is_both(pila, state):
     """With the new default, source_of_truth is filled with 'both' when
     nothing else is specified."""
-    answers = centella.gather_answers(state, None)
+    answers = pila.gather_answers(state, None)
     assert answers["source_of_truth"] == "both"
 
 
 # --- non-TTY defer path: only fires for classifier intent questions --------
 
 def test_defer_writes_pending_for_classifier_questions(
-        centella, state, non_tty_stdin):
+        pila, state, non_tty_stdin):
     """When the classifier surfaced intent questions and stdin is non-TTY,
     gather_answers writes pending-questions.json and exits 10. The file
     contains only the questions; source-of-truth was already satisfied
@@ -91,8 +91,8 @@ def test_defer_writes_pending_for_classifier_questions(
          "why_underivable": "user-specific"}
     ]
     with pytest.raises(SystemExit) as exc:
-        centella.gather_answers(state, None)
-    assert exc.value.code == centella.EXIT_NEEDS_ANSWERS
+        pila.gather_answers(state, None)
+    assert exc.value.code == pila.EXIT_NEEDS_ANSWERS
 
     pq = json.loads((state.path.parent / "pending-questions.json").read_text())
     assert pq == {"questions": [
@@ -101,21 +101,21 @@ def test_defer_writes_pending_for_classifier_questions(
     ]}
 
 
-def test_no_defer_when_no_classifier_questions(centella, state, non_tty_stdin):
+def test_no_defer_when_no_classifier_questions(pila, state, non_tty_stdin):
     """No classifier questions + source-of-truth satisfied from preference
     → no defer file, no exit."""
-    answers = centella.gather_answers(state, None)
+    answers = pila.gather_answers(state, None)
     assert answers["source_of_truth"] == "both"
     assert not (state.path.parent / "pending-questions.json").exists()
 
 
 # --- clarify default (asking is opt-in via --clarify) ---------------------
 
-def test_default_mode_satisfies_sot_from_preference(centella, state):
+def test_default_mode_satisfies_sot_from_preference(pila, state):
     """In the default mode (no --clarify), source_of_truth still comes
     from the resolved preference. Asking is opt-in, but the preference
     still fills the answer non-interactively."""
     state.data["source_of_truth_pref"] = "research"
     state.data["clarify"] = False
-    answers = centella.gather_answers(state, None)
+    answers = pila.gather_answers(state, None)
     assert answers["source_of_truth"] == "research"

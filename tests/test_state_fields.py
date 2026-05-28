@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CENTELLA_PY = REPO_ROOT / "orchestrator" / "centella.py"
+PILA_PY = REPO_ROOT / "orchestrator" / "pila.py"
 IMPL_MD = REPO_ROOT / "docs" / "IMPLEMENTATION.md"
 
 
@@ -45,10 +45,10 @@ def _spec_fields() -> set[str]:
 
 
 def _runtime_field_writes() -> set[str]:
-    """Every name used as a key on `st.data` in centella.py — whether via
+    """Every name used as a key on `st.data` in pila.py — whether via
     `st.data["x"] = ...`, `st.data.setdefault("x", ...)`, or as a key in
     the run-init dict literal in `orchestrate()`."""
-    source = CENTELLA_PY.read_text()
+    source = PILA_PY.read_text()
 
     direct = set(re.findall(r'st\.data\["([a-z_]+)"\]\s*=', source))
     setdefault = set(re.findall(r'st\.data\.setdefault\("([a-z_]+)"', source))
@@ -65,10 +65,10 @@ def _runtime_field_writes() -> set[str]:
     return direct | setdefault | init
 
 
-def test_state_fields_matches_spec_table(centella):
+def test_state_fields_matches_spec_table(pila):
     """STATE_FIELDS and the IMPLEMENTATION.md field table must list the
     same names. Symmetric: catches drift in either direction."""
-    code = set(centella.STATE_FIELDS)
+    code = set(pila.STATE_FIELDS)
     spec = _spec_fields()
 
     missing_from_spec = code - spec
@@ -82,26 +82,26 @@ def test_state_fields_matches_spec_table(centella):
     )
 
 
-def test_every_st_data_write_is_declared(centella):
+def test_every_st_data_write_is_declared(pila):
     """Every key the orchestrator writes to `st.data` (directly,
     via setdefault, or in the run-init dict literal) must appear in
     STATE_FIELDS. Catches the case where a new write is added without
     updating the canonical tuple."""
-    declared = set(centella.STATE_FIELDS)
+    declared = set(pila.STATE_FIELDS)
     written = _runtime_field_writes()
 
     undeclared = written - declared
     assert not undeclared, (
-        f"centella.py writes state keys that are not in STATE_FIELDS: "
+        f"pila.py writes state keys that are not in STATE_FIELDS: "
         f"{sorted(undeclared)}. Add them to STATE_FIELDS and to the "
         f"IMPLEMENTATION.md §8 field table in the same change."
     )
 
 
-def test_state_fields_has_no_duplicates(centella):
+def test_state_fields_has_no_duplicates(pila):
     """STATE_FIELDS is a tuple, so a stray duplicate would not be caught
     by the set-equality test above. Check explicitly."""
-    fields = centella.STATE_FIELDS
+    fields = pila.STATE_FIELDS
     assert len(fields) == len(set(fields)), (
         f"STATE_FIELDS contains duplicates: "
         f"{sorted(f for f in fields if fields.count(f) > 1)}"

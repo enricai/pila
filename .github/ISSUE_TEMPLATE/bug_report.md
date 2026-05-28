@@ -1,12 +1,12 @@
 ---
 name: Bug report
-about: Report a defect in Centella
+about: Report a defect in Pila
 labels: bug
 ---
 
 ## What happened
 
-<!-- One or two sentences. What did Centella do that it shouldn't have? -->
+<!-- One or two sentences. What did Pila do that it shouldn't have? -->
 
 ## What you expected
 
@@ -16,9 +16,9 @@ labels: bug
 
 - **Task you ran:**
   ```
-  <the exact `centella "..."` invocation, or the slash-command form>
+  <the exact `pila "..."` invocation, or the slash-command form>
   ```
-- **Repo state:** branch, roughly how dirty, any non-default `centella.toml`
+- **Repo state:** branch, roughly how dirty, any non-default `pila.toml`
 - **Other relevant flags:** `--source-of-truth`, `--model` / `--model-<worker>`, `--max-workers`, `--max-parallel`, `--clarify`, etc.
 
 ## Environment
@@ -26,11 +26,11 @@ labels: bug
 - OS: <e.g., macOS 14.5, Ubuntu 22.04>
 - Python: `python3 --version`
 - `claude --version`:
-- Centella commit: `git -C ~/.centella rev-parse HEAD` (or wherever you cloned it)
+- Pila commit: `git -C ~/.pila rev-parse HEAD` (or wherever you cloned it)
 
 ## Relevant state
 
-Paste the relevant fields from `.centella/state.json` (redact anything
+Paste the relevant fields from `.pila/state.json` (redact anything
 sensitive — task descriptions can contain repo-internal context). The full
 schema is in [`docs/IMPLEMENTATION.md`](../../docs/IMPLEMENTATION.md) §8 if
 you want to know what each field means.
@@ -41,8 +41,8 @@ you want to know what each field means.
 
 ## Which layer is the defect in?
 
-Centella separates theory (`docs/DESIGN.md`), mechanism
-(`docs/IMPLEMENTATION.md`), and code (`orchestrator/centella.py`). Knowing
+Pila separates theory (`docs/DESIGN.md`), mechanism
+(`docs/IMPLEMENTATION.md`), and code (`orchestrator/pila.py`). Knowing
 which layer the bug lives in helps triage. (Quiet reinforcement of the
 three-layer rule — see [`CLAUDE.md`](../../CLAUDE.md).)
 

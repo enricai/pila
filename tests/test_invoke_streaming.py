@@ -10,7 +10,7 @@ What we pin here:
   - The final `result` event is returned as the envelope (same shape
     consumers already parse).
   - Per-worker log file is always written, regardless of verbosity.
-  - Inline summaries are emitted to centella's log() per verbosity.
+  - Inline summaries are emitted to pila's log() per verbosity.
   - If no `result` event arrives, WorkerError is raised.
 """
 from __future__ import annotations
@@ -75,8 +75,8 @@ def _make_subprocess_exec_mock(stdout_lines: list[str], returncode: int = 0):
 
 
 @pytest.fixture
-def centella_dir(tmp_path):
-    cd = tmp_path / ".centella"
+def pila_dir(tmp_path):
+    cd = tmp_path / ".pila"
     cd.mkdir()
     (cd / "logs").mkdir()
     return cd
@@ -84,7 +84,7 @@ def centella_dir(tmp_path):
 
 # ----- envelope return ------------------------------------------------------
 
-def test_invoke_returns_final_result_event(centella, centella_dir, monkeypatch):
+def test_invoke_returns_final_result_event(pila, pila_dir, monkeypatch):
     """The final type='result' event is the envelope, returned to the
     caller. Same shape as the pre-streaming json mode."""
     events = [
@@ -97,19 +97,19 @@ def test_invoke_returns_final_result_event(centella, centella_dir, monkeypatch):
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    result = asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t1", centella_dir=centella_dir,
+    result = asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t1", pila_dir=pila_dir,
         verbosity="stream"))
     assert result["type"] == "result"
     assert result["subtype"] == "success"
     assert result["structured_output"] == {"ok": True}
 
 
-def test_invoke_raises_when_no_result_event(centella, centella_dir, monkeypatch):
+def test_invoke_raises_when_no_result_event(pila, pila_dir, monkeypatch):
     """A worker that exits without emitting any result event (e.g. the
     process died mid-stream) raises WorkerError — same error class
-    centella's existing retry path already handles."""
+    pila's existing retry path already handles."""
     events = [
         json.dumps({"type": "system", "subtype": "init",
                     "model": "x"}),
@@ -117,16 +117,16 @@ def test_invoke_raises_when_no_result_event(centella, centella_dir, monkeypatch)
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    with pytest.raises(centella.WorkerError):
-        asyncio.run(centella._invoke(
-            ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-            timeout=60, sid="t2", centella_dir=centella_dir,
+    with pytest.raises(pila.WorkerError):
+        asyncio.run(pila._invoke(
+            ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+            timeout=60, sid="t2", pila_dir=pila_dir,
             verbosity="stream"))
 
 
 # ----- per-worker log file --------------------------------------------------
 
-def test_log_file_written_at_stream(centella, centella_dir, monkeypatch):
+def test_log_file_written_at_stream(pila, pila_dir, monkeypatch):
     events = [
         json.dumps({"type": "system", "subtype": "init", "model": "m"}),
         json.dumps({"type": "assistant", "message": {"content": [
@@ -136,18 +136,18 @@ def test_log_file_written_at_stream(centella, centella_dir, monkeypatch):
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t3", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t3", pila_dir=pila_dir,
         verbosity="stream"))
-    log_text = (centella_dir / "logs" / "t3.log").read_text()
+    log_text = (pila_dir / "logs" / "t3.log").read_text()
     # All 3 events appear in the file.
     assert "system/init" in log_text
     assert "assistant" in log_text
     assert "result/success" in log_text
 
 
-def test_log_file_written_at_quiet(centella, centella_dir, monkeypatch):
+def test_log_file_written_at_quiet(pila, pila_dir, monkeypatch):
     """The per-worker file is written REGARDLESS of verbosity — even
     at quiet, the audit trail is preserved. Verbosity gates only the
     inline output."""
@@ -158,16 +158,16 @@ def test_log_file_written_at_quiet(centella, centella_dir, monkeypatch):
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t4", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t4", pila_dir=pila_dir,
         verbosity="quiet"))
-    log_text = (centella_dir / "logs" / "t4.log").read_text()
+    log_text = (pila_dir / "logs" / "t4.log").read_text()
     assert "system/init" in log_text
     assert "result/success" in log_text
 
 
-def test_log_file_records_non_json_lines(centella, centella_dir, monkeypatch):
+def test_log_file_records_non_json_lines(pila, pila_dir, monkeypatch):
     """If a line of stdout isn't valid JSON (rare; defensive), the raw
     line goes to the file with a 'non-json-line' header. Stream
     progresses past it."""
@@ -178,18 +178,18 @@ def test_log_file_records_non_json_lines(centella, centella_dir, monkeypatch):
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t5", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t5", pila_dir=pila_dir,
         verbosity="stream"))
-    log_text = (centella_dir / "logs" / "t5.log").read_text()
+    log_text = (pila_dir / "logs" / "t5.log").read_text()
     assert "non-json-line" in log_text
     assert "not valid json at all" in log_text
 
 
 # ----- inline summaries (verbosity-gated) ----------------------------------
 
-def test_inline_summaries_emitted_at_stream(centella, centella_dir,
+def test_inline_summaries_emitted_at_stream(pila, pila_dir,
                                             monkeypatch, capsys):
     events = [
         json.dumps({"type": "system", "subtype": "init",
@@ -200,9 +200,9 @@ def test_inline_summaries_emitted_at_stream(centella, centella_dir,
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t6", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t6", pila_dir=pila_dir,
         verbosity="stream"))
     out = capsys.readouterr().out
     # Two summary lines: starting + done.
@@ -210,7 +210,7 @@ def test_inline_summaries_emitted_at_stream(centella, centella_dir,
     assert "[t6] done" in out
 
 
-def test_no_inline_summaries_at_quiet_for_success(centella, centella_dir,
+def test_no_inline_summaries_at_quiet_for_success(pila, pila_dir,
                                                    monkeypatch, capsys):
     """At quiet, successful events produce no inline output. Per-worker
     file is still written (see test_log_file_written_at_quiet)."""
@@ -223,20 +223,20 @@ def test_no_inline_summaries_at_quiet_for_success(centella, centella_dir,
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t7", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t7", pila_dir=pila_dir,
         verbosity="quiet"))
     out = capsys.readouterr().out
     # None of the individual events should produce a [t7] line.
     assert "[t7]" not in out
 
 
-def test_multi_line_summary_each_line_has_timestamp(centella, centella_dir,
+def test_multi_line_summary_each_line_has_timestamp(pila, pila_dir,
                                                      monkeypatch, capsys):
     """A multi-line summary (multi-line text block, or multiple
     tool_use blocks in one event) must produce one log() call per
-    line so each line gets its own [centella HH:MM:SS] prefix.
+    line so each line gets its own [pila HH:MM:SS] prefix.
 
     Earlier behavior returned a \\n-joined string and called log()
     once, which prepended the timestamp only to the first line —
@@ -253,26 +253,26 @@ def test_multi_line_summary_each_line_has_timestamp(centella, centella_dir,
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t-multi", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t-multi", pila_dir=pila_dir,
         verbosity="stream"))
     out = capsys.readouterr().out
     # Each text line is on its own output line, each prefixed with
-    # the [centella HH:MM:SS] timestamp.
+    # the [pila HH:MM:SS] timestamp.
     paragraphs = ["first paragraph", "second paragraph", "third paragraph"]
     for para in paragraphs:
         # Find the line containing this paragraph and assert it has
-        # the centella prefix.
+        # the pila prefix.
         matching = [l for l in out.split("\n") if para in l]
         assert matching, f"missing line for {para!r}; got: {out!r}"
         for l in matching:
-            assert l.lstrip().startswith("[centella "), (
-                f"line {l!r} lacks [centella HH:MM:SS] prefix — the "
+            assert l.lstrip().startswith("[pila "), (
+                f"line {l!r} lacks [pila HH:MM:SS] prefix — the "
                 "log() call per line guarantee broke")
 
 
-def test_worker_failure_surfaces_even_at_quiet(centella, centella_dir,
+def test_worker_failure_surfaces_even_at_quiet(pila, pila_dir,
                                                 monkeypatch, capsys):
     """Errors emit at every level (clig.dev). A result event with
     is_error=true must produce a summary even at quiet."""
@@ -282,9 +282,9 @@ def test_worker_failure_surfaces_even_at_quiet(centella, centella_dir,
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t8", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t8", pila_dir=pila_dir,
         verbosity="quiet"))
     out = capsys.readouterr().out
     assert "[t8] worker failed" in out
@@ -292,9 +292,9 @@ def test_worker_failure_surfaces_even_at_quiet(centella, centella_dir,
 
 # ----- P10-1: live-flush property (per-worker log file is line-buffered) ---
 
-def test_log_file_opened_line_buffered(centella, centella_dir, monkeypatch):
+def test_log_file_opened_line_buffered(pila, pila_dir, monkeypatch):
     """The per-worker log file MUST be opened line-buffered (buffering=1)
-    so a user running `tail -f .centella/logs/<sid>.log` sees events as
+    so a user running `tail -f .pila/logs/<sid>.log` sees events as
     they happen, not when the file closes at worker end. Default Python
     text-mode buffering would batch writes into ~8KB chunks and only
     flush on close — silently defeating the live-progress property the
@@ -303,7 +303,7 @@ def test_log_file_opened_line_buffered(centella, centella_dir, monkeypatch):
     Tested by spying on Path.open to capture the keyword arguments. Set
     up before `_invoke` runs; assert `buffering=1` was passed."""
     open_calls: list[dict] = []
-    real_open = type(centella_dir).open  # pathlib.Path.open
+    real_open = type(pila_dir).open  # pathlib.Path.open
 
     def spy_open(self, *args, **kwargs):
         # Spy on every Path.open and capture the path along with the
@@ -312,14 +312,14 @@ def test_log_file_opened_line_buffered(centella, centella_dir, monkeypatch):
                            "kwargs": kwargs})
         return real_open(self, *args, **kwargs)
 
-    monkeypatch.setattr(type(centella_dir), "open", spy_open)
+    monkeypatch.setattr(type(pila_dir), "open", spy_open)
     events = [json.dumps({"type": "result", "subtype": "success",
                           "num_turns": 1, "is_error": False})]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t-flush", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t-flush", pila_dir=pila_dir,
         verbosity="quiet"))
     # The log file open call must have buffering=1.
     log_opens = [c for c in open_calls if c["path"].endswith("t-flush.log")]
@@ -358,8 +358,8 @@ class _OverlimitStream:
         return b""
 
 
-def test_value_error_from_line_limit_becomes_worker_error(centella,
-                                                          centella_dir,
+def test_value_error_from_line_limit_becomes_worker_error(pila,
+                                                          pila_dir,
                                                           monkeypatch):
     """When a worker emits a line larger than the StreamReader limit,
     `async for proc.stdout` raises `ValueError("Separator is not
@@ -367,7 +367,7 @@ def test_value_error_from_line_limit_becomes_worker_error(centella,
     claude_p's retry loop and surfaces as a Python traceback. The
     Pass-12 fix wraps the `async for` in a try/except that converts
     the ValueError into a WorkerError — same exception class
-    centella's retry / blocked-subtask paths already handle.
+    pila's retry / blocked-subtask paths already handle.
 
     Mock the stream so the second iteration raises ValueError; assert
     _invoke raises WorkerError (not ValueError) and the message names
@@ -389,10 +389,10 @@ def test_value_error_from_line_limit_becomes_worker_error(centella,
         return _OverlimitProc()
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake)
-    with pytest.raises(centella.WorkerError) as exc_info:
-        asyncio.run(centella._invoke(
-            ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-            timeout=60, sid="t-overlimit", centella_dir=centella_dir,
+    with pytest.raises(pila.WorkerError) as exc_info:
+        asyncio.run(pila._invoke(
+            ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+            timeout=60, sid="t-overlimit", pila_dir=pila_dir,
             verbosity="quiet"))
     msg = str(exc_info.value)
     # The error message must name the limit so a user diagnosing
@@ -408,7 +408,7 @@ def test_value_error_from_line_limit_becomes_worker_error(centella,
         "WorkerError. See Pass-12 audit.")
 
 
-def test_progress_prefix_shown_when_progress_passed(centella, centella_dir,
+def test_progress_prefix_shown_when_progress_passed(pila, pila_dir,
                                                       monkeypatch, capsys):
     """When progress=(done, total) is passed to _invoke, every inline
     summary line is prefixed with [done/total] before the worker tag.
@@ -420,16 +420,16 @@ def test_progress_prefix_shown_when_progress_passed(centella, centella_dir,
     ]
     monkeypatch.setattr("asyncio.create_subprocess_exec",
                         _make_subprocess_exec_mock(events))
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t-prog", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t-prog", pila_dir=pila_dir,
         verbosity="stream", progress=(3, 12)))
     out = capsys.readouterr().out
     assert "[3/12]" in out
     assert "[t-prog] starting" in out
 
 
-def test_create_subprocess_exec_uses_high_limit(centella, centella_dir,
+def test_create_subprocess_exec_uses_high_limit(pila, pila_dir,
                                                   monkeypatch):
     """asyncio's StreamReader defaults to 64KB per line. A single JSON
     event from `claude -p --output-format stream-json` can plausibly
@@ -451,9 +451,9 @@ def test_create_subprocess_exec_uses_high_limit(centella, centella_dir,
         return _MockProc(events)
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", spy)
-    asyncio.run(centella._invoke(
-        ["claude", "-p", "x"], cwd=str(centella_dir.parent),
-        timeout=60, sid="t-limit", centella_dir=centella_dir,
+    asyncio.run(pila._invoke(
+        ["claude", "-p", "x"], cwd=str(pila_dir.parent),
+        timeout=60, sid="t-limit", pila_dir=pila_dir,
         verbosity="quiet"))
 
     limit = captured_kwargs.get("limit")

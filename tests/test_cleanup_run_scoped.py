@@ -9,7 +9,7 @@ cleanup.sh supports:
 
 `--subtask-branches` is the post-finalize default (invoked by
 phase_finalize): it deletes only the per-subtask branches and keeps
-centella/runs/<id> (the PR head). `--branches` is broader and deletes
+pila/runs/<id> (the PR head). `--branches` is broader and deletes
 both the run branch and the subtask branches; they are mutually
 exclusive.
 
@@ -56,29 +56,29 @@ def test_cleanup_declares_branches_flag():
 # --- run-scoping safety --------------------------------------------------
 
 def test_cleanup_scopes_worktree_removal_to_run_dir():
-    """--run-id only touches .centella/runs/<id>/worktrees/, not a
-    top-level .centella/worktrees/. The construction is via a local
-    `run_dir` variable: `run_dir=".centella/runs/${run_id}"` then
+    """--run-id only touches .pila/runs/<id>/worktrees/, not a
+    top-level .pila/worktrees/. The construction is via a local
+    `run_dir` variable: `run_dir=".pila/runs/${run_id}"` then
     `"${run_dir}/worktrees"`."""
     src = _src()
     clean_one_run = src.split("clean_one_run() {")[1].split("\n}")[0]
     # The run_dir variable is correctly anchored under runs/.
-    assert 'run_dir=".centella/runs/${run_id}"' in clean_one_run
+    assert 'run_dir=".pila/runs/${run_id}"' in clean_one_run
     # The worktrees path is derived from run_dir.
     assert '${run_dir}/worktrees' in clean_one_run
     # And the top-level path must NOT appear inside clean_one_run.
-    assert '.centella/worktrees/' not in clean_one_run
+    assert '.pila/worktrees/' not in clean_one_run
 
 
 def test_cleanup_branch_delete_scopes_to_run_id():
-    """When --branches is passed, only centella/runs/<run-id> and
-    centella/subtasks/<run-id>/* get deleted — NOT every centella/* branch.
+    """When --branches is passed, only pila/runs/<run-id> and
+    pila/subtasks/<run-id>/* get deleted — NOT every pila/* branch.
     The two prefixes are disjoint so neither is an ancestor ref of the
     other (see compute_run_branch docstring)."""
     src = _src()
     # The for-each-ref patterns restrict to the run_id's namespace.
-    assert 'refs/heads/centella/runs/${run_id}' in src
-    assert 'refs/heads/centella/subtasks/${run_id}/' in src
+    assert 'refs/heads/pila/runs/${run_id}' in src
+    assert 'refs/heads/pila/subtasks/${run_id}/' in src
 
 
 def test_cleanup_all_runs_excludes_bootstrap():
@@ -125,7 +125,7 @@ def test_cleanup_run_id_removes_worktrees_but_preserves_state(tmp_path):
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
 
     run_id = "feat-test-aaa111"
-    run_dir = repo / ".centella" / "runs" / run_id
+    run_dir = repo / ".pila" / "runs" / run_id
     (run_dir / "worktrees").mkdir(parents=True)
     (run_dir / "state.json").write_text('{"task": "test"}')
     (run_dir / "criteria").mkdir()
@@ -151,7 +151,7 @@ def test_cleanup_run_id_removes_worktrees_but_preserves_state(tmp_path):
 
 def test_cleanup_subtask_branches_deletes_only_subtask_branches(tmp_path):
     """End-to-end: `cleanup.sh --run-id <id> --subtask-branches` deletes
-    every `centella/subtasks/<id>/*` branch but keeps `centella/runs/<id>`
+    every `pila/subtasks/<id>/*` branch but keeps `pila/runs/<id>`
     (the PR head). State dir and the run branch must both survive."""
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -163,18 +163,18 @@ def test_cleanup_subtask_branches_deletes_only_subtask_branches(tmp_path):
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
 
     run_id = "feat-test-bbb222"
-    run_dir = repo / ".centella" / "runs" / run_id
+    run_dir = repo / ".pila" / "runs" / run_id
     (run_dir / "worktrees").mkdir(parents=True)
     (run_dir / "state.json").write_text('{"task": "test"}')
 
     # Create the run branch + three subtask branches off of main.
     subprocess.run(
-        ["git", "branch", f"centella/runs/{run_id}", "main"],
+        ["git", "branch", f"pila/runs/{run_id}", "main"],
         cwd=repo, check=True,
     )
     for sid in ("feat-001", "config-002", "feat-003"):
         subprocess.run(
-            ["git", "branch", f"centella/subtasks/{run_id}/{sid}", "main"],
+            ["git", "branch", f"pila/subtasks/{run_id}/{sid}", "main"],
             cwd=repo, check=True,
         )
 
@@ -186,18 +186,18 @@ def test_cleanup_subtask_branches_deletes_only_subtask_branches(tmp_path):
 
     # The run branch must survive (it's the PR head).
     refs = subprocess.run(
-        ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/centella/"],
+        ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/pila/"],
         cwd=repo, capture_output=True, text=True, check=True,
     ).stdout.split()
-    assert f"centella/runs/{run_id}" in refs, (
+    assert f"pila/runs/{run_id}" in refs, (
         "cleanup.sh --subtask-branches must NOT delete the run branch "
         "(it's the PR head and must outlive the orchestrator)."
     )
     # Every subtask branch must be gone.
     for sid in ("feat-001", "config-002", "feat-003"):
-        assert f"centella/subtasks/{run_id}/{sid}" not in refs, (
+        assert f"pila/subtasks/{run_id}/{sid}" not in refs, (
             f"cleanup.sh --subtask-branches must delete "
-            f"centella/subtasks/{run_id}/{sid}"
+            f"pila/subtasks/{run_id}/{sid}"
         )
     # State dir survives.
     assert (run_dir / "state.json").exists()
@@ -232,9 +232,9 @@ def test_cleanup_bootstrap_removes_orphans(tmp_path):
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
 
-    boot1 = repo / ".centella" / "runs" / "_bootstrap-aaaaaa"
-    boot2 = repo / ".centella" / "runs" / "_bootstrap-bbbbbb"
-    real = repo / ".centella" / "runs" / "feat-real-cccccc"
+    boot1 = repo / ".pila" / "runs" / "_bootstrap-aaaaaa"
+    boot2 = repo / ".pila" / "runs" / "_bootstrap-bbbbbb"
+    real = repo / ".pila" / "runs" / "feat-real-cccccc"
     boot1.mkdir(parents=True)
     boot2.mkdir(parents=True)
     real.mkdir(parents=True)

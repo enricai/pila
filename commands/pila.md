@@ -1,17 +1,17 @@
 ---
-description: Launch the Centella orchestrator on a task. Use when the user asks to autonomously decompose and execute an engineering task with centella.
+description: Launch the Pila orchestrator on a task. Use when the user asks to autonomously decompose and execute an engineering task with pila.
 argument-hint: <task description>
 ---
 
-# Launch Centella
+# Launch Pila
 
-The user wants to run the Centella orchestrator on this task:
+The user wants to run the Pila orchestrator on this task:
 
 ```
 $ARGUMENTS
 ```
 
-Centella is a deterministic Python orchestrator (it does not run inside this
+Pila is a deterministic Python orchestrator (it does not run inside this
 session — it spawns its own `claude -p` workers). Launch it and relay the
 clarification step if one occurs.
 
@@ -25,38 +25,38 @@ clarification step if one occurs.
    plugin's install directory; Claude Code sets it automatically.)
 
    ```
-   bash "${CLAUDE_PLUGIN_ROOT}/centella" --clarify "$ARGUMENTS"
+   bash "${CLAUDE_PLUGIN_ROOT}/pila" --clarify "$ARGUMENTS"
    ```
 
 2. **If it exits with code 10**, the orchestrator needs the user to answer
    classifier intent questions before it can continue. Read
-   `.centella/pending-questions.json`, present each question to the user
+   `.pila/pending-questions.json`, present each question to the user
    verbatim, and collect their answers.
 
-3. Write the answers as a JSON object to `.centella/answers.json`, keyed by
+3. Write the answers as a JSON object to `.pila/answers.json`, keyed by
    each question's `id`. The user can also override the source-of-truth
    preference for this run by including `source_of_truth` set to `codebase`,
    `research`, or `both` (otherwise the resolved preference applies, default
    `both`). They can pin the model with `--model sonnet|opus|haiku` (env:
-   `CENTELLA_MODEL`); per-worker overrides via `--model-<worker>` /
-   `CENTELLA_MODEL_<WORKER>`. Per-worker defaults: judgment workers
+   `PILA_MODEL`); per-worker overrides via `--model-<worker>` /
+   `PILA_MODEL_<WORKER>`. Per-worker defaults: judgment workers
    (classifier, planner, reconciler, integrator) default to `opus`;
    acting workers (implementer, conformer) default to `sonnet`.
    Then resume:
 
    ```
-   bash "${CLAUDE_PLUGIN_ROOT}/centella" --clarify --resume --answers .centella/answers.json
+   bash "${CLAUDE_PLUGIN_ROOT}/pila" --clarify --resume --answers .pila/answers.json
    ```
 
    (If `--resume` reports the run had not reached scheduling, re-run without
-   `--resume`, passing the original task and `--answers .centella/answers.json`.)
+   `--resume`, passing the original task and `--answers .pila/answers.json`.)
 
 4. Relay the orchestrator's final summary to the user. On any non-zero, non-10
-   exit, show the error and point them at `.centella/state.json`. If the
-   failure looks like a Centella bug rather than a task-execution problem,
-   point the user at https://github.com/enricai/centella/issues with the
-   contents of `.centella/state.json` (redacted).
+   exit, show the error and point them at `.pila/state.json`. If the
+   failure looks like a Pila bug rather than a task-execution problem,
+   point the user at https://github.com/enricai/pila/issues with the
+   contents of `.pila/state.json` (redacted).
 
-For long runs, prefer telling the user to run `centella` directly in a terminal —
+For long runs, prefer telling the user to run `pila` directly in a terminal —
 this session's context fills with orchestrator output otherwise. (Requires the
 terminal install — see README "From a terminal".)

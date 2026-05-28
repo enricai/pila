@@ -1,5 +1,5 @@
 """Tests for the orchestrator-level conformance phase loop —
-_run_conformance_phase() in centella.py (DESIGN §9 *Post-work
+_run_conformance_phase() in pila.py (DESIGN §9 *Post-work
 conformance*).
 
 The phase is advisory: it never raises and never returns a status that
@@ -32,8 +32,8 @@ def _run(cmd, cwd, check=True):
 
 
 @pytest.fixture
-def env(centella, tmp_path):
-    """A real git repo with a .centella run dir, one subtask worktree
+def env(pila, tmp_path):
+    """A real git repo with a .pila run dir, one subtask worktree
     branched off a 'run branch', and the criteria locked.
 
     Returns a dict of every path / object the phase needs to run."""
@@ -48,16 +48,16 @@ def env(centella, tmp_path):
 
     # The "run branch" the implementer branched off of.
     run_id = "fix-001-abcdef"
-    run_branch = f"centella/runs/{run_id}"
+    run_branch = f"pila/runs/{run_id}"
     _run(["git", "checkout", "-q", "-b", run_branch], cwd=repo)
 
-    # Set up .centella coordination state first so the subtask worktree
+    # Set up .pila coordination state first so the subtask worktree
     # can live under run_dir/worktrees/<sid> — the canonical location
-    # settle_subtask uses (`worktree = str(centella_dir / "worktrees" / sid)`).
+    # settle_subtask uses (`worktree = str(pila_dir / "worktrees" / sid)`).
     sid = "t1"
-    subtask_branch = f"centella/subtasks/{run_id}/{sid}"
-    centella_root = repo / ".centella"
-    run_dir = centella_root / "runs" / run_id
+    subtask_branch = f"pila/subtasks/{run_id}/{sid}"
+    pila_root = repo / ".pila"
+    run_dir = pila_root / "runs" / run_id
     (run_dir / "subtasks").mkdir(parents=True)
     (run_dir / "criteria").mkdir()
     (run_dir / "logs").mkdir()
@@ -76,29 +76,29 @@ def env(centella, tmp_path):
     subtask = {"id": sid, "files_likely_touched": ["src.py"]}
     (run_dir / "subtasks" / f"{sid}.json").write_text(json.dumps(subtask))
 
-    State = centella.State
-    st = State(centella_root, run_id)
+    State = pila.State
+    st = State(pila_root, run_id)
     st.data = {"task": "x", "answers": {"source_of_truth": "codebase"}}
     st.save()
 
-    caps = dict(centella.DEFAULT_CAPS)
-    models = {w: "sonnet" for w in centella.WORKER_TYPES}
+    caps = dict(pila.DEFAULT_CAPS)
+    models = {w: "sonnet" for w in pila.WORKER_TYPES}
 
     return {
-        "centella": centella, "repo": repo, "worktree": worktree,
+        "pila": pila, "repo": repo, "worktree": worktree,
         "sid": sid, "subtask": subtask, "run_dir": run_dir, "st": st,
         "caps": caps, "models": models, "run_branch": run_branch,
     }
 
 
-def _stub_run_conformer(centella_mod, results_queue, *, commits=None):
-    """Patch centella.run_conformer to return queued results in order. If
+def _stub_run_conformer(pila_mod, results_queue, *, commits=None):
+    """Patch pila.run_conformer to return queued results in order. If
     `commits` is provided, the matching index's stub also writes a file
     and commits it to the worktree before returning."""
     commits = commits or {}
     state = {"i": 0}
 
-    async def _stub(sid, centella_dir, worktree, caps, st, models,
+    async def _stub(sid, pila_dir, worktree, caps, st, models,
                     *, rules_files, blt_commands, diff_base):
         i = state["i"]
         state["i"] += 1
@@ -107,7 +107,7 @@ def _stub_run_conformer(centella_mod, results_queue, *, commits=None):
             action(Path(worktree))
         return results_queue[i] if i < len(results_queue) else None
 
-    centella_mod.run_conformer = _stub
+    pila_mod.run_conformer = _stub
     return state
 
 
@@ -133,7 +133,7 @@ def _clean_result(sid="t1", **overrides):
 # --- happy path: clean result, no warnings, single round -------------------
 
 def test_clean_result_exits_after_one_round(env, monkeypatch):
-    c = env["centella"]
+    c = env["pila"]
     state = _stub_run_conformer(c, [_clean_result()])
 
     res, warnings = asyncio.run(c._run_conformance_phase(
@@ -148,7 +148,7 @@ def test_clean_result_exits_after_one_round(env, monkeypatch):
 # --- malformed output: surfaced as warning, loop breaks --------------------
 
 def test_malformed_result_breaks_loop_with_warning(env):
-    c = env["centella"]
+    c = env["pila"]
     # residual without files_read — cross-field invariant violation.
     bad = _clean_result(rule_violations_residual=[{"rule": "x",
                                                    "why_not_fixed": "y"}])
@@ -166,7 +166,7 @@ def test_malformed_result_breaks_loop_with_warning(env):
 # --- crash (None): surfaced as warning, loop breaks -----------------------
 
 def test_worker_crash_surfaces_as_warning(env):
-    c = env["centella"]
+    c = env["pila"]
     state = _stub_run_conformer(c, [None])
 
     res, warnings = asyncio.run(c._run_conformance_phase(
@@ -181,7 +181,7 @@ def test_worker_crash_surfaces_as_warning(env):
 # --- protected path: conformer commits get rolled back --------------------
 
 def test_protected_path_commit_is_rolled_back(env):
-    c = env["centella"]
+    c = env["pila"]
 
     def _bad_commit(wt: Path):
         """Simulate a conformer that wrote to .claude/ — a protected path."""
@@ -216,7 +216,7 @@ def test_rounds_cap_respected_with_residuals(env):
     orchestrator considers non-clean (e.g. build failed), the loop runs
     up to `caps[conformance_rounds]` times. Residuals are surfaced as
     warnings; nothing escalates to failed/blocked."""
-    c = env["centella"]
+    c = env["pila"]
     failing = _clean_result(
         rules_files_read=["README.md"],
         rule_violations_residual=[{"rule": "r", "why_not_fixed": "still bad"}],
@@ -240,7 +240,7 @@ def test_phase_never_returns_failed_status(env):
     """No matter what the conformer does, _run_conformance_phase returns
     (result_or_none, warnings_list) — never a status that could escalate
     the subtask to failed/blocked."""
-    c = env["centella"]
+    c = env["pila"]
     # Mix of crash, malformed, bad commits, residuals — none of these are
     # supposed to fail the subtask.
     state = _stub_run_conformer(c, [None])
@@ -259,7 +259,7 @@ def test_unprefixed_conformer_commits_surface_as_warnings(env):
     """A conformer that commits with a subject NOT prefixed `conformer:`
     must surface a warning, but must NOT trigger rollback. The commit
     content is still valid; only the discipline is lapsed."""
-    c = env["centella"]
+    c = env["pila"]
 
     def _unprefixed_commit(wt: Path):
         (wt / "docs.txt").write_text("doc\n")
@@ -290,7 +290,7 @@ def test_unprefixed_conformer_commits_surface_as_warnings(env):
 def test_prefixed_conformer_commits_do_not_warn(env):
     """A conformer that follows the discipline produces no prefix
     warning."""
-    c = env["centella"]
+    c = env["pila"]
 
     def _good_commit(wt: Path):
         (wt / "notes.txt").write_text("notes\n")
@@ -317,7 +317,7 @@ def test_bump_workers_exhaustion_surfaces_as_warning(env, monkeypatch):
     propagate up and crash the subtask. This pins the fix for the
     third-pass audit bug: bump_workers placement inside run_conformer's
     try block."""
-    c = env["centella"]
+    c = env["pila"]
     # Force the cap to a value already exceeded by st.data["worker_count"].
     env["st"].data["worker_count"] = 100
     env["st"].save()
@@ -357,12 +357,12 @@ def test_settle_subtask_never_escalates_on_conformer_crash(env, monkeypatch):
     tightens the contract verification beyond the inner-helper tests:
     those verify _run_conformance_phase returns advisory warnings; this
     verifies the caller actually honors that and doesn't re-escalate."""
-    c = env["centella"]
+    c = env["pila"]
 
     # Stub run_implementer to return a clean `complete` result without
     # actually spawning a worker. The worktree already has the implementer's
     # commit from the env fixture, so the per-subtask gates will pass.
-    async def _stub_implementer(sid, centella_dir, caps, st, models,
+    async def _stub_implementer(sid, pila_dir, caps, st, models,
                                 continuation=False, note=""):
         return {
             "subtask_id": sid,
@@ -392,9 +392,9 @@ def test_settle_subtask_never_escalates_on_conformer_residuals(env, monkeypatch)
     """Same outer contract under a different failure mode: the conformer
     reports residuals and failing build/lint/tests round after round
     until the cap is hit. The subtask still returns `complete`."""
-    c = env["centella"]
+    c = env["pila"]
 
-    async def _stub_implementer(sid, centella_dir, caps, st, models,
+    async def _stub_implementer(sid, pila_dir, caps, st, models,
                                 continuation=False, note=""):
         return {
             "subtask_id": sid,
@@ -430,10 +430,10 @@ def test_settle_subtask_survives_unexpected_exception_in_conformance(env, monkey
     splice has a broad try/except specifically to honor the advisory
     contract for any unexpected exception — including this one. Verify the
     subtask still returns `complete` with a warning."""
-    c = env["centella"]
+    c = env["pila"]
 
     # Stub run_implementer to short-circuit to a clean complete result.
-    async def _stub_implementer(sid, centella_dir, caps, st, models,
+    async def _stub_implementer(sid, pila_dir, caps, st, models,
                                 continuation=False, note=""):
         return {
             "subtask_id": sid,
@@ -468,7 +468,7 @@ def test_protected_path_rollback_warns_about_discarded_uncommitted(env):
     uncommitted changes to tracked files, the rollback (git reset --hard)
     will silently erase those uncommitted scribbles. The phase must surface
     a warning naming the discarded files BEFORE rolling back."""
-    c = env["centella"]
+    c = env["pila"]
 
     def _bad_with_uncommitted(wt: Path):
         # Commit a protected-path change (will trigger rollback).

@@ -2,18 +2,18 @@
 # finalize.sh <run-id> — verify the run branch is ready to push.
 #
 # Run from the repo root after every wave is integrated and the run branch
-# is green. The working branch is NOT modified locally — centella does not
-# merge into it. The PR opened by `push_and_open_pr()` (in centella.py) is
+# is green. The working branch is NOT modified locally — pila does not
+# merge into it. The PR opened by `push_and_open_pr()` (in pila.py) is
 # the proposed integration into the working branch.
 #
-# This script's job is narrow: confirm `centella/runs/<run-id>` exists and
+# This script's job is narrow: confirm `pila/runs/<run-id>` exists and
 # has at least one commit beyond the working branch. If it doesn't, the
 # orchestrator dies before attempting the push.
 set -euo pipefail
 
 RUN_ID="${1:?usage: finalize.sh <run-id>}"
-RUN_DIR=".centella/runs/${RUN_ID}"
-BRANCH="centella/runs/${RUN_ID}"
+RUN_DIR=".pila/runs/${RUN_ID}"
+BRANCH="pila/runs/${RUN_ID}"
 WORKING_BRANCH_FILE="${RUN_DIR}/working-branch"
 
 if [ ! -f "${WORKING_BRANCH_FILE}" ]; then

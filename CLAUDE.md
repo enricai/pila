@@ -7,7 +7,7 @@ code surface; read this file first.
 ## Tech stack
 
 Python 3.10+, stdlib-only orchestrator. Both install paths route the
-`centella` launcher through [`uv`](https://docs.astral.sh/uv/), which
+`pila` launcher through [`uv`](https://docs.astral.sh/uv/), which
 provisions a hermetic Python 3.12 — the user is never asked to install
 Python themselves. The launcher falls back to system `python3` for
 direct-git-clone users on Python 3.10+. The orchestrator shells out to
@@ -16,8 +16,8 @@ and uses git worktrees for parallel implementer isolation. `pytest` is
 the only dev dependency. See `docs/IMPLEMENTATION.md` §0 for the install
 surface.
 
-Centella is small (~1600 LOC) and stays small. All control flow lives in
-one file: `orchestrator/centella.py`.
+Pila is small (~1600 LOC) and stays small. All control flow lives in
+one file: `orchestrator/pila.py`.
 
 ## The three-layer rule (load-bearing — read first)
 
@@ -57,11 +57,11 @@ specify (update the spec first, then verify the code still conforms).
 ## The central principle: prompts are advisory, code enforces
 
 (`DESIGN.md` §12.) Any guarantee that *matters* and *can be checked
-mechanically* lives in `orchestrator/centella.py`, not in a worker
+mechanically* lives in `orchestrator/pila.py`, not in a worker
 prompt. A prompt can ask for any behavior, but a model can drift; a
 real Python check cannot.
 
-Do not move a check from `centella.py` into a prompt to "make the prompt
+Do not move a check from `pila.py` into a prompt to "make the prompt
 smarter" — that is the wrong direction. The reverse is correct: a
 prompt-level rule that turns out to matter should become a code check
 with the prompt downgraded to documentation.
@@ -76,13 +76,13 @@ orchestrator and not used anywhere in this repo.
 ## Mandatory requirements
 
 - **Worker outputs are JSON-schema-validated.** New worker types must
-  define a schema in `SCHEMAS` (centella.py:76+) and pass it via
+  define a schema in `SCHEMAS` (pila.py:76+) and pass it via
   `--json-schema` in `claude_p()`.
 - **Caps are real Python counters in `DEFAULT_CAPS`**, not prompt
   instructions. Adding a new cap means adding a counter and a check, not
   asking a worker to bound itself.
 - **All run state goes through the `State` class.** Never write to
-  `.centella/state.json` directly — `State.save()` writes a temp file then
+  `.pila/state.json` directly — `State.save()` writes a temp file then
   `os.replace()`s it for atomicity. The orchestrator runs on a single asyncio
   event loop, so no lock is needed: coroutines only interleave at `await`
   points and never inside a `st.data[k] = v; st.save()` pair.
@@ -90,9 +90,9 @@ orchestrator and not used anywhere in this repo.
   `gather_answers`.** Anything reading `answers["source_of_truth"]` can
   trust the value is in `SOURCE_OF_TRUTH_VALUES` (`codebase` /
   `research` / `both`).
-- **Don't write to `.centella/` from inside a subtask worktree.** The
+- **Don't write to `.pila/` from inside a subtask worktree.** The
   worktree is disposable; coordination state must outlive it. The
-  orchestrator writes to `.centella/`; workers commit code to their
+  orchestrator writes to `.pila/`; workers commit code to their
   worktree branch only.
 
 ## Code style
@@ -106,9 +106,9 @@ orchestrator and not used anywhere in this repo.
   `gather_answers()` — `log()`'s timestamp prefix would mangle a question
   rendered next to `input("  > ")`. Never `sys.exit(...)` directly (use `die`)
   *except* for documented non-error structured exits like
-  `EXIT_NEEDS_ANSWERS=10`, where `die()`'s `centella: error:` prefix would
+  `EXIT_NEEDS_ANSWERS=10`, where `die()`'s `pila: error:` prefix would
   mislabel a non-error deferred-clarification signal. Both helpers live in
-  `centella.py`.
+  `pila.py`.
 - **Type hints** on every function signature. Use PEP 604 union syntax
   (`str | None`, not `Optional[str]`) — Python 3.10+ is the minimum.
 - **Comments explain *why*, not *what*.** Well-named identifiers
@@ -121,10 +121,10 @@ orchestrator and not used anywhere in this repo.
 ## File layout
 
 ```
-orchestrator/centella.py    All orchestrator control flow (single file by design)
+orchestrator/pila.py    All orchestrator control flow (single file by design)
 prompts/*.md                System prompts for each worker type
 scripts/*.sh                Git worktree mechanics (setup, integrate, finalize, cleanup)
-commands/centella.md        Thin plugin skill — launches the orchestrator
+commands/pila.md        Thin plugin skill — launches the orchestrator
 docs/DESIGN.md              Architecture and reasoning
 docs/IMPLEMENTATION.md      Current code surface
 tests/                      pytest suite
@@ -134,52 +134,52 @@ tests/                      pytest suite
 
 ```bash
 # Install (one command — pick one):
-#   Inside Claude Code:  /plugin marketplace add enricai/centella
-#                        /plugin install centella@enricai-centella
-#   From a terminal:     curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh | bash
+#   Inside Claude Code:  /plugin marketplace add enricai/pila
+#                        /plugin install pila@enricai-pila
+#   From a terminal:     curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash
 # See README "Install" for details.
 
 # Run on a task in the current git repo:
-./centella "Fix the login timeout bug and add a regression test"
+./pila "Fix the login timeout bug and add a regression test"
 
 # Resume after an interruption:
-./centella --resume
+./pila --resume
 
 # Override the default source-of-truth preference (`both`) with an env
 # var, the CLI flag, or a per-repo file:
-export CENTELLA_SOURCE_OF_TRUTH=codebase   # or: research, both
-./centella "task" --source-of-truth codebase
-# …or commit a centella.toml at the repo root with: source_of_truth = codebase
+export PILA_SOURCE_OF_TRUTH=codebase   # or: research, both
+./pila "task" --source-of-truth codebase
+# …or commit a pila.toml at the repo root with: source_of_truth = codebase
 
 # Choose the model. Without overrides: judgment workers (classifier,
 # planner, reconciler, integrator) default to opus; acting workers
 # (implementer, conformer) default to sonnet. Per-worker overrides
-# exist via --model-<worker> / CENTELLA_MODEL_<WORKER>. See
+# exist via --model-<worker> / PILA_MODEL_<WORKER>. See
 # docs/IMPLEMENTATION.md §2 "Model selection" for the full table.
-export CENTELLA_MODEL=sonnet               # or: opus, haiku
-./centella "task" --model opus
-./centella "task" --model-implementer opus --model-classifier haiku
+export PILA_MODEL=sonnet               # or: opus, haiku
+./pila "task" --model opus
+./pila "task" --model-implementer opus --model-classifier haiku
 
 # Dial how persistent each planner/implementer is at building confidence
 # before exiting blocked (default 8 rounds; see DESIGN.md §8). CLI flag,
-# env var, or `confidence_rounds = N` in centella.toml.
-export CENTELLA_CONFIDENCE_ROUNDS=12
-./centella "task" --confidence-rounds 12
+# env var, or `confidence_rounds = N` in pila.toml.
+export PILA_CONFIDENCE_ROUNDS=12
+./pila "task" --confidence-rounds 12
 
 # Raise the per-run worker-invocation budget (default 60). Same precedence
-# as confidence-rounds: CLI > env > centella.toml.
-export CENTELLA_MAX_WORKERS=80
-./centella "task" --max-workers 80
+# as confidence-rounds: CLI > env > pila.toml.
+export PILA_MAX_WORKERS=80
+./pila "task" --max-workers 80
 
 # Skip the live `claude -p` smoke test during development:
-./centella "task" --skip-smoke
+./pila "task" --skip-smoke
 
 # Verbosity: default is `stream` (one-line summary per worker event).
-# Per-worker .centella/logs/<sid>.log files are always written.
-./centella "task" -q       # normal (pre-streaming terse output)
-./centella "task" -qq      # quiet (errors + phase boundaries only)
-./centella "task" -vv      # debug (raw event payloads + tool I/O)
-export CENTELLA_VERBOSITY=normal  # sticky default
+# Per-worker .pila/logs/<sid>.log files are always written.
+./pila "task" -q       # normal (pre-streaming terse output)
+./pila "task" -qq      # quiet (errors + phase boundaries only)
+./pila "task" -vv      # debug (raw event payloads + tool I/O)
+export PILA_VERBOSITY=normal  # sticky default
 ```
 
 ## Testing
@@ -204,7 +204,7 @@ Before marking a change complete:
       described there.
 - [ ] Update `DESIGN.md` only if the architecture itself changed.
 - [ ] `pytest tests/` — all pass.
-- [ ] `python3 -c "import ast; ast.parse(open('orchestrator/centella.py').read())"`
+- [ ] `python3 -c "import ast; ast.parse(open('orchestrator/pila.py').read())"`
       as a static check.
 - [ ] `grep -rn <removed-string> .` — confirm no stragglers if the change
       renamed or removed a string used elsewhere.
@@ -215,7 +215,7 @@ Before marking a change complete:
       are valid JSON and all referenced skill/command paths still exist.
       The `version` field is duplicated across the two manifests;
       `tests/test_version_flag.py` guards them from drifting.
-- [ ] `python3 -c 'import json; [json.loads(l) for l in open(".centella/runs/<run>/calls.ndjson")]'`
+- [ ] `python3 -c 'import json; [json.loads(l) for l in open(".pila/runs/<run>/calls.ndjson")]'`
       — if the telemetry writer (`capture_llm_call`) was touched, confirm a
       representative run produces a well-formed `calls.ndjson` (each line
       valid JSON with at least `call_type`, `prompt`, and `response` keys).

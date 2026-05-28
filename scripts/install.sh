@@ -1,43 +1,43 @@
 #!/usr/bin/env bash
-# install.sh — one-command installer for Centella.
+# install.sh — one-command installer for Pila.
 #
-#   curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash
 #
 # What this does, in order:
 #   1. Verifies `git` and `claude` are on PATH (Python is NOT a prereq — uv provisions it).
 #   2. Installs `uv` (https://docs.astral.sh/uv/) if missing, via Astral's official installer.
 #   3. Provisions a hermetic Python 3.12 via `uv python install 3.12`.
-#   4. Clones (or fast-forwards) enricai/centella into $CENTELLA_HOME (default ~/.centella).
-#   5. Symlinks $CENTELLA_HOME/centella into ~/.local/bin/centella.
-#   6. Verifies the install with `centella --version`.
+#   4. Clones (or fast-forwards) enricai/pila into $PILA_HOME (default ~/.pila).
+#   5. Symlinks $PILA_HOME/pila into ~/.local/bin/pila.
+#   6. Verifies the install with `pila --version`.
 #
 # Flags:
 #   --dry-run        Print actions without executing.
-#   --prefix DIR     Install Centella under DIR (default: $CENTELLA_HOME or ~/.centella).
+#   --prefix DIR     Install Pila under DIR (default: $PILA_HOME or ~/.pila).
 #   --bin-dir DIR    Symlink dir (default: ~/.local/bin).
 #   --ref REF        Git ref to install (default: main).
 #   --help           Show this message and exit.
 #
 # Env vars:
-#   CENTELLA_HOME      Install directory (default ~/.centella). --prefix overrides.
-#   CENTELLA_BIN_DIR   Symlink directory (default ~/.local/bin). --bin-dir overrides.
-#   CENTELLA_REPO_URL  Repo URL to clone (default https://github.com/enricai/centella.git).
+#   PILA_HOME      Install directory (default ~/.pila). --prefix overrides.
+#   PILA_BIN_DIR   Symlink directory (default ~/.local/bin). --bin-dir overrides.
+#   PILA_REPO_URL  Repo URL to clone (default https://github.com/enricai/pila.git).
 set -euo pipefail
 
 # --- defaults ------------------------------------------------------------
 
 # Guard against an unset HOME (some CI containers, broken cron envs, minimal
-# Docker images). Without this, $HOME/.centella expands to /.centella and the
+# Docker images). Without this, $HOME/.pila expands to /.pila and the
 # install silently tries to write under the root filesystem.
-: "${HOME:?HOME is unset; cannot compute install prefix. Set HOME (or CENTELLA_HOME + CENTELLA_BIN_DIR) and retry.}"
+: "${HOME:?HOME is unset; cannot compute install prefix. Set HOME (or PILA_HOME + PILA_BIN_DIR) and retry.}"
 
-DEFAULT_REPO_URL="https://github.com/enricai/centella.git"
+DEFAULT_REPO_URL="https://github.com/enricai/pila.git"
 DEFAULT_REF="main"
 DEFAULT_PYTHON="3.12"
 
-PREFIX="${CENTELLA_HOME:-$HOME/.centella}"
-BIN_DIR="${CENTELLA_BIN_DIR:-$HOME/.local/bin}"
-REPO_URL="${CENTELLA_REPO_URL:-$DEFAULT_REPO_URL}"
+PREFIX="${PILA_HOME:-$HOME/.pila}"
+BIN_DIR="${PILA_BIN_DIR:-$HOME/.local/bin}"
+REPO_URL="${PILA_REPO_URL:-$DEFAULT_REPO_URL}"
 REF="$DEFAULT_REF"
 DRY_RUN=false
 
@@ -45,29 +45,29 @@ DRY_RUN=false
 
 usage() {
   cat <<'EOF'
-install.sh — one-command installer for Centella.
+install.sh — one-command installer for Pila.
 
-  curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash
 
 What this does, in order:
   1. Verifies `git` and `claude` are on PATH (Python is NOT a prereq — uv provisions it).
   2. Installs `uv` (https://docs.astral.sh/uv/) if missing, via Astral's official installer.
   3. Provisions a hermetic Python 3.12 via `uv python install 3.12`.
-  4. Clones (or fast-forwards) enricai/centella into $CENTELLA_HOME (default ~/.centella).
-  5. Symlinks $CENTELLA_HOME/centella into ~/.local/bin/centella.
-  6. Verifies the install with `centella --version`.
+  4. Clones (or fast-forwards) enricai/pila into $PILA_HOME (default ~/.pila).
+  5. Symlinks $PILA_HOME/pila into ~/.local/bin/pila.
+  6. Verifies the install with `pila --version`.
 
 Flags:
   --dry-run        Print actions without executing.
-  --prefix DIR     Install Centella under DIR (default: $CENTELLA_HOME or ~/.centella).
+  --prefix DIR     Install Pila under DIR (default: $PILA_HOME or ~/.pila).
   --bin-dir DIR    Symlink dir (default: ~/.local/bin).
   --ref REF        Git ref to install (default: main).
   --help           Show this message and exit.
 
 Env vars:
-  CENTELLA_HOME      Install directory (default ~/.centella). --prefix overrides.
-  CENTELLA_BIN_DIR   Symlink directory (default ~/.local/bin). --bin-dir overrides.
-  CENTELLA_REPO_URL  Repo URL to clone (default https://github.com/enricai/centella.git).
+  PILA_HOME      Install directory (default ~/.pila). --prefix overrides.
+  PILA_BIN_DIR   Symlink directory (default ~/.local/bin). --bin-dir overrides.
+  PILA_REPO_URL  Repo URL to clone (default https://github.com/enricai/pila.git).
 EOF
 }
 
@@ -103,7 +103,7 @@ remediate_git() {
 
 remediate_claude() {
   err "claude CLI is missing. Install Claude Code from https://claude.ai/code"
-  err "Centella shells out to \`claude -p\` for every unit of LLM work; there is no fallback."
+  err "Pila shells out to \`claude -p\` for every unit of LLM work; there is no fallback."
 }
 
 remediate_curl() {
@@ -185,7 +185,7 @@ run uv python install "$DEFAULT_PYTHON"
 # --- 4. clone or update --------------------------------------------------
 
 if [ -d "$PREFIX/.git" ]; then
-  log "updating existing Centella checkout at $PREFIX"
+  log "updating existing Pila checkout at $PREFIX"
   run git -C "$PREFIX" fetch origin
   run git -C "$PREFIX" checkout "$REF"
   run git -C "$PREFIX" pull --ff-only origin "$REF"
@@ -200,13 +200,13 @@ fi
 
 # --- 5. symlink launcher into bin dir ------------------------------------
 
-log "symlinking $PREFIX/centella into $BIN_DIR/centella"
+log "symlinking $PREFIX/pila into $BIN_DIR/pila"
 run mkdir -p "$BIN_DIR"
-LAUNCHER="$PREFIX/centella"
-LINK="$BIN_DIR/centella"
+LAUNCHER="$PREFIX/pila"
+LINK="$BIN_DIR/pila"
 # Clobber any pre-existing file/symlink at $LINK so re-runs are idempotent.
-# $BIN_DIR/centella is a path this installer owns by virtue of installing
-# Centella; if a user wants a custom file there, --bin-dir is the escape hatch.
+# $BIN_DIR/pila is a path this installer owns by virtue of installing
+# Pila; if a user wants a custom file there, --bin-dir is the escape hatch.
 if [ -L "$LINK" ] || [ -f "$LINK" ]; then
   run rm -f "$LINK"
 fi
@@ -237,12 +237,12 @@ esac
 
 log "verifying install"
 if [ "$DRY_RUN" = "false" ]; then
-  # Run the launcher we just symlinked, not whatever `centella` already
+  # Run the launcher we just symlinked, not whatever `pila` already
   # exists on PATH — proves *this* install works end-to-end.
   if "$LINK" --version; then
-    log "done. Run \`centella \"your task\"\` from any git repository to start."
+    log "done. Run \`pila \"your task\"\` from any git repository to start."
   else
-    err "centella --version failed. The install completed but the binary is not runnable."
+    err "pila --version failed. The install completed but the binary is not runnable."
     exit 1
   fi
 else

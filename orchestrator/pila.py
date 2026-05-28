@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Centella — deterministic task orchestrator for Claude Code.
+Pila — deterministic task orchestrator for Claude Code.
 
 Runs entirely on the Claude Code CLI / subscription. Every unit of LLM work is
 a `claude -p` headless invocation. This script owns ALL control flow — phase
@@ -11,10 +11,10 @@ Each worker is a separate `claude -p` process, so there is no subagent nesting
 anywhere. The script is the orchestrator; each `claude -p` call is a leaf.
 
 Usage:
-    centella "<task description>"
-    centella --resume
-    centella "<task>" --answers answers.json
-    centella "<task>" --clarify             # opt into surfacing intent questions
+    pila "<task description>"
+    pila --resume
+    pila "<task>" --answers answers.json
+    pila "<task>" --clarify             # opt into surfacing intent questions
 
 Run it from the root of the target git repository.
 """
@@ -35,7 +35,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent       # centella plugin/repo root
+ROOT = Path(__file__).resolve().parent.parent       # pila plugin/repo root
 PROMPTS = ROOT / "prompts"
 SCRIPTS = ROOT / "scripts"
 
@@ -96,7 +96,7 @@ DEFAULT_CAPS = {
     "worker_timeout_sec": 5400,     # 90 minutes per worker process
     # Worker-internal evidence-gate iterations for planner and implementer
     # (DESIGN §8 + §13). User-tunable via --confidence-rounds /
-    # CENTELLA_CONFIDENCE_ROUNDS / centella.toml; see IMPLEMENTATION.md §2
+    # PILA_CONFIDENCE_ROUNDS / pila.toml; see IMPLEMENTATION.md §2
     # "Confidence rounds". The orchestrator does not count these iterations
     # — the cap is passed into each worker's prompt and the worker bounds
     # itself. Surfacing the knob is for tuning persistence, not for
@@ -141,17 +141,17 @@ CATEGORY_ABBREV = {
     "documentation": "docs",
 }
 
-# Paths an implementer (or conformer) may never write to. `.centella/` and
+# Paths an implementer (or conformer) may never write to. `.pila/` and
 # `.git/` are coordination-only — the run state lives in the former, git
 # plumbing in the latter; neither is the implementer's surface. Inside
 # `.claude/`, the three documented user-deliverable subtrees are exempt
 # (`agents/`, `commands/`, `skills/`) because they ARE legitimate
-# deliverables — centella's own self-healing skill, for instance, instructs
+# deliverables — pila's own self-healing skill, for instance, instructs
 # consumers to write a subagent file at `.claude/agents/<name>.md`.
 # Top-level `.claude/` files (`settings.json`, `settings.local.json`,
 # any future per-session state) stay protected — they are coordination
 # and config, not deliverable customizations. See DESIGN §9.
-_PROTECTED_PREFIXES = (".centella/", ".git/")
+_PROTECTED_PREFIXES = (".pila/", ".git/")
 _CLAUDE_DELIVERABLE_PREFIXES = (
     ".claude/agents/", ".claude/commands/", ".claude/skills/",
 )
@@ -197,62 +197,62 @@ ACT_TOOLS = f"{_READ_BASE},Bash,Write,Edit"
 # so cross-repo references like "~/src/enric/beacon" fail with "blocked,
 # outside allowed working directories". Repeatable on the CLI; env var is
 # colon-separated; TOML key is a comma-separated string. Empty by default.
-INSPECT_DIRS_ENV = "CENTELLA_INSPECT_DIRS"
-INSPECT_DIRS_FILE = "centella.toml"
+INSPECT_DIRS_ENV = "PILA_INSPECT_DIRS"
+INSPECT_DIRS_FILE = "pila.toml"
 
 EXIT_NEEDS_ANSWERS = 10   # emitted when clarification is needed but no TTY
 
 # Source-of-truth preference — see DESIGN.md §11. Resolution order:
-# --source-of-truth CLI flag → CENTELLA_SOURCE_OF_TRUTH env var →
-# per-repo centella.toml → 'both'. CLI/env are session knobs, so they
+# --source-of-truth CLI flag → PILA_SOURCE_OF_TRUTH env var →
+# per-repo pila.toml → 'both'. CLI/env are session knobs, so they
 # outrank the committed file default. The preference is never surfaced
 # as an interactive question: any explicit setting overrides the
 # default, and unset means the caller implicitly accepted 'both'.
 SOURCE_OF_TRUTH_VALUES = ("codebase", "research", "both")
-SOURCE_OF_TRUTH_ENV = "CENTELLA_SOURCE_OF_TRUTH"
-SOURCE_OF_TRUTH_FILE = "centella.toml"
+SOURCE_OF_TRUTH_ENV = "PILA_SOURCE_OF_TRUTH"
+SOURCE_OF_TRUTH_FILE = "pila.toml"
 
 # Confidence-rounds preference — see IMPLEMENTATION.md §2 "Confidence
 # rounds". Resolution order: --confidence-rounds CLI flag →
-# CENTELLA_CONFIDENCE_ROUNDS env var → centella.toml → DEFAULT_CAPS
+# PILA_CONFIDENCE_ROUNDS env var → pila.toml → DEFAULT_CAPS
 # fallback. The TOML file is shared with source-of-truth and model
 # resolution.
-CONFIDENCE_ROUNDS_ENV = "CENTELLA_CONFIDENCE_ROUNDS"
+CONFIDENCE_ROUNDS_ENV = "PILA_CONFIDENCE_ROUNDS"
 CONFIDENCE_ROUNDS_FILE = SOURCE_OF_TRUTH_FILE
 
 # max-workers preference. Same resolution shape as confidence_rounds.
-# CLI --max-workers wins; then CENTELLA_MAX_WORKERS env; then max_workers
-# in centella.toml; then DEFAULT_CAPS fallback.
-MAX_WORKERS_ENV = "CENTELLA_MAX_WORKERS"
+# CLI --max-workers wins; then PILA_MAX_WORKERS env; then max_workers
+# in pila.toml; then DEFAULT_CAPS fallback.
+MAX_WORKERS_ENV = "PILA_MAX_WORKERS"
 MAX_WORKERS_FILE = SOURCE_OF_TRUTH_FILE
 
 # --no-push preference (DESIGN §6 "Push + PR"): skip the push + open-PR
-# step at finalize. Resolution order: --no-push CLI flag → CENTELLA_NO_PUSH
-# env → no_push in centella.toml → default False.
+# step at finalize. Resolution order: --no-push CLI flag → PILA_NO_PUSH
+# env → no_push in pila.toml → default False.
 # --no-verify is CLI-only (no env/TOML mirror) to match CLAUDE.md's
 # "never skip hooks unless asked" principle — env/TOML defaults for
 # hook-skipping would dilute the "user explicitly asked" semantics.
-NO_PUSH_ENV = "CENTELLA_NO_PUSH"
+NO_PUSH_ENV = "PILA_NO_PUSH"
 NO_PUSH_FILE = SOURCE_OF_TRUTH_FILE
 
 # --clarify preference (DESIGN §11): opt into surfacing intent questions
-# to the user. Resolution order: --clarify CLI flag → CENTELLA_CLARIFY
-# env → clarify in centella.toml → default False. Same precedence and
+# to the user. Resolution order: --clarify CLI flag → PILA_CLARIFY
+# env → clarify in pila.toml → default False. Same precedence and
 # parse rules as --no-push; mirrored env+TOML because "ask me questions"
 # is a stable per-user preference, unlike --no-verify (a per-invocation
 # safety override).
-CLARIFY_ENV = "CENTELLA_CLARIFY"
+CLARIFY_ENV = "PILA_CLARIFY"
 CLARIFY_FILE = SOURCE_OF_TRUTH_FILE
 
 # Verbosity — see IMPLEMENTATION.md §2 "Verbosity". Four levels with
 # stackable -v/-q shortcuts following the clig.dev / cargo / kubectl
-# convention. Default is `stream` because the user invoking centella
-# is opening to watch; -q drops to centella's pre-streaming behavior;
+# convention. Default is `stream` because the user invoking pila
+# is opening to watch; -q drops to pila's pre-streaming behavior;
 # -qq goes fully quiet (errors still emit per clig.dev "errors emit at
 # every level" anti-pattern guard).
 VERBOSITY_VALUES = ("quiet", "normal", "stream", "debug")
 VERBOSITY_DEFAULT = "stream"
-VERBOSITY_ENV = "CENTELLA_VERBOSITY"
+VERBOSITY_ENV = "PILA_VERBOSITY"
 VERBOSITY_FILE = SOURCE_OF_TRUTH_FILE
 
 # Subtask statuses that count as "done" for the progress counter.
@@ -266,9 +266,9 @@ MODEL_VALUES = ("sonnet", "opus", "haiku")
 # Global default. Used when no per-worker default applies. DESIGN §5 +
 # IMPLEMENTATION.md §2: judgment workers (everything except implementer)
 # run on Opus by default; implementer's per-worker default is sonnet.
-# Users can override globally with --model / CENTELLA_MODEL / `model =`
-# in centella.toml, or per-worker with --model-<worker> /
-# CENTELLA_MODEL_<WORKER> / `model_<worker> =`.
+# Users can override globally with --model / PILA_MODEL / `model =`
+# in pila.toml, or per-worker with --model-<worker> /
+# PILA_MODEL_<WORKER> / `model_<worker> =`.
 MODEL_DEFAULT = "opus"
 # Per-worker defaults applied *after* user overrides (CLI/env/TOML) but
 # *before* the global MODEL_DEFAULT fallback. Only workers that need a
@@ -279,45 +279,45 @@ MODEL_DEFAULT_PER_WORKER = {
     "judge": "sonnet",
     "heal": "sonnet",
 }
-MODEL_ENV = "CENTELLA_MODEL"
-MODEL_FILE = "centella.toml"
+MODEL_ENV = "PILA_MODEL"
+MODEL_FILE = "pila.toml"
 WORKER_TYPES = ("classifier", "planner", "reconciler", "implementer",
                 "integrator", "conformer")
 # Post-run skill workers — not in WORKER_TYPES because they don't run inside
 # the main orchestrate loop, but they do get dedicated model resolution via
 # --judge-model / --heal-model (and their env / TOML mirrors).
-MODEL_JUDGE_ENV = "CENTELLA_MODEL_JUDGE"
-MODEL_HEAL_ENV = "CENTELLA_MODEL_HEAL"
+MODEL_JUDGE_ENV = "PILA_MODEL_JUDGE"
+MODEL_HEAL_ENV = "PILA_MODEL_HEAL"
 
 # Telemetry enabled/disabled — see IMPLEMENTATION.md §2 "Telemetry".
-# Resolution order: --telemetry/--no-telemetry CLI → CENTELLA_TELEMETRY env →
-# telemetry in centella.toml → True (on by default). NDJSON events land in
-# <run-dir>/<telemetry_subdir>/ which is already under .centella/ and thus
+# Resolution order: --telemetry/--no-telemetry CLI → PILA_TELEMETRY env →
+# telemetry in pila.toml → True (on by default). NDJSON events land in
+# <run-dir>/<telemetry_subdir>/ which is already under .pila/ and thus
 # covered by the existing .gitignore exclusion.
 TELEMETRY_DEFAULT = True
-TELEMETRY_ENV = "CENTELLA_TELEMETRY"
-TELEMETRY_FILE = "centella.toml"
+TELEMETRY_ENV = "PILA_TELEMETRY"
+TELEMETRY_FILE = "pila.toml"
 
 # Telemetry event subdir — the directory name appended to <run-dir> where
 # NDJSON event files are written. Resolution order: --telemetry-dir CLI →
-# CENTELLA_TELEMETRY_DIR env → telemetry_dir in centella.toml → "events".
+# PILA_TELEMETRY_DIR env → telemetry_dir in pila.toml → "events".
 TELEMETRY_SUBDIR_DEFAULT = "events"
-TELEMETRY_SUBDIR_ENV = "CENTELLA_TELEMETRY_DIR"
-TELEMETRY_SUBDIR_FILE = "centella.toml"
+TELEMETRY_SUBDIR_ENV = "PILA_TELEMETRY_DIR"
+TELEMETRY_SUBDIR_FILE = "pila.toml"
 
 # Judge output directory name — relative to <run-dir>. Holds LLM judge
-# output files. Resolution order: --judge-dir CLI → CENTELLA_JUDGE_DIR env →
-# judge_dir in centella.toml → "judge-out".
+# output files. Resolution order: --judge-dir CLI → PILA_JUDGE_DIR env →
+# judge_dir in pila.toml → "judge-out".
 JUDGE_DIR_DEFAULT = "judge-out"
-JUDGE_DIR_ENV = "CENTELLA_JUDGE_DIR"
-JUDGE_DIR_FILE = "centella.toml"
+JUDGE_DIR_ENV = "PILA_JUDGE_DIR"
+JUDGE_DIR_FILE = "pila.toml"
 
 # Heal output directory name — relative to <run-dir>. Holds LLM self-heal
-# loop output files. Resolution order: --heal-dir CLI → CENTELLA_HEAL_DIR env →
-# heal_dir in centella.toml → "heal-out".
+# loop output files. Resolution order: --heal-dir CLI → PILA_HEAL_DIR env →
+# heal_dir in pila.toml → "heal-out".
 HEAL_DIR_DEFAULT = "heal-out"
-HEAL_DIR_ENV = "CENTELLA_HEAL_DIR"
-HEAL_DIR_FILE = "centella.toml"
+HEAL_DIR_ENV = "PILA_HEAL_DIR"
+HEAL_DIR_FILE = "pila.toml"
 
 # Heal-loop convergence knobs — see IMPLEMENTATION.md §2 "Heal-loop convergence
 # parameters". User-tunable knobs use the standard CLI/env/TOML/default
@@ -327,10 +327,10 @@ HEAL_SUCCESS_THRESHOLD_DEFAULT = 0.9  # pass-rate bar for SUCCESS verdict
 HEAL_PLATEAU_WINDOW_DEFAULT = 3     # look-back window for plateau detection
 HEAL_PLATEAU_DELTA_DEFAULT = 0.03   # minimum improvement to avoid plateau
 HEAL_N_REPLAYS_DEFAULT = 5          # replays per sample per iteration
-HEAL_MAX_ROUNDS_ENV = "CENTELLA_HEAL_MAX_ROUNDS"
-HEAL_SUCCESS_THRESHOLD_ENV = "CENTELLA_HEAL_SUCCESS_THRESHOLD"
-HEAL_MAX_ROUNDS_FILE = "centella.toml"
-HEAL_SUCCESS_THRESHOLD_FILE = "centella.toml"
+HEAL_MAX_ROUNDS_ENV = "PILA_HEAL_MAX_ROUNDS"
+HEAL_SUCCESS_THRESHOLD_ENV = "PILA_HEAL_SUCCESS_THRESHOLD"
+HEAL_MAX_ROUNDS_FILE = "pila.toml"
+HEAL_SUCCESS_THRESHOLD_FILE = "pila.toml"
 
 
 
@@ -777,11 +777,11 @@ def now() -> str:
 
 
 def log(msg: str) -> None:
-    print(f"[centella {datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[pila {datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def die(msg: str, code: int = 1):
-    print(f"centella: error: {msg}", file=sys.stderr, flush=True)
+    print(f"pila: error: {msg}", file=sys.stderr, flush=True)
     sys.exit(code)
 
 
@@ -819,8 +819,8 @@ def _cleanup_on_abnormal_exit(st: "State", *, full_purge: bool) -> None:
     failures are caught — one bad worktree shouldn't block the others.
 
     If `full_purge` is True (the user's explicit Ctrl-C gesture):
-    additionally delete the run branch (`centella/runs/<run-id>`) and
-    every subtask branch (`centella/subtasks/<run-id>/*`), and
+    additionally delete the run branch (`pila/runs/<run-id>`) and
+    every subtask branch (`pila/subtasks/<run-id>/*`), and
     recursively remove `st.run_dir`. The run is gone; `--resume` can't
     recover it.
 
@@ -858,12 +858,12 @@ def _cleanup_on_abnormal_exit(st: "State", *, full_purge: bool) -> None:
     if not full_purge:
         return
     # Full purge: delete branches and the run dir. The run branch lives
-    # at centella/runs/<run-id> and subtask branches under
-    # centella/subtasks/<run-id>/<sid> — see compute_run_branch for the
+    # at pila/runs/<run-id> and subtask branches under
+    # pila/subtasks/<run-id>/<sid> — see compute_run_branch for the
     # namespace-disjointness rationale.
     branch_globs = [
-        f"refs/heads/centella/runs/{st.run_id}",
-        f"refs/heads/centella/subtasks/{st.run_id}/",
+        f"refs/heads/pila/runs/{st.run_id}",
+        f"refs/heads/pila/subtasks/{st.run_id}/",
     ]
     for glob in branch_globs:
         r = subprocess.run(
@@ -909,7 +909,7 @@ def _check_claude_cli_version() -> None:
         return  # unrecognized format — defer to smoke test
     if found < MIN_CLAUDE_CLI:
         die(
-            f"claude CLI {'.'.join(map(str, found))} is too old; centella "
+            f"claude CLI {'.'.join(map(str, found))} is too old; pila "
             f"requires >= {'.'.join(map(str, MIN_CLAUDE_CLI))} for "
             "--json-schema (introduced for `claude -p` in v2.1.22). "
             "Upgrade with the native installer: "
@@ -950,9 +950,9 @@ def _check_gh_cli(no_push: bool) -> None:
 
 # --- run identifier (DESIGN §6 "The run identifier") --------------------
 #
-# A run_id namespaces a single centella invocation across its branch
-# (`centella/runs/<run-id>`), state directory (`.centella/runs/<run-id>/`),
-# and PR title (`centella: <run-id>`). Built from three deterministic
+# A run_id namespaces a single pila invocation across its branch
+# (`pila/runs/<run-id>`), state directory (`.pila/runs/<run-id>/`),
+# and PR title (`pila: <run-id>`). Built from three deterministic
 # inputs known by the end of Phase 1: short-category abbrev, sanitized
 # task slug, and a 6-hex digest of `started_at`. Two concurrent runs
 # in the same repo produce two different run_ids by construction.
@@ -1034,15 +1034,15 @@ def compute_run_id(categories: list[str], task: str, started_at: str) -> str:
 def compute_run_branch(run_id: str) -> str:
     """The git branch name carrying a run's integrated work.
 
-    The `centella/runs/` prefix is **mandatory**, not cosmetic. Subtask
-    branches live under the sibling prefix `centella/subtasks/<run-id>/<sid>`
+    The `pila/runs/` prefix is **mandatory**, not cosmetic. Subtask
+    branches live under the sibling prefix `pila/subtasks/<run-id>/<sid>`
     (see `compute_subtask_branch`). Git's loose ref store represents each
     ref as a file inside `refs/heads/…/`, so a ref AT a path and a ref
     UNDER that same path cannot coexist. If both lived under
-    `centella/<run-id>` the first `git worktree add` for a subtask would
+    `pila/<run-id>` the first `git worktree add` for a subtask would
     fail with `cannot lock ref …`. The disjoint `runs/` and `subtasks/`
     sub-namespaces make that collision structurally impossible."""
-    return f"centella/runs/{run_id}"
+    return f"pila/runs/{run_id}"
 
 
 def compute_subtask_branch(run_id: str, sid: str) -> str:
@@ -1054,7 +1054,7 @@ def compute_subtask_branch(run_id: str, sid: str) -> str:
     same string; this helper exists so the shape is grep-able from
     Python and any future Python call site that needs a subtask branch
     name goes through one function."""
-    return f"centella/subtasks/{run_id}/{sid}"
+    return f"pila/subtasks/{run_id}/{sid}"
 
 
 # --- run.json sidecar invariants (IMPLEMENTATION.md §8) -----------------
@@ -1068,7 +1068,7 @@ def _validate_run_json(data: dict) -> None:
     3. If `pr_url` is set, `pushed_at` must be set (cannot have a PR
        without a successful push).
 
-    Raises ValueError on any violation. Caller (e.g., `centella --list`)
+    Raises ValueError on any violation. Caller (e.g., `pila --list`)
     decides whether to die, warn, or render as `status=corrupt-sidecar`."""
     if not isinstance(data, dict):
         raise ValueError("run.json must be a JSON object")
@@ -1136,9 +1136,9 @@ def compose_pr_body(state: dict, run_id: str) -> str:
         f"- Finished: {_or_na(finished_at)}\n"
         f"- Waves: {wave_count}, subtasks: {subtask_count}\n"
         f"- Workers: {_or_na(worker_count)}\n"
-        f"- Generated by centella on `{_or_na(working_branch)}`.\n"
+        f"- Generated by pila on `{_or_na(working_branch)}`.\n"
         "\n"
-        f"See `.centella/runs/{run_id}/state.json` for full run state.\n"
+        f"See `.pila/runs/{run_id}/state.json` for full run state.\n"
     )
 
 
@@ -1172,8 +1172,8 @@ def _write_run_json(run_dir: Path, **fields) -> None:
 
 # --- run discovery and resolution (DESIGN §6 multi-run resume) ----------
 
-def discover_runs(centella_root: Path) -> list[dict]:
-    """Enumerate `.centella/runs/*/state.json`, returning one summary
+def discover_runs(pila_root: Path) -> list[dict]:
+    """Enumerate `.pila/runs/*/state.json`, returning one summary
     dict per discovered run. Skip the `_bootstrap-*` directories silently
     (those are pre-classify, not real runs). Malformed state.json files
     are skipped with a logged warning, never raising.
@@ -1182,11 +1182,11 @@ def discover_runs(centella_root: Path) -> list[dict]:
     state.json path), `task`, `started_at`, `finished_at`, `categories`.
     Other state.json fields are passed through unchanged. Sorted by
     `started_at` descending (newest first) for stable display in
-    `centella --list`.
+    `pila --list`.
 
-    Pure read; no writes. Returns [] if `centella_root/runs` doesn't
+    Pure read; no writes. Returns [] if `pila_root/runs` doesn't
     exist."""
-    runs_dir = centella_root / "runs"
+    runs_dir = pila_root / "runs"
     if not runs_dir.is_dir():
         return []
     out: list[dict] = []
@@ -1215,7 +1215,7 @@ def discover_runs(centella_root: Path) -> list[dict]:
     return out
 
 
-def resolve_run_id(centella_root: Path, cli_run_id: str | None) -> str:
+def resolve_run_id(pila_root: Path, cli_run_id: str | None) -> str:
     """Pick the run_id to operate on. Used by `--resume` and `--list`.
 
     Policy (DESIGN §6 "the run branch is the resume contract"):
@@ -1227,7 +1227,7 @@ def resolve_run_id(centella_root: Path, cli_run_id: str | None) -> str:
 
     Never guesses across multiple runs. `--resume` against an ambiguous
     repo is a hard error, not a heuristic."""
-    runs = discover_runs(centella_root)
+    runs = discover_runs(pila_root)
     if cli_run_id is not None:
         for r in runs:
             if r["run_id"] == cli_run_id:
@@ -1235,12 +1235,12 @@ def resolve_run_id(centella_root: Path, cli_run_id: str | None) -> str:
         available = ", ".join(r["run_id"] for r in runs) or "(none)"
         die(
             f"--run-id {cli_run_id!r} does not match any known run. "
-            f"Available: {available}. Use `centella --list` to enumerate."
+            f"Available: {available}. Use `pila --list` to enumerate."
         )
     if not runs:
         die(
-            "no runs found under .centella/runs/. Start a new run with "
-            "`./centella \"<task>\"`."
+            "no runs found under .pila/runs/. Start a new run with "
+            "`./pila \"<task>\"`."
         )
     if len(runs) == 1:
         return runs[0]["run_id"]
@@ -1249,11 +1249,11 @@ def resolve_run_id(centella_root: Path, cli_run_id: str | None) -> str:
     )
     die(
         "multiple runs present; pass --run-id <id> to disambiguate:\n  "
-        f"{available}\nUse `centella --list` to see full details."
+        f"{available}\nUse `pila --list` to see full details."
     )
 
 
-# --- run status (consumed by `centella --list`) -------------------------
+# --- run status (consumed by `pila --list`) -------------------------
 
 # The seven derived statuses returned by `_derive_run_status`. Status is
 # *derived* from run.json + state.json fields, not stored, so the value
@@ -1303,21 +1303,21 @@ def _derive_run_status(run_json: dict | None, state_json: dict | None) -> str:
     return "in-progress"
 
 
-def list_runs(centella_root: Path) -> None:
+def list_runs(pila_root: Path) -> None:
     """Render a sortable columnar table of runs to stdout. Used by
-    `centella --list`. Reads run.json sidecar (commit 4) for status
+    `pila --list`. Reads run.json sidecar (commit 4) for status
     derivation; falls back to state.json fields for runs without a
     sidecar (e.g., extremely-early failures before the rename, though
     discover_runs filters those out)."""
-    runs = discover_runs(centella_root)
+    runs = discover_runs(pila_root)
     if not runs:
-        print("no runs under .centella/runs/")
+        print("no runs under .pila/runs/")
         return
     # Read each run's run.json sidecar.
     rows: list[tuple[str, str, str, str]] = []
     for state in runs:
         run_id = state["run_id"]
-        run_dir = centella_root / "runs" / run_id
+        run_dir = pila_root / "runs" / run_id
         run_json: dict | None = None
         sidecar = run_dir / "run.json"
         if sidecar.is_file():
@@ -1344,7 +1344,7 @@ def list_runs(centella_root: Path) -> None:
 
 
 def _read_toml_key(path: Path, key: str) -> str | None:
-    """Read a single `key = value` from a flat centella.toml. Returns
+    """Read a single `key = value` from a flat pila.toml. Returns
     None when the file does not exist or the key is absent. Strips
     matched surrounding double or single quotes from the value. Used
     by both source-of-truth and model resolvers — keeping one parser
@@ -1397,8 +1397,8 @@ def resolve_task_argument(raw: str) -> str:
 def resolve_source_of_truth(repo_root: Path,
                             cli_value: str | None = None) -> str:
     """Resolve the source-of-truth preference. Order:
-    --source-of-truth CLI flag → CENTELLA_SOURCE_OF_TRUTH env var →
-    centella.toml → default 'both'. argparse validates `cli_value` via
+    --source-of-truth CLI flag → PILA_SOURCE_OF_TRUTH env var →
+    pila.toml → default 'both'. argparse validates `cli_value` via
     choices=, so it is trusted when set. env and file values are
     rejected via die() if not in SOURCE_OF_TRUTH_VALUES — a bad
     config is caught at startup, not during a planner run."""
@@ -1423,8 +1423,8 @@ def resolve_source_of_truth(repo_root: Path,
 def resolve_confidence_rounds(repo_root: Path,
                               cli_value: int | None = None) -> int:
     """Resolve the confidence-rounds cap. Order:
-    --confidence-rounds CLI flag → CENTELLA_CONFIDENCE_ROUNDS env var →
-    centella.toml → DEFAULT_CAPS["confidence_rounds"]. argparse validates
+    --confidence-rounds CLI flag → PILA_CONFIDENCE_ROUNDS env var →
+    pila.toml → DEFAULT_CAPS["confidence_rounds"]. argparse validates
     `cli_value` is a positive int via `type=`, so it is trusted when set.
     env and file values are rejected via die() when not a positive int —
     bad config caught at startup, not during a planner run."""
@@ -1455,7 +1455,7 @@ def resolve_confidence_rounds(repo_root: Path,
 def resolve_max_workers(repo_root: Path,
                         cli_value: int | None = None) -> int:
     """Resolve the max-workers cap. Order:
-    --max-workers CLI flag → CENTELLA_MAX_WORKERS env var → centella.toml →
+    --max-workers CLI flag → PILA_MAX_WORKERS env var → pila.toml →
     DEFAULT_CAPS["max_total_workers"]. argparse validates `cli_value` is an
     int via `type=int` so it is trusted when set. env and file values are
     rejected via die() when not a positive int — bad config caught at
@@ -1488,8 +1488,8 @@ def resolve_inspect_dirs(repo_root: Path,
                          cli_values: list[str] | None = None) -> list[str]:
     """Resolve the extra inspection directories for classifier/planner/
     reconciler. Order: --inspect-dir CLI flags (one or more, repeatable) →
-    CENTELLA_INSPECT_DIRS env var (colon-separated) → inspect_dirs in
-    centella.toml (comma-separated string) → []. Paths are expanded
+    PILA_INSPECT_DIRS env var (colon-separated) → inspect_dirs in
+    pila.toml (comma-separated string) → []. Paths are expanded
     (~ → $HOME) and resolved to absolute form so a relative path in TOML
     still works after the orchestrator changes cwd. Non-existent paths
     are accepted at resolve time — the CLI surfaces a clearer error if
@@ -1573,7 +1573,7 @@ def _resolve_bool_pref(repo_root: Path, cli_value: bool, *,
 def resolve_no_push(repo_root: Path, cli_value: bool) -> bool:
     """Resolve the --no-push preference. Order:
     --no-push CLI flag (action='store_true', so True if passed) →
-    CENTELLA_NO_PUSH env var → no_push in centella.toml → False.
+    PILA_NO_PUSH env var → no_push in pila.toml → False.
     `--no-verify` has no env/TOML mirror (see NO_PUSH_ENV comment)."""
     return _resolve_bool_pref(
         repo_root, cli_value,
@@ -1583,7 +1583,7 @@ def resolve_no_push(repo_root: Path, cli_value: bool) -> bool:
 def resolve_clarify(repo_root: Path, cli_value: bool) -> bool:
     """Resolve the --clarify preference. Order:
     --clarify CLI flag (action='store_true', so True if passed) →
-    CENTELLA_CLARIFY env var → clarify in centella.toml → False.
+    PILA_CLARIFY env var → clarify in pila.toml → False.
     See DESIGN §11 for the clarification semantics."""
     return _resolve_bool_pref(
         repo_root, cli_value,
@@ -1605,7 +1605,7 @@ def _positive_int(s: str) -> int:
 def resolve_verbosity(repo_root: Path,
                       cli_value: str | None = None) -> str:
     """Resolve the verbosity level. Order:
-    --verbosity CLI flag → CENTELLA_VERBOSITY env var → centella.toml →
+    --verbosity CLI flag → PILA_VERBOSITY env var → pila.toml →
     VERBOSITY_DEFAULT. argparse validates `cli_value` via choices=, so
     it is trusted when set. env and file values are rejected via die()
     if not in VERBOSITY_VALUES — a bad config is caught at startup,
@@ -1661,10 +1661,10 @@ def resolve_models(repo_root: Path, args) -> dict[str, str]:
     precedence (highest first):
       1. --model-<worker> CLI flag
       2. --model CLI flag (global default for this run)
-      3. CENTELLA_MODEL_<WORKER> env var
-      4. CENTELLA_MODEL env var
-      5. model_<worker> in centella.toml
-      6. model in centella.toml
+      3. PILA_MODEL_<WORKER> env var
+      4. PILA_MODEL env var
+      5. model_<worker> in pila.toml
+      6. model in pila.toml
       7. MODEL_DEFAULT_PER_WORKER[<worker>] (e.g., implementer → sonnet)
       8. MODEL_DEFAULT (opus)
     `args` is the parsed argparse.Namespace (CLI values are already
@@ -1705,7 +1705,7 @@ def resolve_models(repo_root: Path, args) -> dict[str, str]:
         models[worker] = (per_cli or global_cli or per_env or global_env
                           or per_file or global_file or per_worker_default)
     # Judge and heal use dedicated flags (--judge-model / --heal-model) and
-    # dedicated env vars (CENTELLA_MODEL_JUDGE / CENTELLA_MODEL_HEAL) rather
+    # dedicated env vars (PILA_MODEL_JUDGE / PILA_MODEL_HEAL) rather
     # than the --model-<W> pattern — they're post-run skill workers that don't
     # participate in the --model global-default resolution path. They still
     # fall back to the global override so `--model sonnet` applies everywhere.
@@ -1727,8 +1727,8 @@ def resolve_models(repo_root: Path, args) -> dict[str, str]:
 def resolve_telemetry_enabled(repo_root: Path,
                               cli_value: bool | None = None) -> bool:
     """Resolve the telemetry enabled/disabled preference. Order:
-    --telemetry/--no-telemetry CLI flag → CENTELLA_TELEMETRY env var →
-    telemetry in centella.toml → TELEMETRY_DEFAULT (True). cli_value is
+    --telemetry/--no-telemetry CLI flag → PILA_TELEMETRY env var →
+    telemetry in pila.toml → TELEMETRY_DEFAULT (True). cli_value is
     True when --telemetry was passed, False when --no-telemetry was passed,
     None when neither was passed (argparse store_true/store_false pair with
     default None). env and file values are rejected via die() if not parseable
@@ -1759,8 +1759,8 @@ def resolve_telemetry_enabled(repo_root: Path,
 def resolve_telemetry_subdir(repo_root: Path,
                              cli_value: str | None = None) -> str:
     """Resolve the telemetry event subdirectory name. Order:
-    --telemetry-dir CLI flag → CENTELLA_TELEMETRY_DIR env var →
-    telemetry_dir in centella.toml → TELEMETRY_SUBDIR_DEFAULT ("events").
+    --telemetry-dir CLI flag → PILA_TELEMETRY_DIR env var →
+    telemetry_dir in pila.toml → TELEMETRY_SUBDIR_DEFAULT ("events").
     The value is a plain directory name (or relative path) appended to
     the run dir — not validated against the filesystem at resolve time."""
     if cli_value and cli_value.strip():
@@ -1777,8 +1777,8 @@ def resolve_telemetry_subdir(repo_root: Path,
 
 def resolve_judge_dir(repo_root: Path, cli_value: str | None = None) -> str:
     """Resolve the judge output directory name. Order:
-    --judge-dir CLI flag → CENTELLA_JUDGE_DIR env var →
-    judge_dir in centella.toml → JUDGE_DIR_DEFAULT ("judge-out").
+    --judge-dir CLI flag → PILA_JUDGE_DIR env var →
+    judge_dir in pila.toml → JUDGE_DIR_DEFAULT ("judge-out").
     The value is a plain directory name (or relative path) appended to
     the run dir — not validated against the filesystem at resolve time."""
     if cli_value and cli_value.strip():
@@ -1795,8 +1795,8 @@ def resolve_judge_dir(repo_root: Path, cli_value: str | None = None) -> str:
 
 def resolve_heal_dir(repo_root: Path, cli_value: str | None = None) -> str:
     """Resolve the heal output directory name. Order:
-    --heal-dir CLI flag → CENTELLA_HEAL_DIR env var →
-    heal_dir in centella.toml → HEAL_DIR_DEFAULT ("heal-out").
+    --heal-dir CLI flag → PILA_HEAL_DIR env var →
+    heal_dir in pila.toml → HEAL_DIR_DEFAULT ("heal-out").
     The value is a plain directory name (or relative path) appended to
     the run dir — not validated against the filesystem at resolve time."""
     if cli_value and cli_value.strip():
@@ -1813,8 +1813,8 @@ def resolve_heal_dir(repo_root: Path, cli_value: str | None = None) -> str:
 
 def resolve_heal_max_rounds(repo_root: Path, cli_value: int | None = None) -> int:
     """Resolve the heal-loop max-iterations cap. Order:
-    --heal-max-rounds CLI flag → CENTELLA_HEAL_MAX_ROUNDS env var →
-    heal_max_rounds in centella.toml → HEAL_MAX_ROUNDS_DEFAULT (10).
+    --heal-max-rounds CLI flag → PILA_HEAL_MAX_ROUNDS env var →
+    heal_max_rounds in pila.toml → HEAL_MAX_ROUNDS_DEFAULT (10).
     An invalid (non-positive) value in env or file is rejected via die()."""
     if cli_value is not None:
         return cli_value
@@ -1843,8 +1843,8 @@ def resolve_heal_max_rounds(repo_root: Path, cli_value: int | None = None) -> in
 def resolve_heal_success_threshold(repo_root: Path,
                                    cli_value: float | None = None) -> float:
     """Resolve the heal-loop success pass-rate threshold. Order:
-    --heal-success-threshold CLI flag → CENTELLA_HEAL_SUCCESS_THRESHOLD env var →
-    heal_success_threshold in centella.toml → HEAL_SUCCESS_THRESHOLD_DEFAULT (0.9).
+    --heal-success-threshold CLI flag → PILA_HEAL_SUCCESS_THRESHOLD env var →
+    heal_success_threshold in pila.toml → HEAL_SUCCESS_THRESHOLD_DEFAULT (0.9).
     Value must be in (0, 1]; invalid values in env or file are rejected via die()."""
     if cli_value is not None:
         return cli_value
@@ -1949,7 +1949,7 @@ async def run_script(name: str, *args: str) -> subprocess.CompletedProcess:
 # test suites, enforcing structural rules.
 # =========================================================================
 
-async def preflight(centella_dir: Path, verbosity: str = VERBOSITY_DEFAULT,
+async def preflight(pila_dir: Path, verbosity: str = VERBOSITY_DEFAULT,
                     skip_smoke: bool = False, no_push: bool = False) -> None:
     """Hard checks before any LLM work. Fails fast rather than wasting workers."""
 
@@ -1965,13 +1965,13 @@ async def preflight(centella_dir: Path, verbosity: str = VERBOSITY_DEFAULT,
     dirty = [l for l in r.stdout.splitlines() if not l.startswith("??")]
     if dirty:
         die(f"working tree has {len(dirty)} modified/staged file(s). "
-            "Commit or stash before running centella.")
+            "Commit or stash before running pila.")
 
-    # 3. (removed in per-run refactor) The global centella/* branch and
-    #    .centella/worktrees/* checks used to fail a second concurrent
+    # 3. (removed in per-run refactor) The global pila/* branch and
+    #    .pila/worktrees/* checks used to fail a second concurrent
     #    run; they no longer apply now that each run namespaces its
-    #    branches as centella/runs/<run-id> (and subtask branches as
-    #    centella/subtasks/<run-id>/<sid>) and its worktrees under the
+    #    branches as pila/runs/<run-id> (and subtask branches as
+    #    pila/subtasks/<run-id>/<sid>) and its worktrees under the
     #    per-run dir. A run_id collision is detected separately at
     #    State.rename_to() (filesystem side) and during setup-run.sh
     #    (git side). See DESIGN.md §6 and §14 ("single-clone parallelism").
@@ -2003,7 +2003,7 @@ async def preflight(centella_dir: Path, verbosity: str = VERBOSITY_DEFAULT,
         try:
             envelope = await _invoke(cmd, cwd=os.getcwd(), timeout=90,
                                      sid="smoke",
-                                     centella_dir=centella_dir,
+                                     pila_dir=pila_dir,
                                      verbosity=verbosity)
         except subprocess.TimeoutExpired:
             die("claude -p smoke test timed out — auth issue or network problem")
@@ -2289,7 +2289,7 @@ def _parse_touched_file_line(line: str) -> tuple[str | None, bool]:
 # --- result cross-field validation -------------------------------------------
 
 def validate_result(result: dict,
-                    centella_dir: Path | None = None) -> str | None:
+                    pila_dir: Path | None = None) -> str | None:
     """Cross-field invariant checks that JSON Schema cannot express.
     Returns an error string if the result is self-contradictory, None if ok.
 
@@ -2303,7 +2303,7 @@ def validate_result(result: dict,
     still enforce the mechanical-precondition fields their next-step
     consumers require.
 
-    `centella_dir` is accepted for backwards compatibility with callers
+    `pila_dir` is accepted for backwards compatibility with callers
     that still pass it; it is no longer consulted."""
     status = result.get("status")
     if status == "incomplete-handoff":
@@ -2359,8 +2359,8 @@ async def check_diff_scope(sid: str, worktree: str, subtask: dict,
     Returns a fatal error string if protected paths were touched.
     Logs a non-fatal warning for unexpected scope. Returns None when clean.
 
-    The diff is computed against the run branch (`centella/runs/<run-id>`)
-    — the base every subtask branched off of. Hardcoding `centella/staging`
+    The diff is computed against the run branch (`pila/runs/<run-id>`)
+    — the base every subtask branched off of. Hardcoding `pila/staging`
     here used to silently disable the check after the per-run refactor
     (the branch doesn't exist), so the protected-path enforcement was off."""
     run_branch = compute_run_branch(st.run_id)
@@ -2428,7 +2428,7 @@ async def check_merge_committed(staging: Path) -> str | None:
 
 
 async def check_integrator_commit(staging: Path) -> str | None:
-    """Return an error if the integrator's merge commit touched .centella/ files.
+    """Return an error if the integrator's merge commit touched .pila/ files.
     The integrator should only touch project files, never coordination artifacts."""
     r = await run_proc(
         ["git", "show", "--name-only", "--format=", "HEAD"],
@@ -2437,7 +2437,7 @@ async def check_integrator_commit(staging: Path) -> str | None:
     if r.returncode != 0:
         return None
     bad = [f for f in r.stdout.strip().splitlines()
-           if f and f.startswith(".centella/")]
+           if f and f.startswith(".pila/")]
     if bad:
         return f"integrator commit touched coordination files: {bad}"
     return None
@@ -2449,7 +2449,7 @@ async def check_branch_has_commits(sid: str, worktree: str,
                                    parent_branch: str) -> str | None:
     """Return error if the implementer's subtask branch has no commits
     ahead of the run branch (`parent_branch` — typically
-    `centella/runs/<run-id>`). An empty diff means the worker produced
+    `pila/runs/<run-id>`). An empty diff means the worker produced
     schema-valid JSON claiming success while doing nothing — a silent
     no-op that wastes an integration attempt."""
     if not Path(worktree).exists():
@@ -2504,7 +2504,7 @@ def validate_resume_state(data: dict) -> None:
     if "task" not in data or not str(data.get("task", "")).strip():
         die("state.json has no usable 'task' — cannot resume. "
             "Inspect the run's state.json manually "
-            "(under .centella/runs/<run-id>/).")
+            "(under .pila/runs/<run-id>/).")
 
     # waves is optional (absent if interrupted before scheduling); if present
     # it must be well-formed, and completed_waves must be in range.
@@ -2611,7 +2611,7 @@ def _summarize_stream_event(sid: str, event: dict, verbosity: str) -> str | None
     only governs what surfaces inline.
 
     Levels in increasing detail: quiet, normal, stream, debug. At
-    quiet/normal, individual events are dropped (centella's existing
+    quiet/normal, individual events are dropped (pila's existing
     phase / subtask-status log lines stand alone), with the one
     exception of result-with-error which surfaces at every level
     (clig.dev "errors emit at every level")."""
@@ -2727,7 +2727,7 @@ def _get_progress(st: "State") -> tuple[int, int] | None:
 
 
 async def _invoke(cmd: list[str], cwd: str, timeout: int,
-                  sid: str, centella_dir: Path, verbosity: str,
+                  sid: str, pila_dir: Path, verbosity: str,
                   progress: tuple[int, int] | None = None) -> dict:
     """Run a `claude -p` command, streaming events as they arrive.
 
@@ -2735,7 +2735,7 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
     line of stdout is one JSON event. The final `type: "result"` event
     is the envelope (same shape as the non-streaming `--output-format
     json` path produces). All events are appended to
-    `.centella/logs/<sid>.log` regardless of verbosity. Inline summaries
+    `.pila/logs/<sid>.log` regardless of verbosity. Inline summaries
     surface to the orchestrator log according to `verbosity` (see
     `_summarize_stream_event`).
 
@@ -2746,7 +2746,7 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
     `subprocess.TimeoutExpired`, cancellation kills the child and
     re-raises. A worker that exits without emitting any `result` event
     raises `WorkerError` — same error class callers already handle."""
-    log_path = centella_dir / "logs" / f"{sid}.log"
+    log_path = pila_dir / "logs" / f"{sid}.log"
     # `limit=10MB` overrides asyncio's StreamReader 64KB-per-line default.
     # A single `claude -p` event can plausibly exceed 64KB: the
     # implementer's `structured_output` tool_use carries the full
@@ -2771,7 +2771,7 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
         nonlocal envelope
         # `buffering=1` is line-buffered: every newline flushes to disk.
         # Without this Python text-mode files are fully buffered when not
-        # connected to a TTY, so `tail -f .centella/logs/<sid>.log` would
+        # connected to a TTY, so `tail -f .pila/logs/<sid>.log` would
         # show nothing until the file closed at worker end — defeating
         # the entire live-progress property of the streaming feature.
         with log_path.open("a", buffering=1) as log_file:
@@ -2796,7 +2796,7 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
                     # Inline summary (verbosity-gated). Multi-line
                     # summaries (multi-block events, multi-line text)
                     # are emitted one log() call per line so each
-                    # line gets its own [centella HH:MM:SS] prefix —
+                    # line gets its own [pila HH:MM:SS] prefix —
                     # otherwise the timestamp only renders on line 1
                     # and lines 2+ visually disconnect from the
                     # orchestrator's timestamped log stream.
@@ -2818,7 +2818,7 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
                 # the ValueError would propagate through claude_p's
                 # retry loop unhandled and surface as a Python
                 # traceback. Convert to WorkerError so callers see a
-                # centella-shaped error and the retry path treats it
+                # pila-shaped error and the retry path treats it
                 # as a worker fault.
                 raise WorkerError(
                     "claude -p emitted a line exceeding the 10 MiB "
@@ -2848,7 +2848,7 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
         raise subprocess.TimeoutExpired(cmd, timeout)
     except BaseException:
         # Same orphan-child guard as run_proc: kill + reap, then
-        # re-raise. Centella's gather_or_cancel relies on this for
+        # re-raise. Pila's gather_or_cancel relies on this for
         # clean aborts.
         proc.kill()
         try:
@@ -2898,7 +2898,7 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
 
     Worker activity streams as one JSON event per stdout line
     (`--output-format stream-json --verbose`). `_invoke` writes the raw
-    events to `.centella/logs/<sid>.log` and emits per-event inline
+    events to `.pila/logs/<sid>.log` and emits per-event inline
     summaries gated by `st.data["verbosity"]`. The final `result` event
     is returned as the envelope — same shape as the pre-streaming
     single-result mode (`structured_output` present on schema success).
@@ -2921,7 +2921,7 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
     so `--resume` honors the original choice.
     """
     schema = json.dumps(SCHEMAS[schema_key], separators=(",", ":"))
-    centella_dir = st.path.parent
+    pila_dir = st.path.parent
     verbosity = st.data.get("verbosity", VERBOSITY_DEFAULT)
 
     def build(extra_user: str = "") -> list[str]:
@@ -2951,7 +2951,7 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
                       "Return output that conforms exactly to the required schema.")
         _t0 = time.monotonic()
         envelope = await _invoke(build(retry_note), cwd, timeout,
-                                 sid, centella_dir, verbosity,
+                                 sid, pila_dir, verbosity,
                                  progress=_get_progress(st))
         _latency_ms = int((time.monotonic() - _t0) * 1000)
 
@@ -3082,7 +3082,7 @@ class _ReplayState:
     """Minimal State-alike for replay_capture: no persistent writes.
 
     Satisfies the interface claude_p() calls on the state object (bump_workers,
-    add_telemetry, .data, .run_id, .run_dir, .path) without touching .centella/.
+    add_telemetry, .data, .run_id, .run_dir, .path) without touching .pila/.
     All save() calls are no-ops. last_envelope captures the envelope returned
     by _invoke so replay_capture can return (envelope, structured_output).
     """
@@ -3128,13 +3128,13 @@ class State:
     fall inside a `st.data[k] = v; st.save()` pair.
 
     Per-run scope: every State instance is anchored at
-    `centella_root / "runs" / run_id / state.json`. Two State instances with
+    `pila_root / "runs" / run_id / state.json`. Two State instances with
     different run_ids share no on-disk state. See DESIGN.md §6 and §10."""
 
-    def __init__(self, centella_root: Path, run_id: str):
-        self.centella_root = centella_root
+    def __init__(self, pila_root: Path, run_id: str):
+        self.pila_root = pila_root
         self.run_id = run_id
-        self.run_dir = centella_root / "runs" / run_id
+        self.run_dir = pila_root / "runs" / run_id
         self.path = self.run_dir / "state.json"
         self.data: dict = {}
 
@@ -3158,10 +3158,10 @@ class State:
         already exists — that would mean two runs with the same
         microsecond `started_at` (extraordinarily unlikely, but caught
         as a hard error rather than silently overwritten)."""
-        new_dir = self.centella_root / "runs" / new_run_id
+        new_dir = self.pila_root / "runs" / new_run_id
         if new_dir.exists():
             die(
-                f"run_id collision: .centella/runs/{new_run_id}/ already exists. "
+                f"run_id collision: .pila/runs/{new_run_id}/ already exists. "
                 "This is extraordinarily unlikely; rerun, or "
                 f"`--resume --run-id {new_run_id}` to continue the existing run."
             )
@@ -3928,11 +3928,11 @@ def gather_answers(st: State, supplied: dict | None) -> dict:
 
     if not sys.stdin.isatty():
         # launched non-interactively (e.g. via the plugin skill): defer.
-        centella_dir = st.path.parent
-        (centella_dir / "pending-questions.json").write_text(json.dumps({
+        pila_dir = st.path.parent
+        (pila_dir / "pending-questions.json").write_text(json.dumps({
             "questions": pending,
         }, indent=2))
-        log("clarification needed; wrote .centella/pending-questions.json")
+        log("clarification needed; wrote .pila/pending-questions.json")
         sys.exit(EXIT_NEEDS_ANSWERS)
 
     for q in pending:
@@ -3946,7 +3946,7 @@ def gather_answers(st: State, supplied: dict | None) -> dict:
     return answers
 
 
-def absorb_supplied_answers(args, st: State, centella_dir: Path) -> None:
+def absorb_supplied_answers(args, st: State, pila_dir: Path) -> None:
     """Merge --answers FILE into st.data['answers'] and propagate the
     update to existing subtask spec files. Safe to call on both initial
     runs and on --resume; a no-op when --answers is not set.
@@ -3962,7 +3962,7 @@ def absorb_supplied_answers(args, st: State, centella_dir: Path) -> None:
     job here is to get those answers into state and onto disk so the
     next worker invocation sees them.
 
-    The subtask-spec rewrite mirrors centella.py around the
+    The subtask-spec rewrite mirrors pila.py around the
     needs-clarification branch of settle_subtask: every existing spec
     file gets its `_clarification_answers` field overwritten with the
     current st.data['answers']. This is intentionally aggressive — a
@@ -4000,7 +4000,7 @@ def absorb_supplied_answers(args, st: State, centella_dir: Path) -> None:
     # their `_clarification_answers`. Specs are written once at
     # phase_plan time with the then-current answers; later answers must
     # be flushed through.
-    sub_dir = centella_dir / "subtasks"
+    sub_dir = pila_dir / "subtasks"
     if sub_dir.exists():
         for spec_path in sub_dir.glob("*.json"):
             try:
@@ -4019,7 +4019,7 @@ def surface_clarification(sid: str, question: dict, checkpoint_path: str,
       - Interactive (TTY): prompt right here, store the answer in
         st.data['answers'][question.id], and return True so the caller
         re-spawns the implementer as a CONTINUATION.
-      - Non-interactive: write .centella/pending-clarifications.json
+      - Non-interactive: write .pila/pending-clarifications.json
         with the question, the subtask id, and the checkpoint path,
         then sys.exit(EXIT_NEEDS_ANSWERS) so the calling layer can
         collect the answer and resume.
@@ -4029,21 +4029,21 @@ def surface_clarification(sid: str, question: dict, checkpoint_path: str,
     first. The caller is responsible for bumping the
     subtask_continuations counter before treating this as the
     continuation step."""
-    centella_dir = st.path.parent
+    pila_dir = st.path.parent
     answers = st.data.setdefault("answers", {})
 
     if not sys.stdin.isatty():
         # Persist enough state for the surrounding layer to resume.
         # The question id keys the answer; the checkpoint path is
         # what the re-spawned worker will read.
-        (centella_dir / "pending-clarifications.json").write_text(
+        (pila_dir / "pending-clarifications.json").write_text(
             json.dumps({
                 "subtask_id": sid,
                 "question": question,
                 "checkpoint_path": checkpoint_path,
             }, indent=2))
         log(f"  {sid}: clarification needed; wrote "
-            ".centella/pending-clarifications.json")
+            ".pila/pending-clarifications.json")
         # Save state so the answer the user supplies on the re-run
         # lands in a state.json that already knows about this subtask's
         # progress so far.
@@ -4169,7 +4169,7 @@ def _apply_reconciler_output(plans: list[dict], output: dict) -> list[dict]:
     added = output.get("added_subtasks", [])
     if added:
         # Fail loud on id collisions. schedule() merges all subtasks
-        # into a single dict keyed by id (centella.py: see `schedule`),
+        # into a single dict keyed by id (pila.py: see `schedule`),
         # so a duplicate id would silently overwrite a real subtask and
         # vanish its requires/provides/depends_on from the DAG. The
         # reconciler's prompt warns against this, but prompts are
@@ -4224,7 +4224,7 @@ async def phase_reconcile(plans: list[dict], task: str, st: State,
     # Pre-condition: subtask ids are globally unique across plans. The
     # planner prompt tells each domain to scope ids to itself with a
     # domain-prefix, and the 8 CATEGORIES map to distinct prefixes
-    # (centella.py: CATEGORIES / _ID_PREFIXES), so in practice this
+    # (pila.py: CATEGORIES / _ID_PREFIXES), so in practice this
     # invariant holds. But prompts are advisory per CLAUDE.md; if a
     # planner ignores the rule, schedule()'s dict-flatten (line ~2997:
     # `subtasks[s["id"]] = s`) would silently overwrite, vanishing the
@@ -4416,14 +4416,14 @@ def schedule(plans: list[dict]) -> tuple[dict, list[list[str]]]:
     return subtasks, waves
 
 
-def write_plan(centella_dir: Path, task: str, st: State,
+def write_plan(pila_dir: Path, task: str, st: State,
                subtasks: dict, waves: list[list[str]]) -> None:
     """Persist the merged plan and per-subtask spec files the implementers read."""
     answers = st.data.get("answers", {})
     sot = answers.get("source_of_truth", "codebase")
-    (centella_dir / "plan.json").write_text(json.dumps(
+    (pila_dir / "plan.json").write_text(json.dumps(
         {"task": task, "waves": waves, "subtasks": subtasks}, indent=2))
-    sub_dir = centella_dir / "subtasks"
+    sub_dir = pila_dir / "subtasks"
     for sid, s in subtasks.items():
         spec = dict(s)
         spec["_task"] = task
@@ -4436,7 +4436,7 @@ def write_plan(centella_dir: Path, task: str, st: State,
     st.save()
 
 
-async def run_implementer(sid: str, centella_dir: Path, caps: dict, st: State,
+async def run_implementer(sid: str, pila_dir: Path, caps: dict, st: State,
                           models: dict[str, str],
                           continuation: bool = False, note: str = "") -> dict:
     """Spawn one implementer for one subtask in its own worktree. Handles
@@ -4457,8 +4457,8 @@ async def run_implementer(sid: str, centella_dir: Path, caps: dict, st: State,
     can_ask_user = st.data.get("clarify", False)
 
     up = [f"Execute subtask `{sid}`.",
-          f"CENTELLA_DIR is {centella_dir} (absolute).",
-          f"Read your spec at {centella_dir}/subtasks/{sid}.json.",
+          f"PILA_DIR is {pila_dir} (absolute).",
+          f"Read your spec at {pila_dir}/subtasks/{sid}.json.",
           "Your current working directory IS your isolated worktree — make and "
           "commit all code changes here.",
           # DESIGN §8 + §13: evidence-gate bound, prompt-governed.
@@ -4471,7 +4471,7 @@ async def run_implementer(sid: str, centella_dir: Path, caps: dict, st: State,
           "must make a best-effort decision and proceed)."]
     if continuation:
         up.append(f"This is a CONTINUATION. Read the checkpoint at "
-                  f"{centella_dir}/checkpoints/{sid}.md, validate it against the "
+                  f"{pila_dir}/checkpoints/{sid}.md, validate it against the "
                   f"actual repo state, then continue.")
     if note:
         up.append(f"NOTE FROM ORCHESTRATOR: {note}")
@@ -4488,7 +4488,7 @@ async def run_implementer(sid: str, centella_dir: Path, caps: dict, st: State,
         # (e.g. it hit --max-turns mid-task) -> treat as a handoff so a fresh
         # implementer can continue from whatever checkpoint exists.
         return {"subtask_id": sid, "status": "incomplete-handoff",
-                "checkpoint_path": str(centella_dir / "checkpoints" / f"{sid}.md"),
+                "checkpoint_path": str(pila_dir / "checkpoints" / f"{sid}.md"),
                 "summary": f"worker produced no schema-valid result: {e}"}
 
 
@@ -4508,7 +4508,7 @@ def _retryable_failure(reason: str) -> bool:
 
     Terminal (worker is broken/dishonest — terminate immediately, no retry):
       - cross-field invariant violation (worker lied about its own status)
-      - diff touched a protected path (.centella/, .git/, or any top-level
+      - diff touched a protected path (.pila/, .git/, or any top-level
         .claude/ file; the .claude/{agents,commands,skills}/ subtrees are
         exempt per is_protected_path())
       - any worker-level error surfaced as a failure
@@ -4717,7 +4717,7 @@ async def _unprefixed_conformer_commits(worktree: str, before_sha: str,
             if line and not line.startswith(prefix)]
 
 
-async def run_conformer(sid: str, centella_dir: Path, worktree: str,
+async def run_conformer(sid: str, pila_dir: Path, worktree: str,
                         caps: dict, st: State, models: dict[str, str],
                         rules_files: list[Path],
                         blt_commands: dict[str, str],
@@ -4727,16 +4727,16 @@ async def run_conformer(sid: str, centella_dir: Path, worktree: str,
     is recorded as a warning by the caller — DESIGN §9: the phase is
     advisory)."""
     sys_prompt = load_prompt("conformer")
-    repo_root = st.centella_root.parent
+    repo_root = st.pila_root.parent
     rules_paths_str = ", ".join(
         str(p.relative_to(repo_root)) if str(p).startswith(str(repo_root))
         else str(p)
         for p in rules_files
     ) or "(none)"
     up = [f"Run the post-work conformance phase for subtask `{sid}`.",
-          f"CENTELLA_DIR is {centella_dir} (absolute). Your subtask spec "
-          f"is at {centella_dir}/subtasks/{sid}.json and the implementer's "
-          f"success-criteria notes are at {centella_dir}/criteria/{sid}.md "
+          f"PILA_DIR is {pila_dir} (absolute). Your subtask spec "
+          f"is at {pila_dir}/subtasks/{sid}.json and the implementer's "
+          f"success-criteria notes are at {pila_dir}/criteria/{sid}.md "
           "— both read-only inputs.",
           "Your current working directory IS the subtask's worktree. Make "
           "and commit any fixes here. Every commit subject must start "
@@ -4796,7 +4796,7 @@ def _conformance_clean(conf_res: dict) -> bool:
     return True
 
 
-async def _run_conformance_phase(sid: str, centella_dir: Path,
+async def _run_conformance_phase(sid: str, pila_dir: Path,
                                  worktree: str, subtask: dict, caps: dict,
                                  st: State, models: dict[str, str]
                                  ) -> tuple[dict | None, list[str]]:
@@ -4806,7 +4806,7 @@ async def _run_conformance_phase(sid: str, centella_dir: Path,
     violations on conformer commits, exhausted rounds — surface as
     entries in `warnings`. The subtask still returns `complete`."""
     warnings: list[str] = []
-    repo_root = st.centella_root.parent
+    repo_root = st.pila_root.parent
     rules_files = discover_rules_files(repo_root)
     blt = _infer_build_lint_test(repo_root)
     run_branch = compute_run_branch(st.run_id)
@@ -4815,7 +4815,7 @@ async def _run_conformance_phase(sid: str, centella_dir: Path,
     for c_round in range(caps["conformance_rounds"]):
         before_sha = await _branch_head_sha(worktree)
         last_res = await run_conformer(
-            sid, centella_dir, worktree, caps, st, models,
+            sid, pila_dir, worktree, caps, st, models,
             rules_files=rules_files, blt_commands=blt, diff_base=run_branch)
 
         if last_res is None:
@@ -4832,7 +4832,7 @@ async def _run_conformance_phase(sid: str, centella_dir: Path,
         # Empty diff (worker added no commits) is fine and common: a
         # well-formed result with no fixes is a legitimate "nothing to do."
         # check_diff_scope returns a string ONLY for a protected-path
-        # violation — .centella/, .git/, or top-level .claude/ files;
+        # violation — .pila/, .git/, or top-level .claude/ files;
         # .claude/{agents,commands,skills}/ are exempt per
         # is_protected_path(). The scope-volume warning is logged
         # side-channel and does not surface here.
@@ -4874,7 +4874,7 @@ async def _run_conformance_phase(sid: str, centella_dir: Path,
     return last_res, warnings
 
 
-async def settle_subtask(sid: str, centella_dir: Path, caps: dict, st: State,
+async def settle_subtask(sid: str, pila_dir: Path, caps: dict, st: State,
                          models: dict[str, str]) -> dict:
     """Drive one subtask to a terminal state.
 
@@ -4892,8 +4892,8 @@ async def settle_subtask(sid: str, centella_dir: Path, caps: dict, st: State,
     retries = 0
     note = ""
     continuation = False
-    worktree = str(centella_dir / "worktrees" / sid)
-    subtask_path = centella_dir / "subtasks" / f"{sid}.json"
+    worktree = str(pila_dir / "worktrees" / sid)
+    subtask_path = pila_dir / "subtasks" / f"{sid}.json"
     subtask = json.loads(subtask_path.read_text()) if subtask_path.exists() else {}
 
     def fail(reason: str) -> dict | None:
@@ -4916,13 +4916,13 @@ async def settle_subtask(sid: str, centella_dir: Path, caps: dict, st: State,
         return None
 
     while True:
-        res = await run_implementer(sid, centella_dir, caps, st, models,
+        res = await run_implementer(sid, pila_dir, caps, st, models,
                                     continuation=continuation, note=note)
 
         # cross-field invariant check — catches a worker that lied about
         # status. A self-contradictory result means the worker is malfunctioning
         # or dishonest: non-retryable by `_retryable_failure`.
-        problem = validate_result(res, centella_dir)
+        problem = validate_result(res, pila_dir)
         if problem:
             log(f"  result invariant violated for {sid}: {problem}")
             done = fail(problem)
@@ -4983,7 +4983,7 @@ async def settle_subtask(sid: str, centella_dir: Path, caps: dict, st: State,
             conf_warnings: list[str] = []
             try:
                 conf_res, conf_warnings = await _run_conformance_phase(
-                    sid, centella_dir, worktree, subtask, caps, st, models)
+                    sid, pila_dir, worktree, subtask, caps, st, models)
             except Exception as e:
                 conf_warnings.append(
                     f"conformance phase raised {type(e).__name__}: {e} — "
@@ -5003,11 +5003,11 @@ async def settle_subtask(sid: str, centella_dir: Path, caps: dict, st: State,
 
         if status == "incomplete-handoff":
             # Worktree convention from scripts/new-worktree.sh:
-            # .centella/worktrees/<subtask-id>. The freshness check on
+            # .pila/worktrees/<subtask-id>. The freshness check on
             # `## Files touched` validates paths against this directory;
             # if it no longer exists (e.g. cleanup ran early), the check
             # is skipped gracefully.
-            wt_root = centella_dir / "worktrees" / sid
+            wt_root = pila_dir / "worktrees" / sid
             cp_err = validate_checkpoint(res.get("checkpoint_path") or "",
                                          worktree_root=wt_root)
             if cp_err:
@@ -5033,7 +5033,7 @@ async def settle_subtask(sid: str, centella_dir: Path, caps: dict, st: State,
             # the user's answer. Consumes from the same
             # subtask_continuations budget — there is no extra "ask the
             # user" allowance.
-            wt_root = centella_dir / "worktrees" / sid
+            wt_root = pila_dir / "worktrees" / sid
             cp_err = validate_checkpoint(res.get("checkpoint_path") or "",
                                          worktree_root=wt_root)
             if cp_err:
@@ -5058,7 +5058,7 @@ async def settle_subtask(sid: str, centella_dir: Path, caps: dict, st: State,
             # to the next implementer — the spec was written once at
             # phase_plan time with the then-current answers; clarifications
             # captured later must be propagated.
-            spec_path = centella_dir / "subtasks" / f"{sid}.json"
+            spec_path = pila_dir / "subtasks" / f"{sid}.json"
             if spec_path.exists():
                 spec = json.loads(spec_path.read_text())
                 spec["_clarification_answers"] = st.data.get("answers", {})
@@ -5079,7 +5079,7 @@ async def settle_subtask(sid: str, centella_dir: Path, caps: dict, st: State,
 
 
 async def integrate_wave(wave: list[str], results: dict[str, dict],
-                         centella_dir: Path, caps: dict, st: State,
+                         pila_dir: Path, caps: dict, st: State,
                          models: dict[str, str]) -> list[str]:
     """Merge each completed subtask branch into staging (git merge, not
     cherry-pick); resolve conflicts with an integrator worker. Returns the
@@ -5090,7 +5090,7 @@ async def integrate_wave(wave: list[str], results: dict[str, dict],
     the run is terminated with the integrator's diagnosis — an unresolved
     conflict must not silently proceed onto a corrupt staging tree."""
     integrated, integrated_so_far = [], []
-    staging = (centella_dir / "worktrees" / "staging").resolve()
+    staging = (pila_dir / "worktrees" / "staging").resolve()
     for sid in wave:
         if results.get(sid, {}).get("status") != "complete":
             continue
@@ -5116,7 +5116,7 @@ async def integrate_wave(wave: list[str], results: dict[str, dict],
         log(f"  conflict integrating {sid}; spawning integrator")
         sys_prompt = load_prompt("integrator")
         up = (f"Resolve the in-progress merge conflict in this worktree.\n"
-              f"CENTELLA_DIR is {centella_dir}.\n"
+              f"PILA_DIR is {pila_dir}.\n"
               f"Incoming subtask: {sid}\n"
               f"Already-integrated subtasks it may conflict with: "
               f"{', '.join(integrated_so_far) or 'none'}")
@@ -5173,7 +5173,7 @@ async def integrate_wave(wave: list[str], results: dict[str, dict],
     return integrated
 
 
-async def phase_execute(centella_dir: Path, st: State, caps: dict,
+async def phase_execute(pila_dir: Path, st: State, caps: dict,
                         models: dict[str, str]) -> None:
     """Phases 4-5: create staging, then run waves sequentially; within a wave,
     subtasks in parallel (bounded by max_parallel)."""
@@ -5186,7 +5186,7 @@ async def phase_execute(centella_dir: Path, st: State, caps: dict,
 
     async def settle_one(sid: str) -> tuple[str, dict]:
         async with sem:
-            r = await settle_subtask(sid, centella_dir, caps, st, models)
+            r = await settle_subtask(sid, pila_dir, caps, st, models)
             log(f"  {sid}: {r.get('status')}")
             return sid, r
 
@@ -5208,13 +5208,13 @@ async def phase_execute(centella_dir: Path, st: State, caps: dict,
             die(f"wave {wi + 1} has unresolved subtasks: {', '.join(blocked)}. "
                 f"See {st.path}; resolve and re-run with --resume.")
 
-        await integrate_wave(wave, results, centella_dir, caps, st, models)
+        await integrate_wave(wave, results, pila_dir, caps, st, models)
 
         # Deterministic post-integration safety net: an unresolved
         # conflict marker means integration broke the tree. Per-subtask
         # quality is the implementer's §8 confidence gate — there is no
         # LLM wave-level re-validation (see DESIGN §8, §9).
-        staging_path = centella_dir / "worktrees" / "staging"
+        staging_path = pila_dir / "worktrees" / "staging"
         marker_err = await scan_conflict_markers(staging_path)
         if marker_err:
             die(f"wave {wi + 1}: {marker_err}\n"
@@ -5230,7 +5230,7 @@ async def push_and_open_pr(st: State, no_verify: bool) -> None:
 
     Called from `phase_finalize` when `--no-push` is NOT in effect. The
     run branch is the integration artifact; the PR is the proposed
-    integration into the working branch. Centella does not merge into
+    integration into the working branch. Pila does not merge into
     the working branch locally. See DESIGN §6 "Finalization" for the
     failure-handling contract:
 
@@ -5279,7 +5279,7 @@ async def push_and_open_pr(st: State, no_verify: bool) -> None:
 
     # ----- step 2: PR creation ------------------------------------------
     body = compose_pr_body(st.data, st.run_id)
-    title = f"centella: {st.run_id}"
+    title = f"pila: {st.run_id}"
     pr_cmd = ["gh", "pr", "create",
               "--base", working_branch,
               "--head", run_branch,
@@ -5307,7 +5307,7 @@ async def push_and_open_pr(st: State, no_verify: bool) -> None:
     log(f"finalize: opened PR {pr_url}")
 
 
-async def phase_finalize(centella_dir: Path, st: State, no_push: bool,
+async def phase_finalize(pila_dir: Path, st: State, no_push: bool,
                          no_verify: bool) -> None:
     log("phase 6: finalizing")
     proc = await run_script("finalize.sh", st.run_id)
@@ -5354,7 +5354,7 @@ async def phase_finalize(centella_dir: Path, st: State, no_push: bool,
 # =========================================================================
 # entry point
 # =========================================================================
-async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
+async def orchestrate(args, caps: dict, pila_dir: Path, st: State,
                       sot_pref: str, verbosity: str,
                       models: dict[str, str]) -> None:
     """The async portion of a run: every phase that spawns a `claude -p`
@@ -5368,7 +5368,7 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
         log(f"per-worker logs: {st.run_dir / 'logs'}/")
         if "waves" not in st.data:
             die("cannot resume — run did not reach the scheduling phase")
-        # Refresh the preferences in case env vars or centella.toml
+        # Refresh the preferences in case env vars or pila.toml
         # changed since the original run started. Verbosity is
         # resolved fresh every run — the user can dial up or down on
         # resume without editing state.json.
@@ -5383,7 +5383,7 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
         # file, re-run with --resume --answers <file>. Without this
         # call the answers file was silently dropped — the re-spawned
         # worker would re-ask the same question forever. See P5-1.
-        absorb_supplied_answers(args, st, centella_dir)
+        absorb_supplied_answers(args, st, pila_dir)
     else:
         if not args.task:
             die("a task description is required (or use --resume)")
@@ -5394,7 +5394,7 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
                    "inspect_dirs": list(getattr(args, "inspect_dirs", []) or []),
                    "clarify": bool(args.clarify)}
         st.save()
-        await preflight(centella_dir, verbosity=verbosity,
+        await preflight(pila_dir, verbosity=verbosity,
                         skip_smoke=args.skip_smoke,
                         no_push=getattr(args, "no_push", False))
         supplied = (json.loads(Path(args.answers).read_text())
@@ -5416,13 +5416,13 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
             # phase_execute / phase_finalize internally re-derive their
             # working dir from st.path.parent, so they automatically
             # pick up the new location.
-            centella_dir = st.run_dir
+            pila_dir = st.run_dir
             # Initialize run.json with the immutable run-identity fields
             # (run_id, branch, working_branch, started_at, task) so
-            # `centella --list` can enumerate this run from the moment
+            # `pila --list` can enumerate this run from the moment
             # it has a stable identity — not only after finalize.
             # working_branch is HEAD-at-classify-time; setup-run.sh
-            # records the same value to .centella/runs/<id>/working-branch
+            # records the same value to .pila/runs/<id>/working-branch
             # later, but we capture it here so a run that fails
             # before phase_execute still has a recoverable run.json.
             head_proc = await run_proc(
@@ -5458,26 +5458,26 @@ async def orchestrate(args, caps: dict, centella_dir: Path, st: State,
         if runner:
             log(f"detected test runner: {' '.join(runner)}")
         st.data["test_runner"] = runner
-        write_plan(centella_dir, task, st, subtasks, waves)
+        write_plan(pila_dir, task, st, subtasks, waves)
 
-    await phase_execute(centella_dir, st, caps, models)
-    await phase_finalize(centella_dir, st,
+    await phase_execute(pila_dir, st, caps, models)
+    await phase_finalize(pila_dir, st,
                         no_push=getattr(args, "no_push", False),
                         no_verify=getattr(args, "no_verify", False))
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="centella", description=__doc__,
+    ap = argparse.ArgumentParser(prog="pila", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version",
-                    version=f"centella {_read_version()}",
-                    help="print the centella version and exit")
+                    version=f"pila {_read_version()}",
+                    help="print the pila version and exit")
     ap.add_argument("task", nargs="?",
                     help="the task to execute (literal string, or path to "
                          "a .txt/.md file whose contents are the task)")
     ap.add_argument("--resume", action="store_true",
                     help="resume an interrupted run (auto-picks if exactly "
-                         "one run exists under .centella/runs/). "
+                         "one run exists under .pila/runs/). "
                          "Default: off (start a new run)")
     ap.add_argument("--run-id", metavar="ID",
                     help="select a specific run by id (for --resume when "
@@ -5495,13 +5495,13 @@ def main() -> None:
                          "classifier's filter still runs but surviving "
                          "questions are dropped and the implementer makes a "
                          f"best-effort decision. Also {CLARIFY_ENV} env var "
-                         "or clarify=true in centella.toml.")
+                         "or clarify=true in pila.toml.")
     ap.add_argument("--no-push", action="store_true",
                     help="skip the push and PR step at finalize. The run "
                          "completes with the run branch local-only; your "
                          "working branch is unchanged. Default: off (push "
                          f"and PR happen). Also {NO_PUSH_ENV} env var or "
-                         "no_push in centella.toml.")
+                         "no_push in pila.toml.")
     ap.add_argument("--no-verify", action="store_true",
                     help="pass --no-verify to the finalize `git push` "
                          "(skips pre-push hooks). Worker commits inside "
@@ -5513,7 +5513,7 @@ def main() -> None:
                     help=f"total worker-invocation budget "
                          f"(default {DEFAULT_CAPS['max_total_workers']}); "
                          f"also {MAX_WORKERS_ENV} and max_workers in "
-                         "centella.toml")
+                         "pila.toml")
     ap.add_argument("--max-parallel", type=int,
                     help=f"override concurrent workers per wave "
                          f"(default {DEFAULT_CAPS['max_parallel']})")
@@ -5522,7 +5522,7 @@ def main() -> None:
                          f"implementer may run before exiting blocked "
                          f"(default {DEFAULT_CAPS['confidence_rounds']}); "
                          f"also {CONFIDENCE_ROUNDS_ENV} and "
-                         f"confidence_rounds in centella.toml")
+                         f"confidence_rounds in pila.toml")
     ap.add_argument("--skip-smoke", action="store_true",
                     help="skip the live claude -p smoke test during preflight. "
                          "Default: off (smoke test runs)")
@@ -5530,7 +5530,7 @@ def main() -> None:
                     metavar="VALUE",
                     help=f"source-of-truth preference "
                          f"({'|'.join(SOURCE_OF_TRUTH_VALUES)}, default both); "
-                         f"overrides {SOURCE_OF_TRUTH_ENV} and centella.toml")
+                         f"overrides {SOURCE_OF_TRUTH_ENV} and pila.toml")
     ap.add_argument("--inspect-dir", action="append", metavar="PATH",
                     dest="inspect_dir",
                     help="extra directory the inspect-bucket workers "
@@ -5539,7 +5539,7 @@ def main() -> None:
                          "Use for sibling repos referenced in the task that "
                          "live outside the current repo cwd. Default: none. "
                          f"Also {INSPECT_DIRS_ENV} (colon-separated) or "
-                         "inspect_dirs in centella.toml (comma-separated).")
+                         "inspect_dirs in pila.toml (comma-separated).")
     ap.add_argument("--model", choices=MODEL_VALUES, metavar="ALIAS",
                     help=f"model alias for all workers "
                          f"({'|'.join(MODEL_VALUES)}); no global default — "
@@ -5549,30 +5549,30 @@ def main() -> None:
                          f"{MODEL_DEFAULT_PER_WORKER['implementer']} "
                          "(IMPLEMENTATION.md §2). Per-worker "
                          "--model-<worker> flags override this, as do "
-                         "CENTELLA_MODEL[_*] env vars and centella.toml")
+                         "PILA_MODEL[_*] env vars and pila.toml")
     for _w in WORKER_TYPES:
         _w_default = MODEL_DEFAULT_PER_WORKER.get(_w, MODEL_DEFAULT)
         ap.add_argument(f"--model-{_w}", choices=MODEL_VALUES, metavar="ALIAS",
                         help=f"model alias for the {_w} worker "
                              f"(default {_w_default}) — overrides "
-                             f"--model, CENTELLA_MODEL, and centella.toml")
+                             f"--model, PILA_MODEL, and pila.toml")
     ap.add_argument("--judge-model", choices=MODEL_VALUES, metavar="ALIAS",
                     help=f"model alias for the judge post-run worker "
                          f"(default {MODEL_DEFAULT_PER_WORKER['judge']}); "
-                         f"also {MODEL_JUDGE_ENV} or model_judge in centella.toml")
+                         f"also {MODEL_JUDGE_ENV} or model_judge in pila.toml")
     ap.add_argument("--heal-model", choices=MODEL_VALUES, metavar="ALIAS",
                     help=f"model alias for the heal post-run worker "
                          f"(default {MODEL_DEFAULT_PER_WORKER['heal']}); "
-                         f"also {MODEL_HEAL_ENV} or model_heal in centella.toml")
+                         f"also {MODEL_HEAL_ENV} or model_heal in pila.toml")
     ap.add_argument("--heal-max-rounds", type=int, metavar="N",
                     help=f"maximum heal-loop iterations per call_type "
                          f"(default {HEAL_MAX_ROUNDS_DEFAULT}); "
-                         f"also {HEAL_MAX_ROUNDS_ENV} or heal_max_rounds in centella.toml")
+                         f"also {HEAL_MAX_ROUNDS_ENV} or heal_max_rounds in pila.toml")
     ap.add_argument("--heal-success-threshold", type=float, metavar="RATE",
                     help=f"pass-rate threshold for heal-loop SUCCESS verdict "
                          f"(default {HEAL_SUCCESS_THRESHOLD_DEFAULT}); "
                          f"also {HEAL_SUCCESS_THRESHOLD_ENV} or "
-                         "heal_success_threshold in centella.toml")
+                         "heal_success_threshold in pila.toml")
     # Verbosity: explicit --verbosity wins; -v/-q stackable shortcuts
     # anchor to `normal` (the pre-streaming behavior). So `-v` = stream,
     # `-vv` = debug, `-q` = normal, `-qq` = quiet. See IMPLEMENTATION.md
@@ -5581,7 +5581,7 @@ def main() -> None:
     ap.add_argument("--verbosity", choices=VERBOSITY_VALUES, metavar="LEVEL",
                     help=f"output verbosity ({'/'.join(VERBOSITY_VALUES)}, "
                          f"default {VERBOSITY_DEFAULT}); overrides "
-                         f"{VERBOSITY_ENV} and centella.toml")
+                         f"{VERBOSITY_ENV} and pila.toml")
     ap.add_argument("-v", "--verbose", action="count", default=0,
                     help="shortcut: -v=stream, -vv=debug. Default: 0 "
                          "(no -v; falls through to --verbosity)")
@@ -5597,26 +5597,26 @@ def main() -> None:
                           action="store_true", default=None,
                           help=f"enable telemetry (default on); also "
                                f"{TELEMETRY_ENV}=1 or telemetry=true in "
-                               "centella.toml")
+                               "pila.toml")
     _tel_grp.add_argument("--no-telemetry", dest="telemetry",
                           action="store_false",
                           help=f"disable telemetry event writing "
                                f"(default: telemetry is on); also "
                                f"{TELEMETRY_ENV}=0 or telemetry=false in "
-                               "centella.toml")
+                               "pila.toml")
     ap.add_argument("--telemetry-dir", metavar="DIR",
                     help=f"subdirectory name under the run dir for telemetry "
                          f"NDJSON events (default '{TELEMETRY_SUBDIR_DEFAULT}'); "
                          f"also {TELEMETRY_SUBDIR_ENV} or telemetry_dir in "
-                         "centella.toml")
+                         "pila.toml")
     ap.add_argument("--judge-dir", metavar="DIR",
                     help=f"subdirectory name under the run dir for LLM judge "
                          f"output (default '{JUDGE_DIR_DEFAULT}'); also "
-                         f"{JUDGE_DIR_ENV} or judge_dir in centella.toml")
+                         f"{JUDGE_DIR_ENV} or judge_dir in pila.toml")
     ap.add_argument("--heal-dir", metavar="DIR",
                     help=f"subdirectory name under the run dir for LLM self-heal "
                          f"output (default '{HEAL_DIR_DEFAULT}'); also "
-                         f"{HEAL_DIR_ENV} or heal_dir in centella.toml")
+                         f"{HEAL_DIR_ENV} or heal_dir in pila.toml")
     ap.add_argument("--phase", choices=["judge", "heal"], metavar="PHASE",
                     help="run a post-run skill phase against an existing run's "
                          "captured LLM calls instead of starting a new run. "
@@ -5631,12 +5631,12 @@ def main() -> None:
                          "reports to <run-dir>/<heal-dir>/.")
     args = ap.parse_args()
 
-    # --list short-circuits everything else: read .centella/runs/* and
+    # --list short-circuits everything else: read .pila/runs/* and
     # exit. No git/CLI checks needed; the user might be inspecting runs
     # from outside a git repo.
     if args.list_runs:
-        centella_root = Path(".centella").resolve()
-        list_runs(centella_root)
+        pila_root = Path(".pila").resolve()
+        list_runs(pila_root)
         return
 
     if not shutil.which("claude"):
@@ -5669,28 +5669,28 @@ def main() -> None:
                  or resolve_verbosity(Path(os.getcwd()), None))
 
     # The on-disk layout is per-run: every run gets its own subdirectory
-    # `centella_root/runs/<run-id>/` (see DESIGN.md §6, §10). For a fresh
+    # `pila_root/runs/<run-id>/` (see DESIGN.md §6, §10). For a fresh
     # run we don't know the final run_id until phase_classify has chosen
     # a category, so state lives in `_bootstrap-<6hex>/` until then; the
     # rename to the final run_id happens in orchestrate() after classify.
-    centella_root = Path(".centella").resolve()
-    centella_root.mkdir(parents=True, exist_ok=True)
-    (centella_root / "runs").mkdir(parents=True, exist_ok=True)
+    pila_root = Path(".pila").resolve()
+    pila_root.mkdir(parents=True, exist_ok=True)
+    (pila_root / "runs").mkdir(parents=True, exist_ok=True)
     if args.resume:
         # Auto-pick if exactly one run exists; die with the available list
         # if multiple are in flight unless --run-id picks one explicitly.
-        run_id = resolve_run_id(centella_root, args.run_id)
+        run_id = resolve_run_id(pila_root, args.run_id)
     else:
         # Bootstrap directory: keyed on the current wall-clock time so two
         # concurrent invocations don't pick the same one. Renamed to the
         # final `<short_category>-<slug>-<6hex>` after classify.
         run_id = "_bootstrap-" + hashlib.sha1(now().encode()).hexdigest()[:6]
-    st = State(centella_root, run_id)
+    st = State(pila_root, run_id)
     for sub in ("", "subtasks", "criteria", "checkpoints", "logs"):
         (st.run_dir / sub).mkdir(parents=True, exist_ok=True)
 
     # Resolve source-of-truth and per-worker model preferences once per run.
-    # Both die() on a bad value so typos in centella.toml or env vars are
+    # Both die() on a bad value so typos in pila.toml or env vars are
     # caught at startup, not mid-planner. argparse already rejected any bad
     # --source-of-truth / --model[-*] before we got here.
     repo_root = Path(os.getcwd())
@@ -5698,8 +5698,8 @@ def main() -> None:
     models = resolve_models(repo_root, args)
     log(f"models: " + ", ".join(f"{w}={models[w]}" for w in WORKER_TYPES))
 
-    # Resolve --no-push: CLI flag → CENTELLA_NO_PUSH env → no_push in
-    # centella.toml → False. Re-attach to args so orchestrate() /
+    # Resolve --no-push: CLI flag → PILA_NO_PUSH env → no_push in
+    # pila.toml → False. Re-attach to args so orchestrate() /
     # preflight() / phase_finalize() see the resolved value uniformly via
     # `args.no_push` regardless of where the choice came from.
     args.no_push = resolve_no_push(repo_root, args.no_push)
@@ -5709,8 +5709,8 @@ def main() -> None:
     # the canonical "clarify" key.
     args.clarify = resolve_clarify(repo_root, args.clarify)
 
-    # Resolve --inspect-dir: CLI flags (repeatable) → CENTELLA_INSPECT_DIRS
-    # env (colon-separated) → inspect_dirs in centella.toml (comma-separated)
+    # Resolve --inspect-dir: CLI flags (repeatable) → PILA_INSPECT_DIRS
+    # env (colon-separated) → inspect_dirs in pila.toml (comma-separated)
     # → []. Re-attached to args so orchestrate() can fold it into state.
     args.inspect_dirs = resolve_inspect_dirs(
         repo_root, getattr(args, "inspect_dir", None))
@@ -5730,8 +5730,8 @@ def main() -> None:
     # --phase judge|heal: post-run skill phases. Short-circuit the normal
     # orchestrate() flow — just pick an existing run and run the skill.
     if args.phase:
-        phase_run_id = resolve_run_id(centella_root, args.run_id)
-        phase_st = State(centella_root, phase_run_id)
+        phase_run_id = resolve_run_id(pila_root, args.run_id)
+        phase_st = State(pila_root, phase_run_id)
         if not phase_st.load():
             die(f"no state.json found for run {phase_run_id!r}; "
                 f"the run may not have reached the execute phase yet")

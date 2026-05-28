@@ -21,23 +21,23 @@ def _plan(domain: str, *subtasks: dict) -> dict:
     return {"domain": domain, "status": "ready", "subtasks": list(subtasks)}
 
 
-def test_unresolved_empty_when_plan_has_no_requires(centella):
+def test_unresolved_empty_when_plan_has_no_requires(pila):
     plans = [_plan("feature-implementation",
                    {"id": "feat-001", "title": "x", "provides": ["a"]})]
-    assert centella._compute_unresolved_requires(plans) == []
+    assert pila._compute_unresolved_requires(plans) == []
 
 
-def test_unresolved_empty_when_every_requires_has_a_provider(centella):
+def test_unresolved_empty_when_every_requires_has_a_provider(pila):
     plans = [
         _plan("feature-implementation",
               {"id": "feat-001", "title": "x", "provides": ["a"]}),
         _plan("testing",
               {"id": "test-001", "title": "y", "requires": ["a"]}),
     ]
-    assert centella._compute_unresolved_requires(plans) == []
+    assert pila._compute_unresolved_requires(plans) == []
 
 
-def test_unresolved_lists_missing_tags(centella):
+def test_unresolved_lists_missing_tags(pila):
     plans = [
         _plan("feature-implementation",
               {"id": "feat-001", "title": "x", "provides": ["a"]}),
@@ -46,22 +46,22 @@ def test_unresolved_lists_missing_tags(centella):
         _plan("testing",
               {"id": "test-002", "title": "z", "requires": ["missing-2"]}),
     ]
-    out = centella._compute_unresolved_requires(plans)
+    out = pila._compute_unresolved_requires(plans)
     # Order is by iteration order over plans → subtasks → requires;
     # we don't pin it tightly but the (sid, tag) pairs are stable.
     pairs = {(u["sid"], u["tag"]) for u in out}
     assert pairs == {("test-001", "missing-1"), ("test-002", "missing-2")}
 
 
-def test_unresolved_handles_subtask_with_no_requires_field(centella):
+def test_unresolved_handles_subtask_with_no_requires_field(pila):
     """A subtask that omits `requires` entirely (default empty) doesn't
     crash the lookup."""
     plans = [_plan("feature-implementation",
                    {"id": "feat-001", "title": "x"})]
-    assert centella._compute_unresolved_requires(plans) == []
+    assert pila._compute_unresolved_requires(plans) == []
 
 
-def test_unresolved_handles_subtask_with_no_provides_field(centella):
+def test_unresolved_handles_subtask_with_no_provides_field(pila):
     """A subtask that omits `provides` entirely doesn't contribute to
     `all_provides`. The lookup still works."""
     plans = [
@@ -70,11 +70,11 @@ def test_unresolved_handles_subtask_with_no_provides_field(centella):
         _plan("testing",
               {"id": "test-001", "title": "y", "requires": ["a"]}),
     ]
-    out = centella._compute_unresolved_requires(plans)
+    out = pila._compute_unresolved_requires(plans)
     assert out == [{"sid": "test-001", "tag": "a"}]
 
 
-def test_unresolved_duplicate_requires_emits_once_per_subtask(centella):
+def test_unresolved_duplicate_requires_emits_once_per_subtask(pila):
     """A subtask declaring the same `requires` tag twice should not
     crash; the duplicate is fine (the scheduler dedup is unaffected by
     our emit ordering)."""
@@ -83,7 +83,7 @@ def test_unresolved_duplicate_requires_emits_once_per_subtask(centella):
               {"id": "test-001", "title": "y",
                "requires": ["missing-1", "missing-1"]}),
     ]
-    out = centella._compute_unresolved_requires(plans)
+    out = pila._compute_unresolved_requires(plans)
     # Two entries — same sid + tag, both surfaced. The reconciler
     # consumes the list as a set internally; preserving duplicates here
     # is harmless and avoids hiding a planner bug.
@@ -92,19 +92,19 @@ def test_unresolved_duplicate_requires_emits_once_per_subtask(centella):
 
 # --- _apply_reconciler_output ------------------------------------------
 
-def test_apply_empty_output_is_noop(centella):
+def test_apply_empty_output_is_noop(pila):
     """An all-empty output leaves plans unchanged."""
     plans = [_plan("feature-implementation",
                    {"id": "feat-001", "title": "x", "requires": ["foo"]})]
     out = {"renames": [], "added_provides": [],
            "added_subtasks": [], "unresolvable": []}
-    centella._apply_reconciler_output(plans, out)
+    pila._apply_reconciler_output(plans, out)
     # No mutations.
     assert plans[0]["subtasks"][0]["requires"] == ["foo"]
     assert len(plans) == 1
 
 
-def test_apply_rename_rewrites_requires_on_named_subtask(centella):
+def test_apply_rename_rewrites_requires_on_named_subtask(pila):
     plans = [
         _plan("feature-implementation",
               {"id": "feat-001", "title": "x", "provides": ["canonical"]}),
@@ -115,12 +115,12 @@ def test_apply_rename_rewrites_requires_on_named_subtask(centella):
     out = {"renames": [{"sid": "test-001", "from": "old-name",
                         "to": "canonical"}],
            "added_provides": [], "added_subtasks": [], "unresolvable": []}
-    centella._apply_reconciler_output(plans, out)
+    pila._apply_reconciler_output(plans, out)
     # The `from` tag is gone; `to` replaces it; other reqs untouched.
     assert plans[1]["subtasks"][0]["requires"] == ["canonical", "other-req"]
 
 
-def test_apply_rename_with_nonexistent_sid_is_silently_skipped(centella):
+def test_apply_rename_with_nonexistent_sid_is_silently_skipped(pila):
     """Defensive: if the reconciler emits a rename for a sid that
     doesn't exist, drop it rather than crash. (The reconciler is told
     only existing sids; this is belt-and-suspenders.)"""
@@ -129,44 +129,44 @@ def test_apply_rename_with_nonexistent_sid_is_silently_skipped(centella):
     out = {"renames": [{"sid": "nonexistent-001", "from": "foo",
                         "to": "bar"}],
            "added_provides": [], "added_subtasks": [], "unresolvable": []}
-    centella._apply_reconciler_output(plans, out)
+    pila._apply_reconciler_output(plans, out)
     # test-001 was not the target; its requires is unchanged.
     assert plans[0]["subtasks"][0]["requires"] == ["foo"]
 
 
-def test_apply_added_provides_appends_to_subtask(centella):
+def test_apply_added_provides_appends_to_subtask(pila):
     plans = [_plan("feature-implementation",
                    {"id": "feat-001", "title": "x", "provides": ["a"]})]
     out = {"renames": [],
            "added_provides": [{"sid": "feat-001", "tag": "b"}],
            "added_subtasks": [], "unresolvable": []}
-    centella._apply_reconciler_output(plans, out)
+    pila._apply_reconciler_output(plans, out)
     assert plans[0]["subtasks"][0]["provides"] == ["a", "b"]
 
 
-def test_apply_added_provides_idempotent(centella):
+def test_apply_added_provides_idempotent(pila):
     """If the reconciler emits an already-present tag, don't duplicate it."""
     plans = [_plan("feature-implementation",
                    {"id": "feat-001", "title": "x", "provides": ["a"]})]
     out = {"renames": [],
            "added_provides": [{"sid": "feat-001", "tag": "a"}],
            "added_subtasks": [], "unresolvable": []}
-    centella._apply_reconciler_output(plans, out)
+    pila._apply_reconciler_output(plans, out)
     assert plans[0]["subtasks"][0]["provides"] == ["a"]
 
 
-def test_apply_added_provides_to_subtask_with_no_provides_field(centella):
+def test_apply_added_provides_to_subtask_with_no_provides_field(pila):
     """Subtask missing `provides` entirely → field is added."""
     plans = [_plan("feature-implementation",
                    {"id": "feat-001", "title": "x"})]
     out = {"renames": [],
            "added_provides": [{"sid": "feat-001", "tag": "b"}],
            "added_subtasks": [], "unresolvable": []}
-    centella._apply_reconciler_output(plans, out)
+    pila._apply_reconciler_output(plans, out)
     assert plans[0]["subtasks"][0]["provides"] == ["b"]
 
 
-def test_apply_added_subtasks_appends_reconciler_plan(centella):
+def test_apply_added_subtasks_appends_reconciler_plan(pila):
     """Added subtasks land in a new pseudo-plan with domain="_reconciler".
     The scheduler flattens by id, so the domain only affects logs."""
     plans = [_plan("feature-implementation",
@@ -181,13 +181,13 @@ def test_apply_added_subtasks_appends_reconciler_plan(centella):
     out = {"renames": [], "added_provides": [],
            "added_subtasks": [new_subtask],
            "unresolvable": []}
-    centella._apply_reconciler_output(plans, out)
+    pila._apply_reconciler_output(plans, out)
     assert len(plans) == 2
     assert plans[1]["domain"] == "_reconciler"
     assert plans[1]["subtasks"] == [new_subtask]
 
 
-def test_apply_dies_on_duplicate_added_subtask_id(centella):
+def test_apply_dies_on_duplicate_added_subtask_id(pila):
     """If the reconciler emits an added_subtask whose `id` collides with
     an existing subtask, `_apply_reconciler_output` must die() — not
     silently append. The scheduler later merges all subtasks into a
@@ -211,7 +211,7 @@ def test_apply_dies_on_duplicate_added_subtask_id(centella):
         "unresolvable": [],
     }
     with pytest.raises(SystemExit) as exc:
-        centella._apply_reconciler_output(plans, out)
+        pila._apply_reconciler_output(plans, out)
     assert exc.value.code != 0
     # The original subtask is still there — the helper must NOT have
     # mutated plans before dying. (die() runs at the top of the
@@ -221,7 +221,7 @@ def test_apply_dies_on_duplicate_added_subtask_id(centella):
     assert plans[0]["subtasks"][0]["title"] == "shim"
 
 
-def test_apply_dies_names_colliding_ids_in_error(centella, capsys):
+def test_apply_dies_names_colliding_ids_in_error(pila, capsys):
     """The die() message must name the colliding id(s) so a user reading
     the error can map straight back to the offending plan. Pin the
     surface form so a future refactor can't degrade it to a generic
@@ -243,14 +243,14 @@ def test_apply_dies_names_colliding_ids_in_error(centella, capsys):
         "unresolvable": [],
     }
     with pytest.raises(SystemExit):
-        centella._apply_reconciler_output(plans, out)
+        pila._apply_reconciler_output(plans, out)
     err = capsys.readouterr().err
     # The colliding id is named; the non-colliding one is not.
     assert "feat-002" in err
     assert "feat-009" not in err
 
 
-def test_apply_dies_on_duplicate_added_subtask_self_collision(centella):
+def test_apply_dies_on_duplicate_added_subtask_self_collision(pila):
     """The reconciler emitted two added_subtasks with the same id —
     neither colliding with an existing subtask, but colliding with each
     other. schedule()'s dict-flatten would silently drop one; this
@@ -272,7 +272,7 @@ def test_apply_dies_on_duplicate_added_subtask_self_collision(centella):
         "unresolvable": [],
     }
     with pytest.raises(SystemExit) as exc:
-        centella._apply_reconciler_output(plans, out)
+        pila._apply_reconciler_output(plans, out)
     assert exc.value.code != 0
     # Plans unmutated — the helper dies before appending the
     # _reconciler pseudo-plan, so the existing plan is still alone.
@@ -280,7 +280,7 @@ def test_apply_dies_on_duplicate_added_subtask_self_collision(centella):
     assert plans[0]["subtasks"][0]["id"] == "feat-001"
 
 
-def test_apply_dies_names_self_colliding_ids_in_error(centella, capsys):
+def test_apply_dies_names_self_colliding_ids_in_error(pila, capsys):
     """The die() message must use the 'duplicated within added_subtasks'
     surface form (not the 'collide with existing subtasks' form) so a
     user reading the error can tell self-collision apart from
@@ -302,7 +302,7 @@ def test_apply_dies_names_self_colliding_ids_in_error(centella, capsys):
         "unresolvable": [],
     }
     with pytest.raises(SystemExit):
-        centella._apply_reconciler_output(plans, out)
+        pila._apply_reconciler_output(plans, out)
     err = capsys.readouterr().err
     # Self-collision surface form named; the non-colliding id is not.
     assert "duplicated within added_subtasks" in err
@@ -313,7 +313,7 @@ def test_apply_dies_names_self_colliding_ids_in_error(centella, capsys):
     assert "collide with existing subtasks" not in err
 
 
-def test_apply_combined_renames_provides_and_subtasks(centella):
+def test_apply_combined_renames_provides_and_subtasks(pila):
     """Realistic case: all three mutation types applied in one call."""
     plans = [
         _plan("feature-implementation",
@@ -335,7 +335,7 @@ def test_apply_combined_renames_provides_and_subtasks(centella):
         }],
         "unresolvable": [],
     }
-    centella._apply_reconciler_output(plans, out)
+    pila._apply_reconciler_output(plans, out)
     # rename applied
     assert "wrong-name" not in plans[1]["subtasks"][0]["requires"]
     assert "shim-cap" in plans[1]["subtasks"][0]["requires"]
@@ -346,7 +346,7 @@ def test_apply_combined_renames_provides_and_subtasks(centella):
     assert plans[2]["subtasks"][0]["id"] == "feat-009"
 
 
-def test_apply_does_not_consume_unresolvable_array(centella):
+def test_apply_does_not_consume_unresolvable_array(pila):
     """`unresolvable` is the orchestrator's responsibility (die() before
     calling _apply). `_apply_reconciler_output` ignores it — pin so the
     helper doesn't accidentally swallow unresolvable as a non-failure
@@ -356,7 +356,7 @@ def test_apply_does_not_consume_unresolvable_array(centella):
     out = {"renames": [], "added_provides": [], "added_subtasks": [],
            "unresolvable": [{"sid": "test-001", "tag": "x",
                              "reason": "fake reason"}]}
-    centella._apply_reconciler_output(plans, out)
+    pila._apply_reconciler_output(plans, out)
     # Plans unchanged — unresolvable is not the helper's concern.
     assert plans[0]["subtasks"][0]["requires"] == ["x"]
     assert len(plans) == 1

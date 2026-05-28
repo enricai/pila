@@ -15,10 +15,10 @@ venv/
 *.swp
 *.swo
 
-# Centella run artifacts — created per-run in target repos, never tracked.
-.centella/
-# Top-level log when the CLI is teed (`./centella "..." | tee centella.log`).
-centella.log
+# Pila run artifacts — created per-run in target repos, never tracked.
+.pila/
+# Top-level log when the CLI is teed (`./pila "..." | tee pila.log`).
+pila.log
 
 # Local Claude Code settings / cache — per-machine, never tracked.
 .claude/

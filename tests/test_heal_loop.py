@@ -89,9 +89,9 @@ def _make_failing_records(n: int = 2) -> list[dict]:
     return records
 
 
-def _make_state(centella, run_dir: Path):
+def _make_state(pila, run_dir: Path):
     """Minimal State-alike for heal tests."""
-    st = centella.State.__new__(centella.State)
+    st = pila.State.__new__(pila.State)
     st.run_id = "test-heal-run"
     st.run_dir = run_dir
     st.path = run_dir / "state.json"
@@ -106,37 +106,37 @@ def _make_state(centella, run_dir: Path):
     return st
 
 
-def _patch_invoke_for_judge(centella, monkeypatch, judge_envelope=_JUDGE_ENVELOPE):
-    """Patch centella._invoke to return the judge envelope."""
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+def _patch_invoke_for_judge(pila, monkeypatch, judge_envelope=_JUDGE_ENVELOPE):
+    """Patch pila._invoke to return the judge envelope."""
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         return judge_envelope
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
 
 
-def _patch_replay_and_judge(centella, monkeypatch):
+def _patch_replay_and_judge(pila, monkeypatch):
     """Patch both replay_capture and _invoke (for judge) without network I/O."""
     async def fake_replay(record, *, override_system_prompt=None, cwd=None):
         return (_REPLAY_ENVELOPE, {"categories": ["bug-fixing"]})
 
-    monkeypatch.setattr(centella, "replay_capture", fake_replay)
+    monkeypatch.setattr(pila, "replay_capture", fake_replay)
 
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         return _JUDGE_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
 
 
 # ---------------------------------------------------------------------------
 # Criterion (d): HealState round-trips via save/load
 # ---------------------------------------------------------------------------
 
-def test_heal_state_save_load_roundtrip(centella, tmp_path):
+def test_heal_state_save_load_roundtrip(pila, tmp_path):
     """HealState.save() + load() preserves all fields."""
     heal_dir = tmp_path / "heal"
-    hs = centella.HealState(heal_dir, "classifier")
+    hs = pila.HealState(heal_dir, "classifier")
     hs.failing_samples = [{"call_id": "abc", "call_type": "classifier"}]
     hs.baseline = {"abc": {"pass_rate": 0.33, "verdicts": []}}
     hs.history = [{"iter_n": 1, "pass_rate": 0.5, "scores": {}}]
@@ -147,7 +147,7 @@ def test_heal_state_save_load_roundtrip(centella, tmp_path):
     state_path = heal_dir / "classifier" / "state.json"
     assert state_path.exists(), "state.json not written after save()"
 
-    hs2 = centella.HealState(heal_dir, "classifier")
+    hs2 = pila.HealState(heal_dir, "classifier")
     loaded = hs2.load()
     assert loaded, "load() returned False despite state.json existing"
     assert hs2.failing_samples == hs.failing_samples
@@ -156,10 +156,10 @@ def test_heal_state_save_load_roundtrip(centella, tmp_path):
     assert hs2.best_so_far == hs.best_so_far
 
 
-def test_heal_state_save_is_atomic(centella, tmp_path):
+def test_heal_state_save_is_atomic(pila, tmp_path):
     """save() writes via a temp file then replaces (atomic)."""
     heal_dir = tmp_path / "heal"
-    hs = centella.HealState(heal_dir, "planner")
+    hs = pila.HealState(heal_dir, "planner")
     hs.save()
     state_path = heal_dir / "planner" / "state.json"
     assert state_path.exists()
@@ -168,10 +168,10 @@ def test_heal_state_save_is_atomic(centella, tmp_path):
     assert not tmp_path_candidate.exists(), ".tmp file leaked after save()"
 
 
-def test_heal_state_load_missing(centella, tmp_path):
+def test_heal_state_load_missing(pila, tmp_path):
     """load() returns False when no state.json exists."""
     heal_dir = tmp_path / "heal"
-    hs = centella.HealState(heal_dir, "classifier")
+    hs = pila.HealState(heal_dir, "classifier")
     assert not hs.load()
 
 
@@ -179,16 +179,16 @@ def test_heal_state_load_missing(centella, tmp_path):
 # Criterion (a): heal_baseline writes state.json + 6 judge verdicts
 # ---------------------------------------------------------------------------
 
-def test_heal_baseline_writes_state_json(centella, tmp_path, monkeypatch):
+def test_heal_baseline_writes_state_json(pila, tmp_path, monkeypatch):
     """heal_baseline with 2 failing captures, n=3 writes state.json."""
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
     records = _make_failing_records(2)
-    _patch_replay_and_judge(centella, monkeypatch)
+    _patch_replay_and_judge(pila, monkeypatch)
 
     hs = asyncio.run(
-        centella.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
+        pila.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
     )
 
     state_path = heal_dir / "classifier" / "state.json"
@@ -200,16 +200,16 @@ def test_heal_baseline_writes_state_json(centella, tmp_path, monkeypatch):
     assert len(loaded["failing_samples"]) == 2
 
 
-def test_heal_baseline_baseline_covers_both_samples(centella, tmp_path, monkeypatch):
+def test_heal_baseline_baseline_covers_both_samples(pila, tmp_path, monkeypatch):
     """heal_baseline baseline dict contains entries for both call_ids."""
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
     records = _make_failing_records(2)
-    _patch_replay_and_judge(centella, monkeypatch)
+    _patch_replay_and_judge(pila, monkeypatch)
 
     hs = asyncio.run(
-        centella.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
+        pila.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
     )
 
     assert len(hs.baseline) == 2, f"Expected 2 baseline entries, got {len(hs.baseline)}"
@@ -223,16 +223,16 @@ def test_heal_baseline_baseline_covers_both_samples(centella, tmp_path, monkeypa
             f"Expected 3 verdicts for {call_id}, got {len(entry['verdicts'])}")
 
 
-def test_heal_baseline_writes_6_verdict_files(centella, tmp_path, monkeypatch):
+def test_heal_baseline_writes_6_verdict_files(pila, tmp_path, monkeypatch):
     """heal_baseline with 2 records and n=3 writes exactly 6 verdict files."""
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
     records = _make_failing_records(2)
-    _patch_replay_and_judge(centella, monkeypatch)
+    _patch_replay_and_judge(pila, monkeypatch)
 
     asyncio.run(
-        centella.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
+        pila.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
     )
 
     verdicts_dir = heal_dir / "classifier" / "baseline" / "verdicts"
@@ -241,32 +241,32 @@ def test_heal_baseline_writes_6_verdict_files(centella, tmp_path, monkeypatch):
         f"Expected 6 verdict files, got {len(verdict_files)}: {verdict_files}")
 
 
-def test_heal_baseline_sets_best_so_far(centella, tmp_path, monkeypatch):
+def test_heal_baseline_sets_best_so_far(pila, tmp_path, monkeypatch):
     """heal_baseline sets best_so_far from the baseline pass_rate."""
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
     records = _make_failing_records(2)
-    _patch_replay_and_judge(centella, monkeypatch)
+    _patch_replay_and_judge(pila, monkeypatch)
 
     hs = asyncio.run(
-        centella.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
+        pila.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
     )
 
     assert "pass_rate" in hs.best_so_far, "best_so_far missing pass_rate"
     assert hs.best_so_far.get("iter_n") == 0, "baseline best_so_far should have iter_n=0"
 
 
-def test_heal_baseline_history_is_empty(centella, tmp_path, monkeypatch):
+def test_heal_baseline_history_is_empty(pila, tmp_path, monkeypatch):
     """heal_baseline does not write any iteration history (that's for replay)."""
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
     records = _make_failing_records(2)
-    _patch_replay_and_judge(centella, monkeypatch)
+    _patch_replay_and_judge(pila, monkeypatch)
 
     hs = asyncio.run(
-        centella.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
+        pila.heal_baseline("classifier", records, 3, heal_dir, _CAPS, st, _MODELS)
     )
 
     assert hs.history == [], f"Expected empty history, got {hs.history}"
@@ -276,12 +276,12 @@ def test_heal_baseline_history_is_empty(centella, tmp_path, monkeypatch):
 # Criterion (b): heal_apply_patch writes patched prompts under iter-1/
 # ---------------------------------------------------------------------------
 
-def test_heal_apply_patch_writes_two_prompt_files(centella, tmp_path):
+def test_heal_apply_patch_writes_two_prompt_files(pila, tmp_path):
     """heal_apply_patch writes one .txt file per failing record."""
     heal_dir = tmp_path / "heal"
     records = _make_failing_records(2)
 
-    written = centella.heal_apply_patch(
+    written = pila.heal_apply_patch(
         "classifier", 1, "REPLACEMENT_TEXT", "ANCHOR_POINT_HERE",
         heal_dir, records
     )
@@ -293,14 +293,14 @@ def test_heal_apply_patch_writes_two_prompt_files(centella, tmp_path):
         assert dest.exists(), f"Patched prompt missing: {dest}"
 
 
-def test_heal_apply_patch_anchor_replacement(centella, tmp_path):
+def test_heal_apply_patch_anchor_replacement(pila, tmp_path):
     """Patched prompt contains replacement_text where anchor was."""
     heal_dir = tmp_path / "heal"
     records = _make_failing_records(2)
     anchor = "ANCHOR_POINT_HERE"
     replacement = "REPLACED_CONTENT"
 
-    centella.heal_apply_patch("classifier", 1, replacement, anchor, heal_dir, records)
+    pila.heal_apply_patch("classifier", 1, replacement, anchor, heal_dir, records)
 
     for rec in records:
         call_id = rec["call_id"]
@@ -310,14 +310,14 @@ def test_heal_apply_patch_anchor_replacement(centella, tmp_path):
         assert anchor not in content, f"Anchor still present in {call_id}.txt after patch"
 
 
-def test_heal_apply_patch_creates_dir(centella, tmp_path):
+def test_heal_apply_patch_creates_dir(pila, tmp_path):
     """heal_apply_patch creates the patched-prompts directory if absent."""
     heal_dir = tmp_path / "heal"
     records = _make_failing_records(1)
     out_dir = heal_dir / "classifier" / "iter-1" / "patched-prompts"
     assert not out_dir.exists()
 
-    centella.heal_apply_patch("classifier", 1, "new", "ANCHOR_POINT_HERE",
+    pila.heal_apply_patch("classifier", 1, "new", "ANCHOR_POINT_HERE",
                                heal_dir, records)
 
     assert out_dir.exists()
@@ -327,32 +327,32 @@ def test_heal_apply_patch_creates_dir(centella, tmp_path):
 # Criterion (c): heal_replay_patched updates state.json with iteration record
 # ---------------------------------------------------------------------------
 
-def _setup_for_replay(centella, tmp_path, monkeypatch, n_replays: int = 2):
+def _setup_for_replay(pila, tmp_path, monkeypatch, n_replays: int = 2):
     """Shared setup: run baseline then apply_patch, ready for replay."""
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
     records = _make_failing_records(2)
-    _patch_replay_and_judge(centella, monkeypatch)
+    _patch_replay_and_judge(pila, monkeypatch)
 
     asyncio.run(
-        centella.heal_baseline("classifier", records, 2, heal_dir, _CAPS, st, _MODELS)
+        pila.heal_baseline("classifier", records, 2, heal_dir, _CAPS, st, _MODELS)
     )
-    centella.heal_apply_patch(
+    pila.heal_apply_patch(
         "classifier", 1, "REPLACEMENT_TEXT", "ANCHOR_POINT_HERE",
         heal_dir, records
     )
     return run_dir, heal_dir, st, records
 
 
-def test_heal_replay_patched_updates_history(centella, tmp_path, monkeypatch):
+def test_heal_replay_patched_updates_history(pila, tmp_path, monkeypatch):
     """heal_replay_patched appends one iteration record to state.json history."""
     run_dir, heal_dir, st, records = _setup_for_replay(
-        centella, tmp_path, monkeypatch
+        pila, tmp_path, monkeypatch
     )
 
     hs = asyncio.run(
-        centella.heal_replay_patched("classifier", 1, 2, heal_dir, _CAPS, st, _MODELS)
+        pila.heal_replay_patched("classifier", 1, 2, heal_dir, _CAPS, st, _MODELS)
     )
 
     assert len(hs.history) == 1, f"Expected 1 history entry, got {len(hs.history)}"
@@ -361,14 +361,14 @@ def test_heal_replay_patched_updates_history(centella, tmp_path, monkeypatch):
     assert "pass_rate" in entry
 
 
-def test_heal_replay_patched_state_persisted(centella, tmp_path, monkeypatch):
+def test_heal_replay_patched_state_persisted(pila, tmp_path, monkeypatch):
     """After heal_replay_patched, state.json on disk contains the history entry."""
     run_dir, heal_dir, st, records = _setup_for_replay(
-        centella, tmp_path, monkeypatch
+        pila, tmp_path, monkeypatch
     )
 
     asyncio.run(
-        centella.heal_replay_patched("classifier", 1, 2, heal_dir, _CAPS, st, _MODELS)
+        pila.heal_replay_patched("classifier", 1, 2, heal_dir, _CAPS, st, _MODELS)
     )
 
     state_path = heal_dir / "classifier" / "state.json"
@@ -377,14 +377,14 @@ def test_heal_replay_patched_state_persisted(centella, tmp_path, monkeypatch):
     assert loaded["history"][0]["iter_n"] == 1
 
 
-def test_heal_replay_patched_best_so_far_updated(centella, tmp_path, monkeypatch):
+def test_heal_replay_patched_best_so_far_updated(pila, tmp_path, monkeypatch):
     """best_so_far iter_n is updated when iteration improves on baseline."""
     run_dir, heal_dir, st, records = _setup_for_replay(
-        centella, tmp_path, monkeypatch
+        pila, tmp_path, monkeypatch
     )
 
     # Force baseline pass_rate to 0 so iteration always improves (judge returns passed=True).
-    hs_pre = centella.HealState(heal_dir, "classifier")
+    hs_pre = pila.HealState(heal_dir, "classifier")
     hs_pre.load()
     hs_pre.best_so_far = {"pass_rate": 0.0, "iter_n": 0}
     for cid in hs_pre.baseline:
@@ -392,7 +392,7 @@ def test_heal_replay_patched_best_so_far_updated(centella, tmp_path, monkeypatch
     hs_pre.save()
 
     hs = asyncio.run(
-        centella.heal_replay_patched("classifier", 1, 2, heal_dir, _CAPS, st, _MODELS)
+        pila.heal_replay_patched("classifier", 1, 2, heal_dir, _CAPS, st, _MODELS)
     )
 
     # Judge always returns passed=True, so pass_rate=1.0 > 0.0 → best updated.
@@ -404,13 +404,13 @@ def test_heal_replay_patched_best_so_far_updated(centella, tmp_path, monkeypatch
 # Importability checks
 # ---------------------------------------------------------------------------
 
-def test_heal_symbols_importable(centella):
+def test_heal_symbols_importable(pila):
     """HealState, heal_baseline, heal_apply_patch, heal_replay_patched must exist."""
-    assert hasattr(centella, "HealState"), "HealState not in centella"
-    assert hasattr(centella, "heal_baseline"), "heal_baseline not in centella"
-    assert hasattr(centella, "heal_apply_patch"), "heal_apply_patch not in centella"
-    assert hasattr(centella, "heal_replay_patched"), "heal_replay_patched not in centella"
-    assert callable(centella.HealState)
-    assert callable(centella.heal_baseline)
-    assert callable(centella.heal_apply_patch)
-    assert callable(centella.heal_replay_patched)
+    assert hasattr(pila, "HealState"), "HealState not in pila"
+    assert hasattr(pila, "heal_baseline"), "heal_baseline not in pila"
+    assert hasattr(pila, "heal_apply_patch"), "heal_apply_patch not in pila"
+    assert hasattr(pila, "heal_replay_patched"), "heal_replay_patched not in pila"
+    assert callable(pila.HealState)
+    assert callable(pila.heal_baseline)
+    assert callable(pila.heal_apply_patch)
+    assert callable(pila.heal_replay_patched)

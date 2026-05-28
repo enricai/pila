@@ -17,12 +17,12 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CENTELLA_PY = REPO_ROOT / "orchestrator" / "centella.py"
+PILA_PY = REPO_ROOT / "orchestrator" / "pila.py"
 
 
 def _claude_p_body() -> str:
     """Return the source text of the claude_p function."""
-    src = CENTELLA_PY.read_text()
+    src = PILA_PY.read_text()
     start = src.index("async def claude_p(")
     # claude_p ends at the next top-level `def` or `async def` / `class`
     next_async = src.index("\nasync def ", start + 1)

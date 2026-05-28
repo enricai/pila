@@ -25,21 +25,21 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CENTELLA_PY = REPO_ROOT / "orchestrator" / "centella.py"
+PILA_PY = REPO_ROOT / "orchestrator" / "pila.py"
 
 
 def _plan(domain: str, *subtasks: dict) -> dict:
     return {"domain": domain, "status": "ready", "subtasks": list(subtasks)}
 
 
-def _minimal_state(centella, tmp_path):
+def _minimal_state(pila, tmp_path):
     """A State with just enough plumbing for phase_reconcile to read
     st.bump_workers and not crash. No actual workers will run — the
     short-circuit path never invokes claude_p."""
-    centella_root = tmp_path / ".centella"
+    pila_root = tmp_path / ".pila"
     run_id = "test-reconcile-aaa111"
-    (centella_root / "runs" / run_id).mkdir(parents=True)
-    st = centella.State(centella_root, run_id)
+    (pila_root / "runs" / run_id).mkdir(parents=True)
+    st = pila.State(pila_root, run_id)
     st.data = {"task": "test", "worker_count": 0}
     st.save()
     return st
@@ -47,7 +47,7 @@ def _minimal_state(centella, tmp_path):
 
 # --- short-circuit -------------------------------------------------------
 
-def test_short_circuit_no_unresolved_returns_plans_unchanged(centella, tmp_path):
+def test_short_circuit_no_unresolved_returns_plans_unchanged(pila, tmp_path):
     """The common case: planners agreed on capability vocabulary, every
     `requires` has a matching `provides`. phase_reconcile must return
     the plans list without spawning a worker."""
@@ -57,14 +57,14 @@ def test_short_circuit_no_unresolved_returns_plans_unchanged(centella, tmp_path)
         _plan("testing",
               {"id": "test-001", "title": "y", "requires": ["a"]}),
     ]
-    st = _minimal_state(centella, tmp_path)
+    st = _minimal_state(pila, tmp_path)
     caps = {"max_total_workers": 40, "max_parallel": 4,
             "confidence_rounds": 8}
     # `models` doesn't need a "reconciler" key for the short-circuit
     # path — the worker is never invoked.
     models: dict[str, str] = {}
 
-    result = asyncio.run(centella.phase_reconcile(plans, "test task", st,
+    result = asyncio.run(pila.phase_reconcile(plans, "test task", st,
                                                   caps, models))
     # Same list, unchanged.
     assert result is plans
@@ -73,7 +73,7 @@ def test_short_circuit_no_unresolved_returns_plans_unchanged(centella, tmp_path)
     assert st.data.get("worker_count", 0) == 0
 
 
-def test_phase_reconcile_dies_on_planner_vs_planner_id_collision(centella, tmp_path):
+def test_phase_reconcile_dies_on_planner_vs_planner_id_collision(pila, tmp_path):
     """Two planners (different domains) both emit a subtask with id
     `feat-001`. Each planner's prompt tells it to prefix its ids with
     its domain, but the prompt is advisory per CLAUDE.md; if a planner
@@ -99,17 +99,17 @@ def test_phase_reconcile_dies_on_planner_vs_planner_id_collision(centella, tmp_p
               {"id": "feat-001", "title": "testing side",
                "provides": ["cap-b"]}),
     ]
-    st = _minimal_state(centella, tmp_path)
+    st = _minimal_state(pila, tmp_path)
     caps = {"max_total_workers": 40, "max_parallel": 4,
             "confidence_rounds": 8}
     models: dict[str, str] = {}
 
     with pytest.raises(SystemExit) as exc:
-        asyncio.run(centella.phase_reconcile(plans, "task", st, caps, models))
+        asyncio.run(pila.phase_reconcile(plans, "task", st, caps, models))
     assert exc.value.code != 0
 
 
-def test_phase_reconcile_collision_check_runs_before_short_circuit(centella, tmp_path):
+def test_phase_reconcile_collision_check_runs_before_short_circuit(pila, tmp_path):
     """The planner-vs-planner check must run even when every `requires`
     is already resolved — otherwise the short-circuit at
     `if not unresolved: return plans` would let a collision slip
@@ -127,14 +127,14 @@ def test_phase_reconcile_collision_check_runs_before_short_circuit(centella, tmp
               # collision.
               {"id": "feat-001", "title": "y", "provides": []}),
     ]
-    st = _minimal_state(centella, tmp_path)
+    st = _minimal_state(pila, tmp_path)
     caps = {"max_total_workers": 40, "max_parallel": 4,
             "confidence_rounds": 8}
     with pytest.raises(SystemExit):
-        asyncio.run(centella.phase_reconcile(plans, "task", st, {**caps}, {}))
+        asyncio.run(pila.phase_reconcile(plans, "task", st, {**caps}, {}))
 
 
-def test_phase_reconcile_collision_error_names_id_and_domains(centella, tmp_path, capsys):
+def test_phase_reconcile_collision_error_names_id_and_domains(pila, tmp_path, capsys):
     """The die() message must name the colliding id AND every domain
     that emitted it, so a user reading the error can trace it back to
     the specific planners that misbehaved. Distinct surface form from
@@ -149,11 +149,11 @@ def test_phase_reconcile_collision_error_names_id_and_domains(centella, tmp_path
         _plan("refactoring",
               {"id": "feat-001", "title": "c"}),
     ]
-    st = _minimal_state(centella, tmp_path)
+    st = _minimal_state(pila, tmp_path)
     caps = {"max_total_workers": 40, "max_parallel": 4,
             "confidence_rounds": 8}
     with pytest.raises(SystemExit):
-        asyncio.run(centella.phase_reconcile(plans, "task", st, caps, {}))
+        asyncio.run(pila.phase_reconcile(plans, "task", st, caps, {}))
     err = capsys.readouterr().err
     # The colliding id and all three domains are named.
     assert "feat-001" in err
@@ -165,68 +165,68 @@ def test_phase_reconcile_collision_error_names_id_and_domains(centella, tmp_path
     assert "planner-vs-planner" in err
 
 
-def test_short_circuit_empty_plans(centella, tmp_path):
+def test_short_circuit_empty_plans(pila, tmp_path):
     """Defensive: empty plans list short-circuits without error."""
     plans: list = []
-    st = _minimal_state(centella, tmp_path)
+    st = _minimal_state(pila, tmp_path)
     caps = {"max_total_workers": 40, "max_parallel": 4,
             "confidence_rounds": 8}
-    result = asyncio.run(centella.phase_reconcile(plans, "x", st, caps, {}))
+    result = asyncio.run(pila.phase_reconcile(plans, "x", st, caps, {}))
     assert result is plans
     assert result == []
 
 
-def test_short_circuit_plan_with_no_requires(centella, tmp_path):
+def test_short_circuit_plan_with_no_requires(pila, tmp_path):
     """Plan with subtasks that have `provides` but no `requires` →
     nothing to reconcile."""
     plans = [_plan("feature-implementation",
                    {"id": "feat-001", "title": "x", "provides": ["a"]})]
-    st = _minimal_state(centella, tmp_path)
+    st = _minimal_state(pila, tmp_path)
     caps = {"max_total_workers": 40, "max_parallel": 4,
             "confidence_rounds": 8}
-    result = asyncio.run(centella.phase_reconcile(plans, "x", st, caps, {}))
+    result = asyncio.run(pila.phase_reconcile(plans, "x", st, caps, {}))
     assert result is plans
     assert st.data.get("worker_count", 0) == 0
 
 
 # --- source-text pins on phase_reconcile's contract ----------------------
 
-def test_phase_reconcile_uses_reconciler_schema(centella):
+def test_phase_reconcile_uses_reconciler_schema(pila):
     """Worker is gated on SCHEMAS["reconciler"] — pin so the schema-key
     arg doesn't drift."""
-    src = inspect.getsource(centella.phase_reconcile)
+    src = inspect.getsource(pila.phase_reconcile)
     assert 'schema_key="reconciler"' in src
 
 
-def test_phase_reconcile_uses_inspect_tools(centella):
+def test_phase_reconcile_uses_inspect_tools(pila):
     """Reconciler is read-only — same tool bucket as classifier/planner.
     Pin so a refactor doesn't accidentally upgrade it to ACT_TOOLS
     (write/edit) which would let the worker modify files. INSPECT_TOOLS
     replaced READ_TOOLS to allow allowlisted read-only Bash without
     relying on --dangerously-skip-permissions (DESIGN §12)."""
-    src = inspect.getsource(centella.phase_reconcile)
+    src = inspect.getsource(pila.phase_reconcile)
     assert "allowed_tools=INSPECT_TOOLS" in src
 
 
-def test_phase_reconcile_uses_reconciler_model(centella):
+def test_phase_reconcile_uses_reconciler_model(pila):
     """The worker uses models['reconciler'] — pin so commit 4's wiring
     pre-condition (commit 3 adds 'reconciler' to WORKER_TYPES) doesn't
     silently regress."""
-    src = inspect.getsource(centella.phase_reconcile)
+    src = inspect.getsource(pila.phase_reconcile)
     assert 'models["reconciler"]' in src
 
 
-def test_phase_reconcile_uses_reconciler_prompt(centella):
+def test_phase_reconcile_uses_reconciler_prompt(pila):
     """The system prompt comes from prompts/reconciler.md."""
-    src = inspect.getsource(centella.phase_reconcile)
+    src = inspect.getsource(pila.phase_reconcile)
     assert 'load_prompt("reconciler")' in src
 
 
-def test_phase_reconcile_dies_on_unresolvable(centella):
+def test_phase_reconcile_dies_on_unresolvable(pila):
     """When the reconciler returns a non-empty `unresolvable` array, the
     orchestrator dies with the worker's reasoning. Pin the call to
     die() and the structural shape."""
-    src = inspect.getsource(centella.phase_reconcile)
+    src = inspect.getsource(pila.phase_reconcile)
     # die() must be called inside an unresolvable check.
     assert "unresolvable" in src
     assert "die(" in src
@@ -242,12 +242,12 @@ def test_phase_reconcile_dies_on_unresolvable(centella):
     )
 
 
-def test_phase_reconcile_second_pass_check_present(centella):
+def test_phase_reconcile_second_pass_check_present(pila):
     """After applying the reconciler's output, phase_reconcile re-runs
     `_compute_unresolved_requires` to catch the case where an
     `added_subtask` itself has unresolved `requires`. Pin so a future
     refactor can't silently regress to the single-pass behavior."""
-    src = inspect.getsource(centella.phase_reconcile)
+    src = inspect.getsource(pila.phase_reconcile)
     # The function should call _compute_unresolved_requires twice:
     # once at the start (to short-circuit) and once after applying.
     count = src.count("_compute_unresolved_requires(plans)")
@@ -258,18 +258,18 @@ def test_phase_reconcile_second_pass_check_present(centella):
     )
 
 
-def test_phase_reconcile_bumps_workers(centella):
+def test_phase_reconcile_bumps_workers(pila):
     """Worker invocation must go through st.bump_workers to count
     against max_total_workers. Pin so the reconciler counts toward the
     cap (and budget).
 
     Note: short-circuit path doesn't bump (no worker spawned)."""
-    src = inspect.getsource(centella.phase_reconcile)
+    src = inspect.getsource(pila.phase_reconcile)
     assert "st.bump_workers(caps)" in src
 
 
-def test_phase_reconcile_uses_sid_reconciler(centella):
-    """The worker's sid (used for logs and .centella/logs/<sid>.log) is
+def test_phase_reconcile_uses_sid_reconciler(pila):
+    """The worker's sid (used for logs and .pila/logs/<sid>.log) is
     'reconciler'. Pin so the log file lookup is stable."""
-    src = inspect.getsource(centella.phase_reconcile)
+    src = inspect.getsource(pila.phase_reconcile)
     assert 'sid="reconciler"' in src

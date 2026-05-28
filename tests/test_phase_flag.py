@@ -18,15 +18,15 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CENTELLA_PY = REPO_ROOT / "orchestrator" / "centella.py"
+PILA_PY = REPO_ROOT / "orchestrator" / "pila.py"
 
 
-def _build_parser(centella) -> argparse.ArgumentParser:
-    """Reconstruct the argument parser from the centella module.
+def _build_parser(pila) -> argparse.ArgumentParser:
+    """Reconstruct the argument parser from the pila module.
 
     We call main() with --help in a subprocess to avoid the git and claude
     checks, but for programmatic flag testing we need the parser itself.
-    Since centella.py embeds its parser inside main() with no factory
+    Since pila.py embeds its parser inside main() with no factory
     function, we rebuild just the minimal flags needed for this test by
     inspecting that --phase is wired via argparse with choices=["judge","heal"].
     Instead, we use subprocess.run with --help and parse the output.
@@ -37,7 +37,7 @@ def _build_parser(centella) -> argparse.ArgumentParser:
 def test_phase_judge_parses():
     """--phase judge produces args.phase == 'judge'."""
     result = subprocess.run(
-        [sys.executable, str(CENTELLA_PY), "--phase", "judge", "--help"],
+        [sys.executable, str(PILA_PY), "--phase", "judge", "--help"],
         capture_output=True, text=True,
     )
     # --help exits 0 and doesn't invoke the main logic; --phase judge is
@@ -48,7 +48,7 @@ def test_phase_judge_parses():
 def test_phase_heal_parses():
     """--phase heal produces no argparse error."""
     result = subprocess.run(
-        [sys.executable, str(CENTELLA_PY), "--phase", "heal", "--help"],
+        [sys.executable, str(PILA_PY), "--phase", "heal", "--help"],
         capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
@@ -57,7 +57,7 @@ def test_phase_heal_parses():
 def test_phase_invalid_rejected():
     """An invalid --phase value is rejected by argparse with non-zero exit."""
     result = subprocess.run(
-        [sys.executable, str(CENTELLA_PY), "--phase", "invalid"],
+        [sys.executable, str(PILA_PY), "--phase", "invalid"],
         capture_output=True, text=True,
     )
     assert result.returncode != 0
@@ -68,7 +68,7 @@ def test_phase_invalid_rejected():
 def test_no_phase_accepted():
     """Omitting --phase entirely is accepted (normal run); --help exits 0."""
     result = subprocess.run(
-        [sys.executable, str(CENTELLA_PY), "--help"],
+        [sys.executable, str(PILA_PY), "--help"],
         capture_output=True, text=True,
     )
     assert result.returncode == 0
@@ -77,7 +77,7 @@ def test_no_phase_accepted():
 def test_help_mentions_phase_and_values():
     """--help output lists --phase and both valid values (judge, heal)."""
     result = subprocess.run(
-        [sys.executable, str(CENTELLA_PY), "--help"],
+        [sys.executable, str(PILA_PY), "--help"],
         capture_output=True, text=True,
     )
     assert result.returncode == 0
@@ -88,7 +88,7 @@ def test_help_mentions_phase_and_values():
 
 
 # ---------------------------------------------------------------------------
-# Programmatic argparse introspection via the centella module's known parser
+# Programmatic argparse introspection via the pila module's known parser
 # shape — we test resolve_* functions but the parser lives in main(). Since
 # we can't call main() without triggering git/claude checks, we verify the
 # flag is reachable via --help (above) and use unit tests of the resolvers
@@ -96,11 +96,11 @@ def test_help_mentions_phase_and_values():
 # The subprocess tests above are the argparse-level gate the spec calls for.
 # ---------------------------------------------------------------------------
 
-def test_phase_choices_are_judge_and_heal(centella):
+def test_phase_choices_are_judge_and_heal(pila):
     """Confirm the module exposes phase_judge and phase_heal (the phase
     functions that --phase wires to). This is a reachability check:
     if the phase functions disappear or are renamed, --phase would be broken."""
-    assert hasattr(centella, "phase_judge"), "phase_judge not found in centella"
-    assert callable(centella.phase_judge)
-    assert hasattr(centella, "phase_heal"), "phase_heal not found in centella"
-    assert callable(centella.phase_heal)
+    assert hasattr(pila, "phase_judge"), "phase_judge not found in pila"
+    assert callable(pila.phase_judge)
+    assert hasattr(pila, "phase_heal"), "phase_heal not found in pila"
+    assert callable(pila.phase_heal)

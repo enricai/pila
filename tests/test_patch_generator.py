@@ -93,8 +93,8 @@ def _make_failing_records(n: int = 2) -> list[dict]:
     return records
 
 
-def _make_state(centella, run_dir: Path):
-    st = centella.State.__new__(centella.State)
+def _make_state(pila, run_dir: Path):
+    st = pila.State.__new__(pila.State)
     st.run_id = "test-pg-run"
     st.run_dir = run_dir
     st.path = run_dir / "state.json"
@@ -109,28 +109,28 @@ def _make_state(centella, run_dir: Path):
     return st
 
 
-def _patch_network(centella, monkeypatch):
+def _patch_network(pila, monkeypatch):
     """Patch both replay_capture and _invoke so no real network calls occur."""
     async def fake_replay(record, *, override_system_prompt=None, cwd=None):
         return (_REPLAY_ENVELOPE, {"categories": ["bug-fixing"]})
 
-    monkeypatch.setattr(centella, "replay_capture", fake_replay)
+    monkeypatch.setattr(pila, "replay_capture", fake_replay)
 
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         return _JUDGE_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
 
 
 # ---------------------------------------------------------------------------
 # Criterion 1: SCHEMAS["patch_generator"] validates the expected envelopes
 # ---------------------------------------------------------------------------
 
-def _schema_validate(centella, obj: dict) -> tuple[bool, str | None]:
+def _schema_validate(pila, obj: dict) -> tuple[bool, str | None]:
     """Validate obj against SCHEMAS["patch_generator"]; return (ok, error)."""
     import jsonschema  # type: ignore
-    schema = centella.SCHEMAS["patch_generator"]
+    schema = pila.SCHEMAS["patch_generator"]
     try:
         jsonschema.validate(obj, schema)
         return True, None
@@ -138,26 +138,26 @@ def _schema_validate(centella, obj: dict) -> tuple[bool, str | None]:
         return False, str(exc)
 
 
-def _try_schema(centella, obj: dict) -> bool:
+def _try_schema(pila, obj: dict) -> bool:
     """Return True if obj is valid against SCHEMAS["patch_generator"]."""
     try:
         import jsonschema
     except ImportError:
         # Without jsonschema, perform manual required-field check.
-        required = centella.SCHEMAS["patch_generator"].get("required", [])
+        required = pila.SCHEMAS["patch_generator"].get("required", [])
         return all(k in obj for k in required)
-    ok, _ = _schema_validate(centella, obj)
+    ok, _ = _schema_validate(pila, obj)
     return ok
 
 
-def test_patch_generator_schema_exists(centella):
-    """SCHEMAS["patch_generator"] must exist in centella."""
-    assert "patch_generator" in centella.SCHEMAS, (
+def test_patch_generator_schema_exists(pila):
+    """SCHEMAS["patch_generator"] must exist in pila."""
+    assert "patch_generator" in pila.SCHEMAS, (
         "SCHEMAS missing 'patch_generator' key"
     )
 
 
-def test_patch_generator_schema_validates_full_envelope(centella):
+def test_patch_generator_schema_validates_full_envelope(pila):
     """A dict with all four fields passes schema validation."""
     full = {
         "anchor": "You are",
@@ -165,23 +165,23 @@ def test_patch_generator_schema_validates_full_envelope(centella):
         "strategy": "Clarify the role",
         "pivot_reason": "Previous attempt did not improve pass rate",
     }
-    assert _try_schema(centella, full), (
+    assert _try_schema(pila, full), (
         "Schema rejected a fully-populated patch_generator envelope"
     )
 
 
-def test_patch_generator_schema_validates_minimal_envelope(centella):
+def test_patch_generator_schema_validates_minimal_envelope(pila):
     """A dict with only anchor+replacement passes schema validation."""
     minimal = {
         "anchor": "You are",
         "replacement": "You are a helpful assistant",
     }
-    assert _try_schema(centella, minimal), (
+    assert _try_schema(pila, minimal), (
         "Schema rejected a minimal (anchor+replacement only) envelope"
     )
 
 
-def test_patch_generator_schema_rejects_missing_anchor(centella):
+def test_patch_generator_schema_rejects_missing_anchor(pila):
     """Schema validation must fail when anchor is absent."""
     no_anchor = {
         "replacement": "some text",
@@ -190,14 +190,14 @@ def test_patch_generator_schema_rejects_missing_anchor(centella):
     }
     try:
         import jsonschema
-        ok, _ = _schema_validate(centella, no_anchor)
+        ok, _ = _schema_validate(pila, no_anchor)
         assert not ok, "Schema should have rejected envelope missing 'anchor'"
     except ImportError:
-        required = centella.SCHEMAS["patch_generator"].get("required", [])
+        required = pila.SCHEMAS["patch_generator"].get("required", [])
         assert "anchor" in required, "'anchor' must be in schema required list"
 
 
-def test_patch_generator_schema_rejects_missing_replacement(centella):
+def test_patch_generator_schema_rejects_missing_replacement(pila):
     """Schema validation must fail when replacement is absent."""
     no_repl = {
         "anchor": "some text",
@@ -206,14 +206,14 @@ def test_patch_generator_schema_rejects_missing_replacement(centella):
     }
     try:
         import jsonschema
-        ok, _ = _schema_validate(centella, no_repl)
+        ok, _ = _schema_validate(pila, no_repl)
         assert not ok, "Schema should have rejected envelope missing 'replacement'"
     except ImportError:
-        required = centella.SCHEMAS["patch_generator"].get("required", [])
+        required = pila.SCHEMAS["patch_generator"].get("required", [])
         assert "replacement" in required, "'replacement' must be in schema required list"
 
 
-def test_patch_generator_schema_allows_null_pivot_reason(centella):
+def test_patch_generator_schema_allows_null_pivot_reason(pila):
     """pivot_reason may be null."""
     obj = {
         "anchor": "You are",
@@ -221,7 +221,7 @@ def test_patch_generator_schema_allows_null_pivot_reason(centella):
         "strategy": "Brevity",
         "pivot_reason": None,
     }
-    assert _try_schema(centella, obj), (
+    assert _try_schema(pila, obj), (
         "Schema rejected envelope with pivot_reason=null"
     )
 
@@ -231,7 +231,7 @@ def test_patch_generator_schema_allows_null_pivot_reason(centella):
 # ---------------------------------------------------------------------------
 
 def test_request_patch_user_prompt_contains_capture_and_prompt(
-        centella, tmp_path, monkeypatch):
+        pila, tmp_path, monkeypatch):
     """request_patch must pass a user_prompt that contains:
     - The failing capture's response_content
     - The resolved prompt body for the call_type
@@ -239,7 +239,7 @@ def test_request_patch_user_prompt_contains_capture_and_prompt(
     captured_user_prompt: list[str] = []
 
     # Resolve the real prompt body for "classifier" so we can assert it below.
-    _, real_prompt_body, _ = centella.resolve_prompt("classifier")
+    _, real_prompt_body, _ = pila.resolve_prompt("classifier")
 
     # Fake claude_p: capture the user_prompt arg and return a valid envelope.
     async def fake_claude_p(user_prompt, system_prompt, *, schema_key, cwd,
@@ -251,14 +251,14 @@ def test_request_patch_user_prompt_contains_capture_and_prompt(
         anchor = first_line[:50] if len(first_line) >= 10 else real_prompt_body[:50]
         return {"anchor": anchor, "replacement": anchor + " (clarified)"}
 
-    monkeypatch.setattr(centella, "claude_p", fake_claude_p)
+    monkeypatch.setattr(pila, "claude_p", fake_claude_p)
 
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
 
     # Build a HealState with one failing sample whose response_content is distinctive.
-    hs = centella.HealState(heal_dir, "classifier")
+    hs = pila.HealState(heal_dir, "classifier")
     hs.failing_samples = [{
         "call_id": "test-cap-001",
         "call_type": "classifier",
@@ -266,7 +266,7 @@ def test_request_patch_user_prompt_contains_capture_and_prompt(
     }]
     hs.history = []
 
-    asyncio.run(centella.request_patch(hs, 1, st, _CAPS, _MODELS))
+    asyncio.run(pila.request_patch(hs, 1, st, _CAPS, _MODELS))
 
     assert len(captured_user_prompt) == 1, "claude_p was not called exactly once"
     up = captured_user_prompt[0]
@@ -285,12 +285,12 @@ def test_request_patch_user_prompt_contains_capture_and_prompt(
 # ---------------------------------------------------------------------------
 
 def test_request_patch_anchor_not_in_prompt_sentinel(
-        centella, tmp_path, monkeypatch):
+        pila, tmp_path, monkeypatch):
     """When the worker returns an anchor that is NOT in the resolved prompt
     body, request_patch must raise ValueError (or return a sentinel), not
     silently apply garbage.
     """
-    _, real_prompt_body, _ = centella.resolve_prompt("classifier")
+    _, real_prompt_body, _ = pila.resolve_prompt("classifier")
 
     # Choose an anchor guaranteed not to be in the real prompt.
     bad_anchor = "ZZZZ_IMPOSSIBLE_ANCHOR_ZZZZ_NOT_IN_ANY_PROMPT_EVER"
@@ -303,13 +303,13 @@ def test_request_patch_anchor_not_in_prompt_sentinel(
                             model, sid, add_dirs=None, _suppress_capture=False):
         return {"anchor": bad_anchor, "replacement": "irrelevant"}
 
-    monkeypatch.setattr(centella, "claude_p", fake_claude_p)
+    monkeypatch.setattr(pila, "claude_p", fake_claude_p)
 
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
 
-    hs = centella.HealState(heal_dir, "classifier")
+    hs = pila.HealState(heal_dir, "classifier")
     hs.failing_samples = [{
         "call_id": "test-cap-bad",
         "call_type": "classifier",
@@ -323,7 +323,7 @@ def test_request_patch_anchor_not_in_prompt_sentinel(
     raised_value_error = False
 
     try:
-        result = asyncio.run(centella.request_patch(hs, 1, st, _CAPS, _MODELS))
+        result = asyncio.run(pila.request_patch(hs, 1, st, _CAPS, _MODELS))
         # If no exception, the function must have returned a sentinel.
         # A sentinel is indicated by the anchor being empty/None or by
         # the caller receiving something that cannot be applied.
@@ -344,7 +344,7 @@ def test_request_patch_anchor_not_in_prompt_sentinel(
     if raised_value_error:
         # Re-run to capture the exception type.
         with pytest.raises(ValueError):
-            asyncio.run(centella.request_patch(hs, 1, st, _CAPS, _MODELS))
+            asyncio.run(pila.request_patch(hs, 1, st, _CAPS, _MODELS))
 
 
 # ---------------------------------------------------------------------------
@@ -352,21 +352,21 @@ def test_request_patch_anchor_not_in_prompt_sentinel(
 # ---------------------------------------------------------------------------
 
 def test_phase_heal_with_real_request_patch_runs_cycle(
-        centella, tmp_path, monkeypatch):
+        pila, tmp_path, monkeypatch):
     """phase_heal called with the real request_patch (no request_patch_fn
     override) must complete at least one baseline → request → apply → replay
     → converge cycle without raising, given stubbed claude_p/replay_capture.
     """
     run_dir = tmp_path / "run"
     heal_dir = tmp_path / "heal"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
     records = _make_failing_records(1)
 
     # Patch network-bound functions.
-    _patch_network(centella, monkeypatch)
+    _patch_network(pila, monkeypatch)
 
     # Resolve the real classifier prompt body so we can anchor into it.
-    _, real_prompt_body, _ = centella.resolve_prompt("classifier")
+    _, real_prompt_body, _ = pila.resolve_prompt("classifier")
     anchor_text = real_prompt_body.split("\n")[0].strip()[:50]
 
     # Stub claude_p to return a valid envelope whose anchor IS in the prompt.
@@ -389,7 +389,7 @@ def test_phase_heal_with_real_request_patch_runs_cycle(
             "suggested_fixes": [],
         }
 
-    monkeypatch.setattr(centella, "claude_p", fake_claude_p)
+    monkeypatch.setattr(pila, "claude_p", fake_claude_p)
 
     # Use a config that terminates after one iteration.
     config = {
@@ -400,7 +400,7 @@ def test_phase_heal_with_real_request_patch_runs_cycle(
     }
 
     verdict = asyncio.run(
-        centella.phase_heal(
+        pila.phase_heal(
             "classifier", records, heal_dir, _CAPS, st, _MODELS,
             # No request_patch_fn → uses real request_patch
             n=1, config=config,
@@ -423,19 +423,19 @@ def test_phase_heal_with_real_request_patch_runs_cycle(
 # Criterion 5: prompts/patch_generator.md exists and contains expected sections
 # ---------------------------------------------------------------------------
 
-def test_patch_generator_prompt_exists(centella):
+def test_patch_generator_prompt_exists(pila):
     """prompts/patch_generator.md must exist alongside the other prompt files."""
-    repo_root = Path(centella.__file__).resolve().parent.parent
+    repo_root = Path(pila.__file__).resolve().parent.parent
     prompt_path = repo_root / "prompts" / "patch_generator.md"
     assert prompt_path.exists(), (
         f"prompts/patch_generator.md not found at {prompt_path}"
     )
 
 
-def test_patch_generator_prompt_has_instructions_section(centella):
+def test_patch_generator_prompt_has_instructions_section(pila):
     """The prompt must contain instructions for reading failing samples,
     prior history, and the current prompt."""
-    repo_root = Path(centella.__file__).resolve().parent.parent
+    repo_root = Path(pila.__file__).resolve().parent.parent
     content = (repo_root / "prompts" / "patch_generator.md").read_text()
 
     assert "failing" in content.lower(), (
@@ -449,9 +449,9 @@ def test_patch_generator_prompt_has_instructions_section(centella):
     )
 
 
-def test_patch_generator_prompt_has_envelope_shape(centella):
+def test_patch_generator_prompt_has_envelope_shape(pila):
     """The prompt must describe the expected output envelope fields."""
-    repo_root = Path(centella.__file__).resolve().parent.parent
+    repo_root = Path(pila.__file__).resolve().parent.parent
     content = (repo_root / "prompts" / "patch_generator.md").read_text()
 
     for field in ("anchor", "replacement", "strategy", "pivot_reason"):
@@ -460,9 +460,9 @@ def test_patch_generator_prompt_has_envelope_shape(centella):
         )
 
 
-def test_patch_generator_prompt_has_minimise_change(centella):
+def test_patch_generator_prompt_has_minimise_change(pila):
     """The prompt must contain the minimise-change principle."""
-    repo_root = Path(centella.__file__).resolve().parent.parent
+    repo_root = Path(pila.__file__).resolve().parent.parent
     content = (repo_root / "prompts" / "patch_generator.md").read_text()
 
     # Accept any reasonable phrasing of the minimise-change principle.
@@ -478,9 +478,9 @@ def test_patch_generator_prompt_has_minimise_change(centella):
 # Importability check
 # ---------------------------------------------------------------------------
 
-def test_request_patch_importable(centella):
-    """request_patch must be importable from centella and be callable."""
-    assert hasattr(centella, "request_patch"), (
-        "request_patch not found in centella module"
+def test_request_patch_importable(pila):
+    """request_patch must be importable from pila and be callable."""
+    assert hasattr(pila, "request_patch"), (
+        "request_patch not found in pila module"
     )
-    assert callable(centella.request_patch), "request_patch must be callable"
+    assert callable(pila.request_patch), "request_patch must be callable"

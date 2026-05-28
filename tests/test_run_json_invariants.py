@@ -6,7 +6,7 @@ Invariants:
 2. `pr_url` and `pr_error` are mutually exclusive.
 3. If `pr_url` is set, `pushed_at` must be set (no PR without a push).
 
-Valid status combinations (centella --list derives these):
+Valid status combinations (pila --list derives these):
 - `done-local`        — no push attempted, no PR.
 - `done-pushed-no-pr` — pushed, PR not attempted (offline-pr case).
 - `done-pushed-pr`    — pushed + PR opened.
@@ -22,7 +22,7 @@ import pytest
 def _minimal_run_json(**overrides) -> dict:
     base = {
         "run_id": "feat-foo-abc123",
-        "branch": "centella/runs/feat-foo-abc123",
+        "branch": "pila/runs/feat-foo-abc123",
         "working_branch": "main",
         "started_at": "2026-05-26T10:00:00+00:00",
         "finished_at": None,
@@ -38,49 +38,49 @@ def _minimal_run_json(**overrides) -> dict:
 
 # --- accepts all valid status combinations ---------------------------------
 
-def test_accepts_in_progress(centella):
+def test_accepts_in_progress(pila):
     """No push/PR fields set — run hasn't finalized yet."""
-    centella._validate_run_json(_minimal_run_json())
+    pila._validate_run_json(_minimal_run_json())
 
 
-def test_accepts_done_local(centella):
+def test_accepts_done_local(pila):
     """--no-push: finalize succeeded, nothing pushed, no PR."""
-    centella._validate_run_json(_minimal_run_json(
+    pila._validate_run_json(_minimal_run_json(
         finished_at="2026-05-26T11:00:00+00:00",
     ))
 
 
-def test_accepts_done_pushed_no_pr(centella):
+def test_accepts_done_pushed_no_pr(pila):
     """Push succeeded, PR not attempted (e.g., --no-pr in a future flag,
     or `gh` not configured). All three pr_* fields stay null."""
-    centella._validate_run_json(_minimal_run_json(
+    pila._validate_run_json(_minimal_run_json(
         finished_at="2026-05-26T11:00:00+00:00",
         pushed_at="2026-05-26T11:00:05+00:00",
     ))
 
 
-def test_accepts_done_pushed_pr(centella):
+def test_accepts_done_pushed_pr(pila):
     """Happy path: pushed and PR opened."""
-    centella._validate_run_json(_minimal_run_json(
+    pila._validate_run_json(_minimal_run_json(
         finished_at="2026-05-26T11:00:00+00:00",
         pushed_at="2026-05-26T11:00:05+00:00",
         pr_url="https://github.com/owner/repo/pull/123",
     ))
 
 
-def test_accepts_push_failed(centella):
+def test_accepts_push_failed(pila):
     """Push attempted, push failed: push_error set, pushed_at null,
     no PR."""
-    centella._validate_run_json(_minimal_run_json(
+    pila._validate_run_json(_minimal_run_json(
         finished_at="2026-05-26T11:00:00+00:00",
         push_error="fatal: unable to access ...",
     ))
 
 
-def test_accepts_pr_failed(centella):
+def test_accepts_pr_failed(pila):
     """Push succeeded, PR creation failed: pushed_at set, pr_url null,
     pr_error set."""
-    centella._validate_run_json(_minimal_run_json(
+    pila._validate_run_json(_minimal_run_json(
         finished_at="2026-05-26T11:00:00+00:00",
         pushed_at="2026-05-26T11:00:05+00:00",
         pr_error="gh: authentication required",
@@ -89,39 +89,39 @@ def test_accepts_pr_failed(centella):
 
 # --- rejects invariant violations ------------------------------------------
 
-def test_rejects_pushed_at_and_push_error_both_set(centella):
+def test_rejects_pushed_at_and_push_error_both_set(pila):
     """Logically impossible: a push either succeeded or failed."""
     with pytest.raises(ValueError, match="pushed_at and push_error"):
-        centella._validate_run_json(_minimal_run_json(
+        pila._validate_run_json(_minimal_run_json(
             pushed_at="2026-05-26T11:00:05+00:00",
             push_error="something",
         ))
 
 
-def test_rejects_pr_url_and_pr_error_both_set(centella):
+def test_rejects_pr_url_and_pr_error_both_set(pila):
     with pytest.raises(ValueError, match="pr_url and pr_error"):
-        centella._validate_run_json(_minimal_run_json(
+        pila._validate_run_json(_minimal_run_json(
             pushed_at="2026-05-26T11:00:05+00:00",
             pr_url="https://github.com/owner/repo/pull/123",
             pr_error="something",
         ))
 
 
-def test_rejects_pr_url_without_pushed_at(centella):
+def test_rejects_pr_url_without_pushed_at(pila):
     """A PR cannot exist without a successful push. This is the logical
     invariant called out explicitly in IMPLEMENTATION.md §8."""
     with pytest.raises(ValueError, match="PR cannot succeed without"):
-        centella._validate_run_json(_minimal_run_json(
+        pila._validate_run_json(_minimal_run_json(
             pr_url="https://github.com/owner/repo/pull/123",
         ))
 
 
-def test_rejects_pr_url_with_push_failed(centella):
+def test_rejects_pr_url_with_push_failed(pila):
     """Same invariant: if push_error is set, pushed_at is null, so pr_url
     being set is also invalid. Failure mode: the first check fires
     because pr_url is set but pushed_at is null."""
     with pytest.raises(ValueError, match="PR cannot succeed without"):
-        centella._validate_run_json(_minimal_run_json(
+        pila._validate_run_json(_minimal_run_json(
             push_error="x",
             pr_url="https://github.com/owner/repo/pull/123",
         ))
@@ -129,28 +129,28 @@ def test_rejects_pr_url_with_push_failed(centella):
 
 # --- defensive cases -------------------------------------------------------
 
-def test_rejects_non_dict(centella):
+def test_rejects_non_dict(pila):
     """A non-object run.json (e.g., array) is a hard error — the contract
     is a JSON object."""
     with pytest.raises(ValueError, match="must be a JSON object"):
-        centella._validate_run_json(["not", "a", "dict"])
+        pila._validate_run_json(["not", "a", "dict"])
     with pytest.raises(ValueError, match="must be a JSON object"):
-        centella._validate_run_json("string")
+        pila._validate_run_json("string")
     with pytest.raises(ValueError, match="must be a JSON object"):
-        centella._validate_run_json(None)
+        pila._validate_run_json(None)
 
 
-def test_accepts_extra_fields(centella):
+def test_accepts_extra_fields(pila):
     """Forward-compat: extra fields not in the documented schema don't
-    break validation. Centella can read run.json from a newer version."""
-    centella._validate_run_json(_minimal_run_json(
+    break validation. Pila can read run.json from a newer version."""
+    pila._validate_run_json(_minimal_run_json(
         future_field="some value",
         another_extra=42,
     ))
 
 
-def test_accepts_empty_dict(centella):
+def test_accepts_empty_dict(pila):
     """An empty dict has no invariants violated (everything is null/missing).
     A reader can still infer 'in-progress' or 'corrupt-sidecar' from the
     absence of fields."""
-    centella._validate_run_json({})
+    pila._validate_run_json({})

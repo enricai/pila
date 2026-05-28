@@ -15,19 +15,19 @@ from __future__ import annotations
 # the criteria file is informational (DESIGN §9). `complete` is accepted
 # regardless of what `criteria_results` carries.
 
-def test_complete_with_empty_criteria_results_returns_none(centella):
+def test_complete_with_empty_criteria_results_returns_none(pila):
     """Empty criteria_results no longer rejects `complete`."""
-    assert centella.validate_result(
+    assert pila.validate_result(
         {"status": "complete", "criteria_results": []}) is None
 
 
-def test_complete_with_missing_criteria_results_returns_none(centella):
+def test_complete_with_missing_criteria_results_returns_none(pila):
     """Missing criteria_results no longer rejects `complete`."""
-    assert centella.validate_result({"status": "complete"}) is None
+    assert pila.validate_result({"status": "complete"}) is None
 
 
-def test_complete_with_all_met_criteria_returns_none(centella):
-    assert centella.validate_result({
+def test_complete_with_all_met_criteria_returns_none(pila):
+    assert pila.validate_result({
         "status": "complete",
         "criteria_results": [
             {"criterion": "tests pass", "met": True, "evidence": "ran them"},
@@ -36,11 +36,11 @@ def test_complete_with_all_met_criteria_returns_none(centella):
     }) is None
 
 
-def test_complete_with_failing_criteria_returns_none(centella):
+def test_complete_with_failing_criteria_returns_none(pila):
     """`met:false` entries are recorded as warnings but do not reject
     `complete` (DESIGN §8 — confidence gate is the only load-bearing
     signal)."""
-    assert centella.validate_result({
+    assert pila.validate_result({
         "status": "complete",
         "criteria_results": [
             {"criterion": "tests pass", "met": True, "evidence": "ok"},
@@ -49,36 +49,36 @@ def test_complete_with_failing_criteria_returns_none(centella):
     }) is None
 
 
-def test_complete_missing_criteria_file_returns_none(centella, tmp_path):
-    """`centella_dir` is accepted for backwards compatibility but no
+def test_complete_missing_criteria_file_returns_none(pila, tmp_path):
+    """`pila_dir` is accepted for backwards compatibility but no
     longer consulted — a missing criteria file does not reject
     `complete`."""
     (tmp_path / "criteria").mkdir()
-    assert centella.validate_result({
+    assert pila.validate_result({
         "status": "complete",
         "subtask_id": "feat-001",
         "criteria_results": [{"criterion": "x", "met": True}],
-    }, centella_dir=tmp_path) is None
+    }, pila_dir=tmp_path) is None
 
 
 # --- incomplete-handoff status ---------------------------------------------
 
-def test_incomplete_handoff_without_checkpoint_path_returns_error(centella):
-    err = centella.validate_result({"status": "incomplete-handoff"})
+def test_incomplete_handoff_without_checkpoint_path_returns_error(pila):
+    err = pila.validate_result({"status": "incomplete-handoff"})
     assert err is not None
     assert "checkpoint_path" in err
 
 
-def test_incomplete_handoff_with_null_checkpoint_path_returns_error(centella):
-    err = centella.validate_result(
+def test_incomplete_handoff_with_null_checkpoint_path_returns_error(pila):
+    err = pila.validate_result(
         {"status": "incomplete-handoff", "checkpoint_path": None}
     )
     assert err is not None
     assert "checkpoint_path" in err
 
 
-def test_incomplete_handoff_with_nonexistent_checkpoint_returns_error(centella, tmp_path):
-    err = centella.validate_result(
+def test_incomplete_handoff_with_nonexistent_checkpoint_returns_error(pila, tmp_path):
+    err = pila.validate_result(
         {"status": "incomplete-handoff",
          "checkpoint_path": str(tmp_path / "nonexistent.md")}
     )
@@ -86,30 +86,30 @@ def test_incomplete_handoff_with_nonexistent_checkpoint_returns_error(centella, 
     assert "does not exist" in err
 
 
-def test_incomplete_handoff_with_existing_checkpoint_returns_none(centella, tmp_path):
+def test_incomplete_handoff_with_existing_checkpoint_returns_none(pila, tmp_path):
     cp = tmp_path / "checkpoint.md"
     cp.write_text("# checkpoint\n")
-    assert centella.validate_result(
+    assert pila.validate_result(
         {"status": "incomplete-handoff", "checkpoint_path": str(cp)}
     ) is None
 
 
 # --- blocked status --------------------------------------------------------
 
-def test_blocked_without_blocker_returns_error(centella):
-    err = centella.validate_result({"status": "blocked"})
+def test_blocked_without_blocker_returns_error(pila):
+    err = pila.validate_result({"status": "blocked"})
     assert err is not None
     assert "blocker" in err
 
 
-def test_blocked_with_empty_blocker_returns_error(centella):
-    err = centella.validate_result({"status": "blocked", "blocker": "   "})
+def test_blocked_with_empty_blocker_returns_error(pila):
+    err = pila.validate_result({"status": "blocked", "blocker": "   "})
     assert err is not None
     assert "blocker" in err
 
 
-def test_blocked_with_blocker_returns_none(centella):
-    assert centella.validate_result(
+def test_blocked_with_blocker_returns_none(pila):
+    assert pila.validate_result(
         {"status": "blocked", "blocker": "missing API key XYZ"}
     ) is None
 
@@ -118,13 +118,13 @@ def test_blocked_with_blocker_returns_none(centella):
 # A `failed` result must carry a non-empty summary (the worker's diagnosis).
 # The prompt requires it; the code enforces it per DESIGN §12.
 
-def test_failed_with_empty_summary_returns_error(centella):
-    assert centella.validate_result({"status": "failed"}) is not None
-    assert centella.validate_result({"status": "failed", "summary": ""}) is not None
-    assert centella.validate_result({"status": "failed", "summary": "   "}) is not None
+def test_failed_with_empty_summary_returns_error(pila):
+    assert pila.validate_result({"status": "failed"}) is not None
+    assert pila.validate_result({"status": "failed", "summary": ""}) is not None
+    assert pila.validate_result({"status": "failed", "summary": "   "}) is not None
 
 
-def test_failed_with_summary_returns_none(centella):
-    assert centella.validate_result(
+def test_failed_with_summary_returns_none(pila):
+    assert pila.validate_result(
         {"status": "failed", "summary": "tests still red after 5 iterations"}
     ) is None

@@ -1,5 +1,5 @@
 {
-  "name": "enricai-centella",
+  "name": "enricai-pila",
   "owner": {
     "name": "Andres Restrepo",
     "email": "andres@enricai.com",
@@ -7,7 +7,7 @@
   },
   "plugins": [
     {
-      "name": "centella",
+      "name": "pila",
       "source": ".",
       "version": "0.2.0",
       "description": "Deterministic, headless task orchestrator for Claude Code. Classifies a task, decomposes it into dependency-ordered waves, and executes each subtask in an isolated git worktree under an evidence-gated implement/validate loop. Runs entirely on the Claude Code CLI/subscription via `claude -p` workers."

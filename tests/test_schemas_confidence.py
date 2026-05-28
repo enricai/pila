@@ -12,25 +12,25 @@ this test catches it.
 from __future__ import annotations
 
 
-def test_planner_schema_top_level_required(centella):
+def test_planner_schema_top_level_required(pila):
     """Planner must emit domain, subtasks, status, and confidence."""
-    planner = centella.SCHEMAS["planner"]
+    planner = pila.SCHEMAS["planner"]
     required = set(planner["required"])
     assert {"domain", "subtasks", "status", "confidence"}.issubset(required)
 
 
-def test_planner_schema_status_enum(centella):
+def test_planner_schema_status_enum(pila):
     """status is the ready/blocked enum."""
-    status = centella.SCHEMAS["planner"]["properties"]["status"]
+    status = pila.SCHEMAS["planner"]["properties"]["status"]
     assert status["type"] == "string"
     assert set(status["enum"]) == {"ready", "blocked"}
 
 
-def test_planner_schema_confidence_required_fields(centella):
+def test_planner_schema_confidence_required_fields(pila):
     """The four discipline fields are required-when-confidence-is-present.
     Combined with confidence being top-level required, a planner that
     skipped any of them fails its own schema."""
-    conf = centella.SCHEMAS["planner"]["properties"]["confidence"]
+    conf = pila.SCHEMAS["planner"]["properties"]["confidence"]
     assert conf["type"] == "object"
     required = set(conf["required"])
     expected = {"task_understanding", "decomposition_quality", "basis",
@@ -39,24 +39,24 @@ def test_planner_schema_confidence_required_fields(centella):
     assert expected.issubset(required)
 
 
-def test_planner_confidence_axes_are_numbers(centella):
-    props = centella.SCHEMAS["planner"]["properties"]["confidence"]["properties"]
+def test_planner_confidence_axes_are_numbers(pila):
+    props = pila.SCHEMAS["planner"]["properties"]["confidence"]["properties"]
     assert props["task_understanding"]["type"] == "number"
     assert props["decomposition_quality"]["type"] == "number"
 
 
-def test_implementer_schema_top_level_required(centella):
+def test_implementer_schema_top_level_required(pila):
     """Implementer must emit subtask_id, status, and confidence."""
-    impl = centella.SCHEMAS["implementer"]
+    impl = pila.SCHEMAS["implementer"]
     required = set(impl["required"])
     assert {"subtask_id", "status", "confidence"}.issubset(required)
 
 
-def test_implementer_schema_confidence_required_fields(centella):
+def test_implementer_schema_confidence_required_fields(pila):
     """The implementer's confidence object must require the same
     discipline fields as the planner's (DESIGN §8 — same disciplines,
     different axes)."""
-    conf = centella.SCHEMAS["implementer"]["properties"]["confidence"]
+    conf = pila.SCHEMAS["implementer"]["properties"]["confidence"]
     assert conf["type"] == "object"
     required = set(conf["required"])
     expected = {"root_cause", "solution", "basis",
@@ -65,19 +65,19 @@ def test_implementer_schema_confidence_required_fields(centella):
     assert expected.issubset(required)
 
 
-def test_implementer_confidence_axes_are_numbers(centella):
-    props = centella.SCHEMAS["implementer"]["properties"]["confidence"]["properties"]
+def test_implementer_confidence_axes_are_numbers(pila):
+    props = pila.SCHEMAS["implementer"]["properties"]["confidence"]["properties"]
     assert props["root_cause"]["type"] == "number"
     assert props["solution"]["type"] == "number"
 
 
-def test_gap_to_close_keys_match_score_axes(centella):
+def test_gap_to_close_keys_match_score_axes(pila):
     """The gap_to_close sub-object's keys mirror the score axes so a
     below-threshold score has a clear field to fill. Catches future
     drift where someone renames an axis without updating the gap
     field."""
-    planner_gap = centella.SCHEMAS["planner"]["properties"]["confidence"]["properties"]["gap_to_close"]
+    planner_gap = pila.SCHEMAS["planner"]["properties"]["confidence"]["properties"]["gap_to_close"]
     assert set(planner_gap["properties"].keys()) == {
         "task_understanding", "decomposition_quality"}
-    impl_gap = centella.SCHEMAS["implementer"]["properties"]["confidence"]["properties"]["gap_to_close"]
+    impl_gap = pila.SCHEMAS["implementer"]["properties"]["confidence"]["properties"]["gap_to_close"]
     assert set(impl_gap["properties"].keys()) == {"root_cause", "solution"}

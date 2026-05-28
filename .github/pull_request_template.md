@@ -8,7 +8,7 @@
 
 - [ ] `docs/DESIGN.md` (architecture)
 - [ ] `docs/IMPLEMENTATION.md` (code surface)
-- [ ] `orchestrator/centella.py` (code)
+- [ ] `orchestrator/pila.py` (code)
 - [ ] docs (`README.md`, `docs/USAGE.md`, `CONTRIBUTING.md`, etc.)
 - [ ] tests (`tests/`)
 - [ ] CI / repo meta (`.github/`, `CHANGELOG.md`)
@@ -26,7 +26,7 @@ If multiple, has the change propagated **top-down** per the three-layer rule
 - [ ] `docs/IMPLEMENTATION.md` updated if code surface changed
 - [ ] `docs/DESIGN.md` updated if architecture changed
 - [ ] `pytest tests/` passes
-- [ ] `python3 -c "import ast; ast.parse(open('orchestrator/centella.py').read())"` passes
+- [ ] `python3 -c "import ast; ast.parse(open('orchestrator/pila.py').read())"` passes
 - [ ] `CHANGELOG.md` `[Unreleased]` updated
 - [ ] `git diff --stat` reviewed for scope (no collateral edits)
 

@@ -22,8 +22,8 @@ def _init_repo(path: Path):
     """Initialize a git repo with a committed initial file. Returns path."""
     path.mkdir(parents=True, exist_ok=True)
     _git("init", "-q", "-b", "main", cwd=path)
-    _git("config", "user.email", "test@centella.local", cwd=path)
-    _git("config", "user.name", "centella test", cwd=path)
+    _git("config", "user.email", "test@pila.local", cwd=path)
+    _git("config", "user.name", "pila test", cwd=path)
     _git("config", "commit.gpgsign", "false", cwd=path)
     (path / "file.txt").write_text("initial\n")
     _git("add", "file.txt", cwd=path)
@@ -31,13 +31,13 @@ def _init_repo(path: Path):
     return path
 
 
-def test_clean_worktree_returns_none(centella, tmp_path):
+def test_clean_worktree_returns_none(pila, tmp_path):
     """A worktree with no MERGE_HEAD and no staged changes returns None."""
     repo = _init_repo(tmp_path / "repo")
-    assert asyncio.run(centella.check_merge_committed(repo)) is None
+    assert asyncio.run(pila.check_merge_committed(repo)) is None
 
 
-def test_merge_head_present_returns_mid_merge_error(centella, tmp_path):
+def test_merge_head_present_returns_mid_merge_error(pila, tmp_path):
     """A worktree mid-merge with MERGE_HEAD set returns the mid-merge error."""
     repo = _init_repo(tmp_path / "repo")
 
@@ -56,13 +56,13 @@ def test_merge_head_present_returns_mid_merge_error(centella, tmp_path):
     assert merge.returncode != 0, "expected merge conflict"
     assert (repo / ".git" / "MERGE_HEAD").exists()
 
-    err = asyncio.run(centella.check_merge_committed(repo))
+    err = asyncio.run(pila.check_merge_committed(repo))
     assert err is not None
     assert "MERGE_HEAD" in err
     assert "mid-merge" in err
 
 
-def test_staged_uncommitted_returns_staged_error(centella, tmp_path):
+def test_staged_uncommitted_returns_staged_error(pila, tmp_path):
     """A worktree with staged-but-uncommitted changes (and no MERGE_HEAD)
     returns the staged-uncommitted error."""
     repo = _init_repo(tmp_path / "repo")
@@ -70,24 +70,24 @@ def test_staged_uncommitted_returns_staged_error(centella, tmp_path):
     _git("add", "file.txt", cwd=repo)
     # No commit — so changes are staged but uncommitted.
 
-    err = asyncio.run(centella.check_merge_committed(repo))
+    err = asyncio.run(pila.check_merge_committed(repo))
     assert err is not None
     assert "staged but uncommitted" in err
     # And we want to be sure it's NOT mistaken for a mid-merge case:
     assert "MERGE_HEAD" not in err
 
 
-def test_unstaged_changes_only_returns_none(centella, tmp_path):
+def test_unstaged_changes_only_returns_none(pila, tmp_path):
     """Unstaged working-tree changes alone are not the integrator's
     failure mode this guard catches (only staged-but-uncommitted is).
     Confirm the guard does not false-positive on unstaged changes."""
     repo = _init_repo(tmp_path / "repo")
     (repo / "file.txt").write_text("modified but unstaged\n")
     # No `git add` — change is in the working tree only.
-    assert asyncio.run(centella.check_merge_committed(repo)) is None
+    assert asyncio.run(pila.check_merge_committed(repo)) is None
 
 
-def test_completed_merge_returns_none(centella, tmp_path):
+def test_completed_merge_returns_none(pila, tmp_path):
     """After a successful, fully-committed merge, MERGE_HEAD is gone
     and the index is clean — check_merge_committed returns None."""
     repo = _init_repo(tmp_path / "repo")
@@ -103,4 +103,4 @@ def test_completed_merge_returns_none(centella, tmp_path):
     assert merge.returncode == 0, f"merge failed unexpectedly: {merge.stderr}"
     assert not (repo / ".git" / "MERGE_HEAD").exists()
 
-    assert asyncio.run(centella.check_merge_committed(repo)) is None
+    assert asyncio.run(pila.check_merge_committed(repo)) is None

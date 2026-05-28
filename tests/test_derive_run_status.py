@@ -1,5 +1,5 @@
 """Tests for `_derive_run_status` — the pure-function status taxonomy
-that `centella --list` renders.
+that `pila --list` renders.
 
 Status table (in priority order):
   1. run.json invariant-invalid → `corrupt-sidecar`
@@ -13,78 +13,78 @@ Status table (in priority order):
 from __future__ import annotations
 
 
-def test_status_in_progress_empty_run_json(centella):
-    assert centella._derive_run_status({}, {}) == "in-progress"
+def test_status_in_progress_empty_run_json(pila):
+    assert pila._derive_run_status({}, {}) == "in-progress"
 
 
-def test_status_in_progress_none_run_json(centella):
+def test_status_in_progress_none_run_json(pila):
     """A run with no sidecar at all (run died very early) reads as
     in-progress — that's accurate for the visible state."""
-    assert centella._derive_run_status(None, {}) == "in-progress"
+    assert pila._derive_run_status(None, {}) == "in-progress"
 
 
-def test_status_done_local(centella):
+def test_status_done_local(pila):
     """Finalize completed but --no-push was set (or no push attempted)."""
     rj = {"finished_at": "2026-05-26T15:00:00+00:00"}
-    assert centella._derive_run_status(rj, {}) == "done-local"
+    assert pila._derive_run_status(rj, {}) == "done-local"
 
 
-def test_status_done_pushed_no_pr(centella):
+def test_status_done_pushed_no_pr(pila):
     """Push succeeded, PR not attempted (rare: gh missing post-push, or
     a future --no-pr flag)."""
     rj = {
         "finished_at": "2026-05-26T15:00:00+00:00",
         "pushed_at": "2026-05-26T15:00:05+00:00",
     }
-    assert centella._derive_run_status(rj, {}) == "done-pushed-no-pr"
+    assert pila._derive_run_status(rj, {}) == "done-pushed-no-pr"
 
 
-def test_status_done_pushed_pr(centella):
+def test_status_done_pushed_pr(pila):
     """The happy path: pushed and PR opened."""
     rj = {
         "finished_at": "2026-05-26T15:00:00+00:00",
         "pushed_at": "2026-05-26T15:00:05+00:00",
         "pr_url": "https://github.com/owner/repo/pull/42",
     }
-    assert centella._derive_run_status(rj, {}) == "done-pushed-pr"
+    assert pila._derive_run_status(rj, {}) == "done-pushed-pr"
 
 
-def test_status_push_failed(centella):
+def test_status_push_failed(pila):
     """push_error set: priority over everything except corrupt-sidecar."""
     rj = {
         "finished_at": "2026-05-26T15:00:00+00:00",
         "push_error": "fatal: unable to access ...",
     }
-    assert centella._derive_run_status(rj, {}) == "push-failed"
+    assert pila._derive_run_status(rj, {}) == "push-failed"
 
 
-def test_status_pr_failed(centella):
+def test_status_pr_failed(pila):
     """Push succeeded, PR failed. pushed_at set, pr_error set."""
     rj = {
         "finished_at": "2026-05-26T15:00:00+00:00",
         "pushed_at": "2026-05-26T15:00:05+00:00",
         "pr_error": "gh: authentication required",
     }
-    assert centella._derive_run_status(rj, {}) == "pr-failed"
+    assert pila._derive_run_status(rj, {}) == "pr-failed"
 
 
-def test_status_corrupt_sidecar(centella):
+def test_status_corrupt_sidecar(pila):
     """An invariant-violating run.json renders as corrupt-sidecar so the
     user can spot it in --list and intervene."""
     rj = {
         "pushed_at": "2026-05-26T15:00:05+00:00",
         "push_error": "both set is a violation",
     }
-    assert centella._derive_run_status(rj, {}) == "corrupt-sidecar"
+    assert pila._derive_run_status(rj, {}) == "corrupt-sidecar"
 
 
-def test_status_pr_url_without_pushed_at_is_corrupt(centella):
+def test_status_pr_url_without_pushed_at_is_corrupt(pila):
     """Logical-invariant violation: PR without push."""
     rj = {"pr_url": "https://github.com/owner/repo/pull/42"}
-    assert centella._derive_run_status(rj, {}) == "corrupt-sidecar"
+    assert pila._derive_run_status(rj, {}) == "corrupt-sidecar"
 
 
-def test_status_table_lists_every_value_used(centella):
+def test_status_table_lists_every_value_used(pila):
     """RUN_STATUSES tuple must contain every value _derive_run_status
     can return — drift guard."""
     expected = {
@@ -92,10 +92,10 @@ def test_status_table_lists_every_value_used(centella):
         "done-pushed-no-pr", "done-pushed-pr",
         "push-failed", "pr-failed",
     }
-    assert set(centella.RUN_STATUSES) == expected
+    assert set(pila.RUN_STATUSES) == expected
 
 
-def test_push_error_priority_over_pr_url(centella):
+def test_push_error_priority_over_pr_url(pila):
     """If somehow both push_error and pr_url were set (impossible in
     practice), push_error wins — the cleanest signal that something is
     broken comes first."""
@@ -104,4 +104,4 @@ def test_push_error_priority_over_pr_url(centella):
         "pr_url": "https://gh.com/pr/1",
     }
     # _validate_run_json rejects this combo → corrupt-sidecar.
-    assert centella._derive_run_status(rj, {}) == "corrupt-sidecar"
+    assert pila._derive_run_status(rj, {}) == "corrupt-sidecar"

@@ -23,9 +23,9 @@ import pytest
 # helpers
 # ---------------------------------------------------------------------------
 
-def _make_state(centella, run_dir: Path):
+def _make_state(pila, run_dir: Path):
     """Minimal State-alike enough for claude_p to write the capture file."""
-    st = centella.State.__new__(centella.State)
+    st = pila.State.__new__(pila.State)
     st.run_id = "test-run-001"
     st.run_dir = run_dir
     st.path = run_dir / "state.json"
@@ -75,17 +75,17 @@ _REQUIRED_FIELDS = {
 }
 
 
-def _run_claude_p(centella, st, envelope, monkeypatch):
+def _run_claude_p(pila, st, envelope, monkeypatch):
     """Invoke claude_p with a stubbed _invoke returning envelope."""
     async def fake_invoke(*args, **kwargs):
         return envelope
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
     # bump_workers checks max_total_workers; patch it to be trivially passing
-    monkeypatch.setattr(centella.State, "bump_workers",
+    monkeypatch.setattr(pila.State, "bump_workers",
                         lambda self, caps: None)
 
-    asyncio.run(centella.claude_p(
+    asyncio.run(pila.claude_p(
         user_prompt="test user prompt",
         system_prompt="test system prompt",
         schema_key="classifier",
@@ -104,13 +104,13 @@ def _run_claude_p(centella, st, envelope, monkeypatch):
 # single-call capture
 # ---------------------------------------------------------------------------
 
-def test_single_call_writes_one_ndjson_line(centella, tmp_path, monkeypatch):
+def test_single_call_writes_one_ndjson_line(pila, tmp_path, monkeypatch):
     """A single claude_p invocation writes exactly one JSON line to
     calls.ndjson with all required fields."""
     run_dir = tmp_path / "runs" / "test-run-001"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
 
-    _run_claude_p(centella, st, _GOOD_ENVELOPE, monkeypatch)
+    _run_claude_p(pila, st, _GOOD_ENVELOPE, monkeypatch)
 
     capture_path = run_dir / "calls.ndjson"
     assert capture_path.exists(), "calls.ndjson must be created"
@@ -123,12 +123,12 @@ def test_single_call_writes_one_ndjson_line(centella, tmp_path, monkeypatch):
     assert not missing, f"Missing fields: {missing}"
 
 
-def test_single_call_field_values(centella, tmp_path, monkeypatch):
+def test_single_call_field_values(pila, tmp_path, monkeypatch):
     """Field values in the NDJSON record match the envelope and call params."""
     run_dir = tmp_path / "runs" / "test-run-001"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
 
-    _run_claude_p(centella, st, _GOOD_ENVELOPE, monkeypatch)
+    _run_claude_p(pila, st, _GOOD_ENVELOPE, monkeypatch)
 
     record = json.loads((run_dir / "calls.ndjson").read_text().strip())
     assert record["run_id"] == "test-run-001"
@@ -151,22 +151,22 @@ def test_single_call_field_values(centella, tmp_path, monkeypatch):
 # two-call append — two distinct lines, each parseable
 # ---------------------------------------------------------------------------
 
-def test_two_calls_append_two_lines(centella, tmp_path, monkeypatch):
+def test_two_calls_append_two_lines(pila, tmp_path, monkeypatch):
     """Two sequential claude_p calls append exactly two independently
     parseable JSON lines with distinct call_ids."""
     run_dir = tmp_path / "runs" / "test-run-001"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
 
     async def fake_invoke(*args, **kwargs):
         return _GOOD_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
-    monkeypatch.setattr(centella.State, "bump_workers",
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila.State, "bump_workers",
                         lambda self, caps: None)
 
     async def two_calls():
         for _ in range(2):
-            await centella.claude_p(
+            await pila.claude_p(
                 user_prompt="prompt",
                 system_prompt="sys",
                 schema_key="planner",
@@ -197,22 +197,22 @@ def test_two_calls_append_two_lines(centella, tmp_path, monkeypatch):
 # failed-call capture — is_error=True still writes a record
 # ---------------------------------------------------------------------------
 
-def test_failed_call_still_writes_record(centella, tmp_path, monkeypatch):
+def test_failed_call_still_writes_record(pila, tmp_path, monkeypatch):
     """A call that returns is_error=True writes a record with success=False
     and parsed_ok=False — the audit trail is complete even for failures."""
     run_dir = tmp_path / "runs" / "test-run-001"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
 
     # The error envelope causes both attempts to fail, raising WorkerError.
     async def fake_invoke(*args, **kwargs):
         return _ERROR_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
-    monkeypatch.setattr(centella.State, "bump_workers",
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila.State, "bump_workers",
                         lambda self, caps: None)
 
-    with pytest.raises(centella.WorkerError):
-        asyncio.run(centella.claude_p(
+    with pytest.raises(pila.WorkerError):
+        asyncio.run(pila.claude_p(
             user_prompt="prompt",
             system_prompt="sys",
             schema_key="implementer",
@@ -240,12 +240,12 @@ def test_failed_call_still_writes_record(centella, tmp_path, monkeypatch):
 # capture file path
 # ---------------------------------------------------------------------------
 
-def test_capture_file_at_run_dir_calls_ndjson(centella, tmp_path, monkeypatch):
+def test_capture_file_at_run_dir_calls_ndjson(pila, tmp_path, monkeypatch):
     """The capture file is at <run_dir>/calls.ndjson, not in a subdirectory."""
     run_dir = tmp_path / "my-run"
-    st = _make_state(centella, run_dir)
+    st = _make_state(pila, run_dir)
 
-    _run_claude_p(centella, st, _GOOD_ENVELOPE, monkeypatch)
+    _run_claude_p(pila, st, _GOOD_ENVELOPE, monkeypatch)
 
     assert (run_dir / "calls.ndjson").exists()
     # No subdirectory was created for the capture file itself

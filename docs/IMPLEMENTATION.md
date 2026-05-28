@@ -1,7 +1,7 @@
-# Centella — Implementation Reference
+# Pila — Implementation Reference
 
 > **This document describes the current code, not the design.** It is true only
-> against the present state of `orchestrator/centella.py`, the worker prompts,
+> against the present state of `orchestrator/pila.py`, the worker prompts,
 > and the shell scripts. A change to the code that is not reflected here makes
 > *this document* wrong — unlike `DESIGN.md`, which describes the architecture
 > and stays correct across reimplementation. When this document and the code
@@ -14,22 +14,22 @@
 
 ## 0. Install surface
 
-Centella ships two install paths. Both ultimately invoke the on-disk
-`centella` launcher; the difference is who put it there and how the
+Pila ships two install paths. Both ultimately invoke the on-disk
+`pila` launcher; the difference is who put it there and how the
 user reaches it.
 
 ### Files
 
 | Path | Purpose |
 |------|---------|
-| `.claude-plugin/marketplace.json` | Single-plugin marketplace manifest. Makes the repo itself discoverable via `/plugin marketplace add enricai/centella` from inside Claude Code. Points at `.` so Claude Code reads the sibling `.claude-plugin/plugin.json`. |
-| `.claude-plugin/plugin.json` | Existing plugin manifest (commands, skills, metadata). The `version` field is the single source of truth for `centella --version`. |
+| `.claude-plugin/marketplace.json` | Single-plugin marketplace manifest. Makes the repo itself discoverable via `/plugin marketplace add enricai/pila` from inside Claude Code. Points at `.` so Claude Code reads the sibling `.claude-plugin/plugin.json`. |
+| `.claude-plugin/plugin.json` | Existing plugin manifest (commands, skills, metadata). The `version` field is the single source of truth for `pila --version`. |
 | `scripts/install.sh` | The `curl \| bash` shell installer. Preflight → bootstrap `uv` → provision Python 3.12 → clone → symlink → verify. Self-contained bash; deps: `bash`, `curl`, `git`. |
-| `centella` (launcher) | Routes through `uv run --python 3.12 --no-project python orchestrator/centella.py "$@"` when `uv` is on `PATH`; falls back to `python3` when not. The fallback preserves backward compatibility for direct git-clone users. |
+| `pila` (launcher) | Routes through `uv run --python 3.12 --no-project python orchestrator/pila.py "$@"` when `uv` is on `PATH`; falls back to `python3` when not. The fallback preserves backward compatibility for direct git-clone users. |
 
 ### Python runtime — provisioned by `uv`
 
-Centella requires Python 3.10+. Both install paths satisfy that requirement
+Pila requires Python 3.10+. Both install paths satisfy that requirement
 *for the user* by routing the launcher through [`uv`](https://docs.astral.sh/uv/),
 Astral's Rust-written Python toolchain. `uv` downloads and pins a managed
 3.12 interpreter under `~/.local/share/uv/python/`. The user's system
@@ -43,23 +43,23 @@ dev dependency.
 ### Path A — Claude Code plugin marketplace (primary)
 
 ```
-/plugin marketplace add enricai/centella
-/plugin install centella@enricai-centella
+/plugin marketplace add enricai/pila
+/plugin install pila@enricai-pila
 # then inside Claude Code:
-/centella "task description"
+/pila "task description"
 ```
 
 `marketplace.json` exposes one plugin (the existing `plugin.json`).
 Claude Code clones the repo into its plugin directory and registers the
-`commands/` and `skills/` entries. `/centella` then runs the plugin
-skill at `commands/centella.md`, which shells out to the on-disk
-`centella` launcher in the cloned plugin directory — and through it,
+`commands/` and `skills/` entries. `/pila` then runs the plugin
+skill at `commands/pila.md`, which shells out to the on-disk
+`pila` launcher in the cloned plugin directory — and through it,
 to `uv` and the managed Python.
 
 ### Path B — `curl | bash` installer (secondary)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash
 ```
 
 The script:
@@ -72,23 +72,23 @@ The script:
    linked binary; no Python required to bootstrap. Prints what it is
    about to do first.
 3. **Provisions Python 3.12** via `uv python install 3.12` so the
-   first `centella` invocation does not pay the download cost.
-4. **Clones** `enricai/centella` to `$CENTELLA_HOME` (default
-   `~/.centella`). `git clone --depth 1` for fresh installs; `git pull
+   first `pila` invocation does not pay the download cost.
+4. **Clones** `enricai/pila` to `$PILA_HOME` (default
+   `~/.pila`). `git clone --depth 1` for fresh installs; `git pull
    --ff-only` for upgrades.
-5. **Symlinks** `$CENTELLA_HOME/centella` → `~/.local/bin/centella`.
+5. **Symlinks** `$PILA_HOME/pila` → `~/.local/bin/pila`.
    Creates `~/.local/bin` if missing. Does not touch system directories.
 6. **PATH check**: if `~/.local/bin` is not in `$PATH`, prints (does
    not silently edit) the exact shell-rc line to add, based on `$SHELL`.
-7. **Verifies** by invoking `centella --version`. A green exit proves
+7. **Verifies** by invoking `pila --version`. A green exit proves
    the full chain works: launcher → uv → managed Python → orchestrator.
 
 Supports `--dry-run` (prints actions without executing) and
-`--prefix DIR` (overrides `CENTELLA_HOME`).
+`--prefix DIR` (overrides `PILA_HOME`).
 
 ### `--version`
 
-`centella --version` reads `.claude-plugin/plugin.json`'s `version`
+`pila --version` reads `.claude-plugin/plugin.json`'s `version`
 field via stdlib `json` and prints it to stdout. Single source of truth —
 no `__version__` constant in the orchestrator. Used by `install.sh` as
 its end-to-end smoke test.
@@ -108,12 +108,12 @@ plain process exec, not in-session orchestration).
 ## 1. Repository layout
 
 ```
-centella/
+pila/
 ├── .claude-plugin/plugin.json     plugin manifest
 ├── .claude-plugin/marketplace.json single-plugin marketplace manifest (Claude Code `/plugin marketplace add` entry point)
-├── centella                        executable entry-point wrapper (chmod +x);
+├── pila                        executable entry-point wrapper (chmod +x);
 │                                   routes through `uv` with python3 fallback
-├── orchestrator/centella.py        the orchestrator — all control flow (chmod +x)
+├── orchestrator/pila.py        the orchestrator — all control flow (chmod +x)
 ├── prompts/
 │   ├── classifier.md              Phase 1 worker system prompt
 │   ├── planner.md                 Phase 2 worker system prompt
@@ -131,7 +131,7 @@ centella/
 │   ├── finalize.sh                verify the run branch exists and is non-empty; ready for push
 │   ├── cleanup.sh                 remove worktrees / branches (default: scoped to one run)
 │   └── install.sh                 one-command installer (curl | bash); bootstraps uv + clones + symlinks
-├── commands/centella.md            thin plugin skill — launches the orchestrator
+├── commands/pila.md            thin plugin skill — launches the orchestrator
 ├── skills/
 │   ├── judge-llm-batch/SKILL.md  post-run judge skill — scores a batch of captured
 │   │                              LLM calls against a 3-dimensional accuracy rubric
@@ -153,98 +153,98 @@ Maps to `DESIGN.md`: §3 (architecture / phases), §2 (why a program, not a skil
 
 ```bash
 # From the root of the target git repository:
-centella "Fix the login timeout bug and add a regression test"
+pila "Fix the login timeout bug and add a regression test"
 
 # Or pass a path to a .txt / .md file whose contents are the task — useful
 # for multi-paragraph briefs that are awkward to quote on the shell:
-centella path/to/task.md
+pila path/to/task.md
 
 # Resume an interrupted run. Auto-picks if exactly one in-flight run exists;
-# requires --run-id otherwise (see `centella --list` to enumerate).
-centella --resume
-centella --resume --run-id fix-login-timeout-bug-b81e90
+# requires --run-id otherwise (see `pila --list` to enumerate).
+pila --resume
+pila --resume --run-id fix-login-timeout-bug-b81e90
 
 # List in-flight and completed runs in this repository:
-centella --list
+pila --list
 
 # Skip the default push + PR at finalize (run completes with the run branch
 # local-only; the working branch is unchanged):
-centella "task" --no-push
-export CENTELLA_NO_PUSH=1
+pila "task" --no-push
+export PILA_NO_PUSH=1
 
 # Skip pre-push hooks at finalize (the user's explicit override; defaults off).
 # Affects only the final `git push`; worker `git commit` operations inside
 # worktrees continue to run all hooks normally.
-centella "task" --no-verify
+pila "task" --no-verify
 
 # Opt into clarification (DESIGN §11). Without --clarify (the default),
 # the classifier's intent questions are filtered and dropped — the
 # implementer makes a best-effort decision documented in its notes.
 # Pass --clarify to surface the surviving questions to the user
 # (interactively if a TTY, otherwise via pending-questions.json).
-centella "task" --clarify
+pila "task" --clarify
 
 # Pre-supply clarification answers:
-centella "task" --answers answers.json
+pila "task" --answers answers.json
 
-# Override caps. --max-workers also reads CENTELLA_MAX_WORKERS env or
-# max_workers in centella.toml; --max-parallel is CLI-only.
-centella "task" --max-workers 80 --max-parallel 6
-export CENTELLA_MAX_WORKERS=80
+# Override caps. --max-workers also reads PILA_MAX_WORKERS env or
+# max_workers in pila.toml; --max-parallel is CLI-only.
+pila "task" --max-workers 80 --max-parallel 6
+export PILA_MAX_WORKERS=80
 
 # Dial how persistent workers are at building confidence before they exit
 # blocked (default: 8 rounds inside each planner / implementer):
-centella "task" --confidence-rounds 12
-export CENTELLA_CONFIDENCE_ROUNDS=12
+pila "task" --confidence-rounds 12
+export PILA_CONFIDENCE_ROUNDS=12
 
 # Verbosity controls how much per-worker activity surfaces inline.
 # Default is `stream`: one-line summary per worker event. -q drops to
-# centella's pre-streaming terse output; -qq is fully quiet (errors
-# still emit). -vv adds raw payloads. Per-worker .centella/logs/<sid>.log
+# pila's pre-streaming terse output; -qq is fully quiet (errors
+# still emit). -vv adds raw payloads. Per-worker .pila/logs/<sid>.log
 # files are always written regardless of level.
-centella "task"        # default: stream
-centella "task" -q      # normal (pre-streaming)
-centella "task" -qq     # quiet (errors only)
-centella "task" -vv     # debug
-centella "task" --verbosity normal
-export CENTELLA_VERBOSITY=stream
+pila "task"        # default: stream
+pila "task" -q      # normal (pre-streaming)
+pila "task" -qq     # quiet (errors only)
+pila "task" -vv     # debug
+pila "task" --verbosity normal
+export PILA_VERBOSITY=stream
 
 # Override the default source-of-truth preference (`both`). CLI flag and
 # env var are session-scoped overrides; commit `source_of_truth = ...` in
-# centella.toml for a per-repo default.
-export CENTELLA_SOURCE_OF_TRUTH=codebase    # or: research, both
-centella "task" --source-of-truth codebase
+# pila.toml for a per-repo default.
+export PILA_SOURCE_OF_TRUTH=codebase    # or: research, both
+pila "task" --source-of-truth codebase
 
 # Choose the model. Without overrides: judgment workers (classifier,
 # planner, reconciler, integrator) default to opus; acting workers
 # (implementer, conformer) default to sonnet. Use the env var
-# for a sticky preference, the CLI flag for a one-off, or centella.toml
+# for a sticky preference, the CLI flag for a one-off, or pila.toml
 # for the committed repo default. Per-worker overrides also exist —
 # see §2.
-export CENTELLA_MODEL=sonnet                # or: opus, haiku
-centella "task" --model opus
-centella "task" --model-implementer opus --model-classifier haiku
+export PILA_MODEL=sonnet                # or: opus, haiku
+pila "task" --model opus
+pila "task" --model-implementer opus --model-classifier haiku
 
 # Telemetry: on by default; disable with --no-telemetry or env var:
-centella "task" --no-telemetry
-export CENTELLA_TELEMETRY=0
+pila "task" --no-telemetry
+export PILA_TELEMETRY=0
 # Override output subdirectory (default: <run-dir>/events/):
-centella "task" --telemetry-dir my-events
-export CENTELLA_TELEMETRY_DIR=my-events
+pila "task" --telemetry-dir my-events
+export PILA_TELEMETRY_DIR=my-events
 # Override judge/heal output subdirectories:
-centella "task" --judge-dir my-judge --heal-dir my-heal
-export CENTELLA_JUDGE_DIR=my-judge
-export CENTELLA_HEAL_DIR=my-heal
+pila "task" --judge-dir my-judge --heal-dir my-heal
+export PILA_JUDGE_DIR=my-judge
+export PILA_HEAL_DIR=my-heal
 
 # Judge and heal model overrides (default: sonnet for throughput):
-centella "task" --judge-model opus --heal-model opus
-export CENTELLA_MODEL_JUDGE=sonnet
-export CENTELLA_MODEL_HEAL=sonnet
+pila "task" --judge-model opus --heal-model opus
+export PILA_MODEL_JUDGE=sonnet
+export PILA_MODEL_HEAL=sonnet
 
 # Heal-loop convergence knobs (defaults shown):
-centella "task" --heal-max-rounds 10 --heal-success-threshold 0.9
-export CENTELLA_HEAL_MAX_ROUNDS=10
-export CENTELLA_HEAL_SUCCESS_THRESHOLD=0.9
+pila "task" --heal-max-rounds 10 --heal-success-threshold 0.9
+export PILA_HEAL_MAX_ROUNDS=10
+export PILA_HEAL_SUCCESS_THRESHOLD=0.9
 
 # Run post-run skill phases against an existing run's captured LLM calls.
 # --phase judge: score every call in calls.ndjson with the 3-dim judge rubric
@@ -252,13 +252,13 @@ export CENTELLA_HEAL_SUCCESS_THRESHOLD=0.9
 # --phase heal: read the judge index for failing call_types and run the
 #   self-heal loop for each; if no judge index exists yet, runs judge first.
 # Use --run-id to select a run when multiple exist; auto-picks when only one.
-centella --phase judge --run-id fix-login-timeout-bug-b81e90
-centella --phase heal  --run-id fix-login-timeout-bug-b81e90
+pila --phase judge --run-id fix-login-timeout-bug-b81e90
+pila --phase heal  --run-id fix-login-timeout-bug-b81e90
 # Combine with heal-loop knobs:
-centella --phase heal --heal-max-rounds 5 --heal-success-threshold 0.8
+pila --phase heal --heal-max-rounds 5 --heal-success-threshold 0.8
 
 # Recommended backstop for worker auto-compaction
-# (Claude Code CLI variable — not consumed by centella itself):
+# (Claude Code CLI variable — not consumed by pila itself):
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70
 ```
 
@@ -269,32 +269,32 @@ path (see §0); the launcher falls back to system `python3` (Python 3.10+)
 for direct-git-clone users.
 
 Via the plugin skill, from inside Claude Code (after
-`/plugin marketplace add enricai/centella` and
-`/plugin install centella@enricai-centella` — see §0):
+`/plugin marketplace add enricai/pila` and
+`/plugin install pila@enricai-pila` — see §0):
 
 ```
-/centella <task>
+/pila <task>
 ```
 
 ### Source-of-truth preference
 
-For feature work, centella needs to know whether to draw conventions from the
+For feature work, pila needs to know whether to draw conventions from the
 codebase, from online research, or from both (codebase first; research as
 fallback). Resolution order (highest priority first):
 
 1. **`--source-of-truth`** CLI flag, values `codebase` | `research` | `both`.
    Argparse rejects anything else before the orchestrator runs.
 
-2. **`CENTELLA_SOURCE_OF_TRUTH`** environment variable, same value set.
+2. **`PILA_SOURCE_OF_TRUTH`** environment variable, same value set.
 
-3. **`centella.toml` at the repo root** (committed, so the preference travels
+3. **`pila.toml` at the repo root** (committed, so the preference travels
    with the repo). Plain `key=value` syntax:
 
    ```
    source_of_truth = codebase
    ```
 
-4. **Default `both`.** When unset, centella runs feature tasks with
+4. **Default `both`.** When unset, pila runs feature tasks with
    `source_of_truth = both` — codebase patterns first, with researched
    best-practice standards as a fallback where the codebase is insufficient.
    The preference is never surfaced as an interactive question; setting it
@@ -305,11 +305,11 @@ config is caught before any worker spawns.
 
 > The CLI/env > file order reflects that the CLI flag and env var are
 > session-scoped knobs (a user reaching for them is making a one-off
-> override), while `centella.toml` is the committed default for the repo.
+> override), while `pila.toml` is the committed default for the repo.
 
 ### Clarification preference
 
-By default centella runs without surfacing intent questions to the user
+By default pila runs without surfacing intent questions to the user
 (DESIGN §11). The classifier still runs the codebase→research filter and
 the implementer still applies it before any mid-execution decision —
 "no questions" never means "skip the rigor." Pass `--clarify` to opt
@@ -317,9 +317,9 @@ into surfacing the surviving questions. Resolution order (highest
 priority first):
 
 1. **`--clarify`** CLI flag (action=`store_true`).
-2. **`CENTELLA_CLARIFY`** environment variable (boolean, parsed by
+2. **`PILA_CLARIFY`** environment variable (boolean, parsed by
    `_parse_bool_envtoml`: 1/0, true/false, yes/no, on/off).
-3. **`centella.toml` at the repo root** with `clarify = true`.
+3. **`pila.toml` at the repo root** with `clarify = true`.
 4. **Default `False`.** No questions are surfaced; the implementer
    makes a best-effort decision and documents it in
    `investigation_notes`.
@@ -330,7 +330,7 @@ same shape as `--source-of-truth` resolution.
 ### Prompt loading and the shared filter fragment
 
 Worker prompts are loaded by `load_prompt(name)` in
-`orchestrator/centella.py` rather than `read_text()` directly. The
+`orchestrator/pila.py` rather than `read_text()` directly. The
 helper expands any `{{include: _foo.md}}` placeholder by inlining the
 named fragment from `prompts/`. Fragments prefixed with `_` are
 internal includes — never standalone worker prompts. Today there is
@@ -352,8 +352,8 @@ Resolution order (highest priority first):
 
 1. **`--confidence-rounds N`** CLI flag. Argparse rejects non-positive
    integers.
-2. **`CENTELLA_CONFIDENCE_ROUNDS`** environment variable, same value set.
-3. **`centella.toml` at the repo root**, `confidence_rounds = N`.
+2. **`PILA_CONFIDENCE_ROUNDS`** environment variable, same value set.
+3. **`pila.toml` at the repo root**, `confidence_rounds = N`.
 4. **Default `8`** (`DEFAULT_CAPS["confidence_rounds"]`).
 
 An invalid value in env or file is rejected at startup via `die()`. The
@@ -364,7 +364,7 @@ each planner / implementer's user prompt — the cap is prompt-governed (see
 ### Verbosity
 
 Controls how much of the per-worker activity surfaces to the
-orchestrator log. Per-worker `.centella/logs/<sid>.log` files are
+orchestrator log. Per-worker `.pila/logs/<sid>.log` files are
 always written with the full raw event stream — verbosity governs
 only the *inline* summary lines. Four named levels with stackable
 `-v`/`-q` shortcuts, following the clig.dev / cargo / kubectl
@@ -373,7 +373,7 @@ convention.
 | Level    | Flag             | What you see inline |
 | -------- | ---------------- | ------------------- |
 | `quiet`  | `-qq` / `--verbosity quiet` | Phase boundaries, final result, errors only |
-| `normal` | `-q` | Phase boundaries + per-subtask status changes (centella's pre-streaming behavior) |
+| `normal` | `-q` | Phase boundaries + per-subtask status changes (pila's pre-streaming behavior) |
 | `stream` | `-v` / (default) | `normal` + one-line summary per worker event |
 | `debug`  | `-vv` / `--verbosity debug` | `stream` + raw event payloads, tool I/O, schema diffs, retry diagnostics |
 
@@ -386,8 +386,8 @@ Resolution order (highest priority first):
    "show me the streaming feature" and `-q` always means "back to
    the pre-streaming terse output", independent of what
    env-var / TOML defaults are set to.
-3. **`CENTELLA_VERBOSITY`** environment variable.
-4. **`centella.toml`**, `verbosity = "stream"`.
+3. **`PILA_VERBOSITY`** environment variable.
+4. **`pila.toml`**, `verbosity = "stream"`.
 5. **Default `stream`** (`VERBOSITY_DEFAULT`).
 
 An invalid value in env or file is rejected at startup via `die()`.
@@ -405,7 +405,7 @@ Extra directories the inspect-bucket workers (classifier, planner,
 reconciler) may read. Forwarded to each `claude -p` invocation as
 one `--add-dir` flag per entry. Use this when a task references a
 sibling repo outside the current repo cwd — for example, "compare
-how beacon and centella handle X, beacon is at `~/src/enric/beacon`":
+how beacon and pila handle X, beacon is at `~/src/enric/beacon`":
 without `--inspect-dir ~/src/enric/beacon`, the classifier and
 planner cannot `Read`/`Grep`/`Glob` that path, and an attempt to
 fall back to `ls`/`find` is blocked by the workspace sandbox even
@@ -414,8 +414,8 @@ though `INSPECT_TOOLS` allowlists those verbs.
 Resolution order (highest priority first):
 
 1. **`--inspect-dir PATH`** CLI flag, repeatable.
-2. **`CENTELLA_INSPECT_DIRS`** environment variable, colon-separated.
-3. **`centella.toml`**, `inspect_dirs = "/abs/path/a,/abs/path/b"`
+2. **`PILA_INSPECT_DIRS`** environment variable, colon-separated.
+3. **`pila.toml`**, `inspect_dirs = "/abs/path/a,/abs/path/b"`
    (a comma-separated string, parsed by `_read_toml_key`).
 4. **Default** `[]` (no extra directories).
 
@@ -433,16 +433,16 @@ unneeded.
 
 ### Telemetry
 
-Controls whether centella writes NDJSON telemetry events for LLM calls. Events
-land in `<run-dir>/<telemetry_subdir>/` — already under `.centella/` and thus
+Controls whether pila writes NDJSON telemetry events for LLM calls. Events
+land in `<run-dir>/<telemetry_subdir>/` — already under `.pila/` and thus
 covered by the existing `.gitignore` exclusion. Telemetry is on by default.
 
 Resolution order (highest priority first):
 
 1. **`--telemetry` / `--no-telemetry`** CLI flags (mutually exclusive).
-2. **`CENTELLA_TELEMETRY`** environment variable, boolean spellings
+2. **`PILA_TELEMETRY`** environment variable, boolean spellings
    (`1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`).
-3. **`centella.toml`**, `telemetry = true|false`.
+3. **`pila.toml`**, `telemetry = true|false`.
 4. **Default `True`** (`TELEMETRY_DEFAULT`).
 
 An invalid boolean in env or file is rejected at startup via `die()`.
@@ -455,8 +455,8 @@ files are written.
 Resolution order (highest priority first):
 
 1. **`--telemetry-dir DIR`** CLI flag.
-2. **`CENTELLA_TELEMETRY_DIR`** environment variable.
-3. **`centella.toml`**, `telemetry_dir = "events"`.
+2. **`PILA_TELEMETRY_DIR`** environment variable.
+3. **`pila.toml`**, `telemetry_dir = "events"`.
 4. **Default `"events"`** (`TELEMETRY_SUBDIR_DEFAULT`).
 
 ### Judge output directory
@@ -467,8 +467,8 @@ are written.
 Resolution order (highest priority first):
 
 1. **`--judge-dir DIR`** CLI flag.
-2. **`CENTELLA_JUDGE_DIR`** environment variable.
-3. **`centella.toml`**, `judge_dir = "judge-out"`.
+2. **`PILA_JUDGE_DIR`** environment variable.
+3. **`pila.toml`**, `judge_dir = "judge-out"`.
 4. **Default `"judge-out"`** (`JUDGE_DIR_DEFAULT`).
 
 ### Heal output directory
@@ -479,8 +479,8 @@ files are written.
 Resolution order (highest priority first):
 
 1. **`--heal-dir DIR`** CLI flag.
-2. **`CENTELLA_HEAL_DIR`** environment variable.
-3. **`centella.toml`**, `heal_dir = "heal-out"`.
+2. **`PILA_HEAL_DIR`** environment variable.
+3. **`pila.toml`**, `heal_dir = "heal-out"`.
 4. **Default `"heal-out"`** (`HEAL_DIR_DEFAULT`).
 
 ### Judge model
@@ -492,8 +492,8 @@ the orchestrator's core workers — `sonnet` is the right default for throughput
 Resolution order (highest priority first):
 
 1. **`--judge-model MODEL`** CLI flag.
-2. **`CENTELLA_MODEL_JUDGE`** environment variable.
-3. **`centella.toml`**, `model_judge = "sonnet"`.
+2. **`PILA_MODEL_JUDGE`** environment variable.
+3. **`pila.toml`**, `model_judge = "sonnet"`.
 4. **Default `"sonnet"`** (`MODEL_DEFAULT_PER_WORKER["judge"]`).
 
 ### Heal model
@@ -504,8 +504,8 @@ generation and patched-arm replay.
 Resolution order (highest priority first):
 
 1. **`--heal-model MODEL`** CLI flag.
-2. **`CENTELLA_MODEL_HEAL`** environment variable.
-3. **`centella.toml`**, `model_heal = "sonnet"`.
+2. **`PILA_MODEL_HEAL`** environment variable.
+3. **`pila.toml`**, `model_heal = "sonnet"`.
 4. **Default `"sonnet"`** (`MODEL_DEFAULT_PER_WORKER["heal"]`).
 
 ### Heal-loop convergence parameters
@@ -516,8 +516,8 @@ detection, and budget guard. All default values match Beacon's `DEFAULT_CONFIG`
 
 | Knob | CLI flag | Env var | TOML key | Default |
 |------|----------|---------|----------|---------|
-| Max iterations per call_type | `--heal-max-rounds N` | `CENTELLA_HEAL_MAX_ROUNDS` | `heal_max_rounds = 10` | `10` (`HEAL_MAX_ROUNDS_DEFAULT`) |
-| Success pass-rate threshold | `--heal-success-threshold F` | `CENTELLA_HEAL_SUCCESS_THRESHOLD` | `heal_success_threshold = 0.9` | `0.9` (`HEAL_SUCCESS_THRESHOLD_DEFAULT`) |
+| Max iterations per call_type | `--heal-max-rounds N` | `PILA_HEAL_MAX_ROUNDS` | `heal_max_rounds = 10` | `10` (`HEAL_MAX_ROUNDS_DEFAULT`) |
+| Success pass-rate threshold | `--heal-success-threshold F` | `PILA_HEAL_SUCCESS_THRESHOLD` | `heal_success_threshold = 0.9` | `0.9` (`HEAL_SUCCESS_THRESHOLD_DEFAULT`) |
 | Plateau detection window | — | — | — | `3` (`HEAL_PLATEAU_WINDOW_DEFAULT`; not user-tunable) |
 | Plateau minimum delta | — | — | — | `0.03` (`HEAL_PLATEAU_DELTA_DEFAULT`; not user-tunable) |
 | Per-call_type replay count | — | — | — | `5` (`HEAL_N_REPLAYS_DEFAULT`; not user-tunable) |
@@ -526,7 +526,7 @@ The plateau window, plateau delta, and replay count are not currently exposed
 as CLI/env/TOML knobs — they are implementation constants. Only the user-facing
 knobs (`--heal-max-rounds`, `--heal-success-threshold`) are CLI/env/TOML
 resolvable. Resolution for both follows the standard precedence: CLI flag →
-env var → `centella.toml` → default.
+env var → `pila.toml` → default.
 
 ### Model selection
 
@@ -562,10 +562,10 @@ Resolution order for each worker type `W` (highest priority first):
 
 1. **`--model-<W>`** CLI flag (e.g. `--model-implementer opus`)
 2. **`--model`** CLI flag (sets the global default for this run)
-3. **`CENTELLA_MODEL_<W>`** env var (e.g. `CENTELLA_MODEL_IMPLEMENTER=opus`)
-4. **`CENTELLA_MODEL`** env var (sets the global default)
-5. **`model_<w>`** key in `centella.toml`
-6. **`model`** key in `centella.toml`
+3. **`PILA_MODEL_<W>`** env var (e.g. `PILA_MODEL_IMPLEMENTER=opus`)
+4. **`PILA_MODEL`** env var (sets the global default)
+5. **`model_<w>`** key in `pila.toml`
+6. **`model`** key in `pila.toml`
 7. **Per-worker default** from `MODEL_DEFAULT_PER_WORKER`
 8. **Global default `MODEL_DEFAULT`** (`opus`)
 
@@ -573,15 +573,15 @@ Nine worker types, each independently overridable:
 
 | Worker       | env var                       | CLI flag                | TOML key            |
 |--------------|-------------------------------|-------------------------|---------------------|
-| (global)     | `CENTELLA_MODEL`              | `--model`               | `model`             |
-| classifier   | `CENTELLA_MODEL_CLASSIFIER`   | `--model-classifier`    | `model_classifier`  |
-| planner      | `CENTELLA_MODEL_PLANNER`      | `--model-planner`       | `model_planner`     |
-| reconciler   | `CENTELLA_MODEL_RECONCILER`   | `--model-reconciler`    | `model_reconciler`  |
-| implementer  | `CENTELLA_MODEL_IMPLEMENTER`  | `--model-implementer`   | `model_implementer` |
-| integrator   | `CENTELLA_MODEL_INTEGRATOR`   | `--model-integrator`    | `model_integrator`  |
-| conformer    | `CENTELLA_MODEL_CONFORMER`    | `--model-conformer`     | `model_conformer`   |
-| judge        | `CENTELLA_MODEL_JUDGE`        | `--judge-model`         | `model_judge`       |
-| heal         | `CENTELLA_MODEL_HEAL`         | `--heal-model`          | `model_heal`        |
+| (global)     | `PILA_MODEL`              | `--model`               | `model`             |
+| classifier   | `PILA_MODEL_CLASSIFIER`   | `--model-classifier`    | `model_classifier`  |
+| planner      | `PILA_MODEL_PLANNER`      | `--model-planner`       | `model_planner`     |
+| reconciler   | `PILA_MODEL_RECONCILER`   | `--model-reconciler`    | `model_reconciler`  |
+| implementer  | `PILA_MODEL_IMPLEMENTER`  | `--model-implementer`   | `model_implementer` |
+| integrator   | `PILA_MODEL_INTEGRATOR`   | `--model-integrator`    | `model_integrator`  |
+| conformer    | `PILA_MODEL_CONFORMER`    | `--model-conformer`     | `model_conformer`   |
+| judge        | `PILA_MODEL_JUDGE`        | `--judge-model`         | `model_judge`       |
+| heal         | `PILA_MODEL_HEAL`         | `--heal-model`          | `model_heal`        |
 
 Note: `judge` and `heal` use dedicated CLI flags (`--judge-model`, `--heal-model`)
 rather than the `--model-<W>` pattern used by orchestrator workers, because they
@@ -593,12 +593,12 @@ values are validated by argparse `choices=` and rejected with the standard
 argparse error.
 
 **Cost note:** Opus is materially more expensive than Sonnet. A user who
-wants the old all-Sonnet behavior sets `CENTELLA_MODEL=sonnet` (or
+wants the old all-Sonnet behavior sets `PILA_MODEL=sonnet` (or
 `--model sonnet`). Per-worker overrides (`--model-planner sonnet`) let
 users selectively de-escalate individual workers.
 
-Models are not persisted in `.centella/state.json`. On `--resume`, models are
-re-resolved from the current environment, so changing `CENTELLA_MODEL` between
+Models are not persisted in `.pila/state.json`. On `--resume`, models are
+re-resolved from the current environment, so changing `PILA_MODEL` between
 the original run and the resume is intentional and takes effect.
 
 ### The `--answers` file
@@ -622,7 +622,7 @@ Each worker is one `claude -p` headless process. Flags used:
 | Flag | Purpose |
 |------|---------|
 | `-p` | non-interactive single-shot |
-| `--output-format stream-json --verbose` | streams one JSON event per stdout line as the worker runs; the final `result` event is the envelope (same shape as `--output-format json`'s single output — `cost`, `usage`, `terminal_reason`, `structured_output`). `_invoke` writes raw events to `.centella/logs/<sid>.log` and emits per-event inline summaries gated by `state.json["verbosity"]` |
+| `--output-format stream-json --verbose` | streams one JSON event per stdout line as the worker runs; the final `result` event is the envelope (same shape as `--output-format json`'s single output — `cost`, `usage`, `terminal_reason`, `structured_output`). `_invoke` writes raw events to `.pila/logs/<sid>.log` and emits per-event inline summaries gated by `state.json["verbosity"]` |
 | `--json-schema <inline>` | the payload schema; serialized inline as a JSON string — a file path is silently ignored (verified against Claude Code 2.1.143) |
 | `--append-system-prompt` | injects the worker's role prompt — read from `prompts/*.md` for classifier/planner/reconciler/implementer/integrator/conformer |
 | `--allowedTools` | tool allowlist; two buckets — **inspect** (`INSPECT_TOOLS`: read set + allowlisted `Bash(ls:*)` / `Bash(find:*)` / `Bash(cat:*)` / … for cross-cwd read-only inspection, **no Write/Edit**) for classifier, planner, and reconciler; **acting** (`ACT_TOOLS`: read set + Bash/Write/Edit) for implementer, integrator, and conformer. The acting bucket keeps Bash unrestricted because its workers run with `--dangerously-skip-permissions`; the inspect bucket uses `Bash(<verb>:*)` prefix patterns to pre-approve specific read-only verbs at the CLI level — no Write/Edit so the prompt's "you do not modify code" rule is enforced mechanically per DESIGN §12 |
@@ -660,19 +660,19 @@ Maps to `DESIGN.md`: §7 (worker contract), §2 (CLI subprocess form).
 
 ---
 
-## 4. Phase walkthrough (`centella.py`)
+## 4. Phase walkthrough (`pila.py`)
 
 | Phase | Function(s) | What it does |
 |-------|-------------|--------------|
 | Preflight | `preflight` | git identity, clean working tree, `claude` CLI version, live `claude -p` smoke test. Run-id collisions are detected later in the flow (filesystem side in `State.rename_to()` post-classify; git side in `setup-run.sh`'s branch-creation step) — they cannot be checked in preflight because the final `run_id` isn't known until phase_classify completes. Smoke test bypassed by `--skip-smoke`; preflight skipped entirely on `--resume` |
 | 1 Classify | `phase_classify` | one classifier worker → categories + questions. Returned categories are filtered against the 8-name whitelist in `CATEGORIES` (mirrors DESIGN §4); `die()` if none survive |
 | 0 Clarify | `gather_answers` | source-of-truth is satisfied non-interactively from the resolved preference (default `both`). Intent questions from the classifier are dropped by default; pass `--clarify` to surface them. With `--clarify` + interactive: collect; with `--clarify` + non-interactive: write `pending-questions.json`, exit code 10 (DESIGN §11) |
-| 2 Plan | `phase_plan` | one planner worker per category, awaited concurrently via `gather_or_cancel` (a small wrapper around `asyncio.gather` defined in `centella.py`) under an `asyncio.Semaphore(max_parallel)`; the first worker exception cancels its siblings and propagates to `main()` |
+| 2 Plan | `phase_plan` | one planner worker per category, awaited concurrently via `gather_or_cancel` (a small wrapper around `asyncio.gather` defined in `pila.py`) under an `asyncio.Semaphore(max_parallel)`; the first worker exception cancels its siblings and propagates to `main()` |
 | 2½ Reconcile | `phase_reconcile` | compute set of `requires` capability tags with no matching `provides` across merged planner output. If empty: short-circuit (no worker spawn, plan unchanged). Else: spawn one reconciler worker that emits renames / added_provides / added_subtasks / unresolvable. Orchestrator applies the first three mechanically; if `unresolvable` is non-empty, `die()` with the reconciler's diagnosis (DESIGN §5, §14). |
 | 3 Schedule | `schedule`, `validate_plan` | merge plans, build the global DAG, Kahn topological sort into waves; cycle → `die()` |
-| 4 Setup | `phase_execute` head → `setup-run.sh` | create the run branch `centella/runs/<run-id>` and its worktree (per-run, isolated from any other run) |
+| 4 Setup | `phase_execute` head → `setup-run.sh` | create the run branch `pila/runs/<run-id>` and its worktree (per-run, isolated from any other run) |
 | 5 Execute | `phase_execute`, `settle_subtask`, `integrate_wave` | per wave: implementers awaited concurrently via `gather_or_cancel` under a fresh `asyncio.Semaphore(max_parallel)` (separate instance from Phase 2's), then integrate, then run a deterministic conflict-marker scan on the integrated worktree. `settle_subtask` runs the **post-work conformance phase** (DESIGN §9 *Post-work conformance*) on the success path before returning — `discover_rules_files` → `run_conformer` loop (≤ `conformance_rounds`) → re-run the per-subtask mechanical-precondition gates (`check_branch_has_commits`, dirty-worktree, `check_diff_scope`) against the conformer's commits → attach `conformance_warnings` to the result. The phase is advisory: residuals, build/lint/test failures, gate violations on conformer commits, and `WorkerError` all surface as warnings, never as `failed`/`blocked`. If any subtask in the wave ends `blocked` or `failed`, `phase_execute` aborts the run *before* `integrate_wave` is called — the blocker is recorded in `state.json` and the run resumes with `--resume`. There is no LLM wave-level re-validation; the §8 confidence gate is the load-bearing per-subtask signal, and `scan_conflict_markers` is the deterministic post-integration safety net |
-| 6 Finalize | `phase_finalize` → `finalize.sh`, `cleanup.sh` | verify the run branch is non-empty; push the run branch and open a PR (unless `--no-push`); record push / PR outcome in `run.json`; delete the per-subtask branches `centella/subtasks/<run-id>/*` (the run branch is **kept** as the PR head; state dir is kept as audit). The working branch is **not** modified locally — the PR is the proposed integration. |
+| 6 Finalize | `phase_finalize` → `finalize.sh`, `cleanup.sh` | verify the run branch is non-empty; push the run branch and open a PR (unless `--no-push`); record push / PR outcome in `run.json`; delete the per-subtask branches `pila/subtasks/<run-id>/*` (the run branch is **kept** as the PR head; state dir is kept as audit). The working branch is **not** modified locally — the PR is the proposed integration. |
 | Post-run Judge | `phase_judge`, `judge_capture` | standalone post-run phase (not part of main orchestrate flow): reads `calls.ndjson`, runs one `judge_capture()` per record in parallel under `asyncio.Semaphore(max_parallel)`, writes per-record verdicts to `<judge-dir>/<call_id>.json` and a summary `INDEX.json`; uses `prompts/judge.md` rubric |
 | Post-run Heal | `HealState`, `heal_baseline`, `heal_apply_patch`, `heal_replay_patched`, `request_patch`, `phase_heal` | heal-loop phases: `HealState` persists failing_samples / baseline / history / best_so_far at `<heal-dir>/<call_type>/state.json`; `heal_baseline(call_type, failing_records, n, heal_dir, caps, st, models)` runs n unpatched replays per record + judge, writes baseline verdicts + state; `heal_apply_patch(call_type, iter_n, patch_text, anchor_match, heal_dir, failing_records)` materialises patched prompts under `iter-<N>/patched-prompts/`; `heal_replay_patched(call_type, iter_n, n, heal_dir, caps, st, models)` runs n patched replays per record + judge, appends iteration record to state.history; `request_patch(state, iter_n, st, caps, models)` invokes the `patch_generator` worker (schema `SCHEMAS["patch_generator"]`, SID `heal-patch-<call_type>-iter<N>`, prompt from `prompts/patch_generator.md`) and returns `(anchor, replacement)` — raises `ValueError` if the returned anchor is not a literal substring of the resolved prompt body (code-enforced per the prompts-are-advisory principle); `phase_heal(call_type, failing_records, heal_dir, caps, st, models, request_patch_fn=None, n, config)` drives the full baseline→loop→report cycle; `request_patch_fn` defaults to the real `request_patch` when `None`, or accepts a sync/async 2-arg stub for testing |
 
@@ -680,8 +680,8 @@ Maps to `DESIGN.md`: §7 (worker contract), §2 (CLI subprocess form).
 on the classification.
 
 Between Phase 3 and Phase 4, `write_plan()` persists the merged plan
-(`.centella/plan.json`) and per-subtask spec files
-(`.centella/subtasks/<id>.json`), and `detect_test_runner()` scans for a
+(`.pila/plan.json`) and per-subtask spec files
+(`.pila/subtasks/<id>.json`), and `detect_test_runner()` scans for a
 deterministic test harness (pytest, npm, go, cargo, make) — stored in
 `state['test_runner']` for the conformance phase's advisory test run
 (consumed via `_infer_build_lint_test()`).
@@ -692,14 +692,14 @@ Maps to `DESIGN.md`: §3.
 
 ## 5. Deterministic enforcement points
 
-All in `centella.py`, in execution order. This is the concrete catalogue behind
+All in `pila.py`, in execution order. This is the concrete catalogue behind
 `DESIGN.md` §12 ("prompts advisory, code enforces").
 
 ### Preflight (before any LLM work)
 | Check | Catches |
 |-------|---------|
-| `resolve_source_of_truth()` at startup | invalid value in `centella.toml`, `CENTELLA_SOURCE_OF_TRUTH`, or `--source-of-truth` — caught before any worker spawns, not mid-planner |
-| `resolve_models()` at startup | invalid model alias in `centella.toml`, any `CENTELLA_MODEL[_*]` env var, or any `--model[-*]` CLI flag — caught before any worker spawns |
+| `resolve_source_of_truth()` at startup | invalid value in `pila.toml`, `PILA_SOURCE_OF_TRUTH`, or `--source-of-truth` — caught before any worker spawns, not mid-planner |
+| `resolve_models()` at startup | invalid model alias in `pila.toml`, any `PILA_MODEL[_*]` env var, or any `--model[-*]` CLI flag — caught before any worker spawns |
 | `git user.email` / `user.name` set | commits would fail silently without identity |
 | working tree clean | dirty tree → ambiguous diffs, corrupt merge history |
 | `claude --version` ≥ `MIN_CLAUDE_CLI` (currently `(2, 1, 22)`) | CLI too old for `--json-schema` (introduced for `claude -p` in v2.1.22) — replaces the cryptic "unknown option" message a stale CLI used to produce |
@@ -710,10 +710,10 @@ Run-id collisions are detected outside preflight because the final `run_id` is o
 
 | Check | Where | Catches |
 |-------|-------|---------|
-| `State.rename_to(new_run_id)` refuses if the target dir exists | `orchestrate()` after `phase_classify` | `.centella/runs/<run-id>/` already exists on disk |
-| `setup-run.sh` preserves an existing `centella/runs/<run-id>` branch instead of creating it | wave-execute phase | A pre-existing branch with the same name (treated as a resume; the run picks up wherever the branch was left) |
+| `State.rename_to(new_run_id)` refuses if the target dir exists | `orchestrate()` after `phase_classify` | `.pila/runs/<run-id>/` already exists on disk |
+| `setup-run.sh` preserves an existing `pila/runs/<run-id>` branch instead of creating it | wave-execute phase | A pre-existing branch with the same name (treated as a resume; the run picks up wherever the branch was left) |
 
-The bootstrap directory `.centella/runs/_bootstrap-<6hex>/` is used until classify completes; the rename is atomic on POSIX same-filesystem.
+The bootstrap directory `.pila/runs/_bootstrap-<6hex>/` is used until classify completes; the rename is atomic on POSIX same-filesystem.
 
 `--skip-smoke` bypasses only the live smoke test (used by the test harness); the CLI version check and the `gh` check still run because they are local and read-only, and skipping them would defer a confusing failure to mid-run.
 
@@ -756,7 +756,7 @@ resolve overlaps automatically.
 | `validate_result()` cross-field invariants | `handoff` with no checkpoint file; `blocked` with no blocker; `failed` with no summary; `needs-clarification` with no `clarification_question` or no `checkpoint_path` | **Terminal** |
 | `check_branch_has_commits()` | `complete` claim, nothing committed | **Retryable** |
 | dirty worktree check | uncommitted changes that vanish on integration | **Retryable** |
-| `check_diff_scope()` | `.centella/` or `.git/` in the diff; any `.claude/` path *except* `.claude/agents/`, `.claude/commands/`, `.claude/skills/` (the documented Claude Code user-deliverable subtrees — implementers may write a subagent/command/skill file there as a legitimate deliverable, but never `settings.json` or any top-level `.claude/` file) | **Terminal** (protected path); scope-volume warning is non-fatal (triggered when `files_likely_touched` is non-empty *and* touched > max(3× expected, 5), or when touched > 15 regardless of the planner's estimate) |
+| `check_diff_scope()` | `.pila/` or `.git/` in the diff; any `.claude/` path *except* `.claude/agents/`, `.claude/commands/`, `.claude/skills/` (the documented Claude Code user-deliverable subtrees — implementers may write a subagent/command/skill file there as a legitimate deliverable, but never `settings.json` or any top-level `.claude/` file) | **Terminal** (protected path); scope-volume warning is non-fatal (triggered when `files_likely_touched` is non-empty *and* touched > max(3× expected, 5), or when touched > 15 regardless of the planner's estimate) |
 | `validate_checkpoint()` — on `incomplete-handoff` | required section missing; required section empty/whitespace; required section contains only a placeholder token (`none`/`n/a`/`na`/`tbd`/`nothing`/`unknown`/`todo`/`pending`/`—`/`--`/`-`/`?`, trailing `.`/`!`/`?`/`…` ignored and repeated `?` collapsed); a path listed under `## Files touched` no longer exists in the worktree and is not flagged `[deleted]` | returns `blocked` |
 | `_retryable_failure(summary)` — on `status='failed'` returned by the worker itself | worker self-report of failure | routed through the retry policy using the worker's `summary` as the reason; because `summary` is freeform text it almost never matches a retryable marker, so in practice a self-reported `failed` is **terminal** on first occurrence |
 
@@ -822,13 +822,13 @@ the outcome.
 | Check | Catches |
 |-------|---------|
 | `check_merge_committed()` | integrator returned `resolved` but left the worktree mid-merge (`MERGE_HEAD` present) or with staged-uncommitted changes — **terminal**: merge aborted, run stops |
-| `check_integrator_commit()` | integrator merge commit touched `.centella/` files — non-fatal warning, recorded to `state.json` |
+| `check_integrator_commit()` | integrator merge commit touched `.pila/` files — non-fatal warning, recorded to `state.json` |
 | integrator status `design-conflict` / `failed` | unresolvable conflict — **terminal**: in-progress merge aborted, the run branch left clean at the last good wave, diagnosis saved, run stops |
 
 ### Resume integrity — `validate_resume_state()`
 Enforces (one half of) DESIGN §6's "the run branch is the resume contract"
 invariant — state.json's `waves`/`completed_waves` say *which* wave to
-resume; the never-reset `centella/runs/<run-id>` branch holds *the work*
+resume; the never-reset `pila/runs/<run-id>` branch holds *the work*
 every prior wave produced. Both must be coherent for resume to be safe.
 
 On `--resume`: asserts `task` is present and non-empty; asserts `waves`,
@@ -839,13 +839,13 @@ hand-edited state without rejecting a legitimately-early interruption.
 
 `orchestrate()` also re-resolves the source-of-truth preference on every
 `--resume` and overwrites `state.json`'s `source_of_truth_pref` with the
-fresh value, so a change to `centella.toml` or `CENTELLA_SOURCE_OF_TRUTH`
+fresh value, so a change to `pila.toml` or `PILA_SOURCE_OF_TRUTH`
 between runs takes effect on resume.
 
 Per-worker models are likewise re-resolved on every `--resume` from the
-current CLI flags, env, and `centella.toml`. They are *not* persisted in
+current CLI flags, env, and `pila.toml`. They are *not* persisted in
 `state.json` (they are startup config, not run state), so a change to
-`CENTELLA_MODEL`, `--model`, or the per-worker overrides between runs
+`PILA_MODEL`, `--model`, or the per-worker overrides between runs
 takes effect immediately on resume.
 
 ### Concurrency model
@@ -875,7 +875,7 @@ Defaults in `DEFAULT_CAPS` and the per-worker `claude_p` call sites.
 | subtask continuations (re-spawns of an implementer for the same subtask — both context-exhaustion handoffs *and* mid-execution clarifications consume from the same budget) | 3 (`subtask_continuations`) | return `blocked`; fatal at wave boundary |
 | corrective retries of a *retryable* failure per subtask (`failed_retries`) | 1 | return `failed` |
 | orchestrator-level conformer rounds per subtask (`conformance_rounds`) | 2 | exit the conformance loop; any residuals become `conformance_warnings` on the subtask result — never `failed` / `blocked` (DESIGN §9 *Post-work conformance*) |
-| total worker invocations per run | 60 (`--max-workers`, also `CENTELLA_MAX_WORKERS` env or `max_workers` in `centella.toml`) | abort, state saved for `--resume` |
+| total worker invocations per run | 60 (`--max-workers`, also `PILA_MAX_WORKERS` env or `max_workers` in `pila.toml`) | abort, state saved for `--resume` |
 | concurrent workers within a wave | 4 (`--max-parallel`) | throughput throttle |
 | turns per `claude -p` call | per worker (below) | worker stops; implementer → `incomplete-handoff` |
 | per-worker wall-clock (`worker_timeout_sec`) | 5400 s (90 min) | worker killed; implementer → `incomplete-handoff` |
@@ -949,48 +949,48 @@ Every script takes a `RUN_ID` as its first positional argument (after any flags)
 
 | Script | Behavior |
 |--------|----------|
-| `setup-run.sh <run-id>` | Creates `centella/runs/<run-id>` **only if absent** — never force-resets it (an existing branch carries completed waves; resetting it would destroy resume state). Records the working branch (HEAD-at-run-start) to `.centella/runs/<run-id>/working-branch` on first run only. Adds the run-branch worktree at `.centella/runs/<run-id>/worktrees/staging` if missing. Appends `.centella/` to the repo's `.git/info/exclude` (idempotent). Safe on `--resume`. |
-| `new-worktree.sh <id> <run-id>` | Creates `centella/subtasks/<run-id>/<id>` worktree at `.centella/runs/<run-id>/worktrees/<id>` branched off the current `centella/runs/<run-id>` tip; reuses an existing worktree/branch if present (resume after handoff). Prints the absolute worktree path. The run-branch (`centella/runs/…`) and subtask-branch (`centella/subtasks/…`) prefixes are deliberately disjoint so neither is an ancestor ref of the other — git's loose ref store cannot hold a ref AT a path and another ref UNDER that same path simultaneously. |
-| `integrate.sh <id> <run-id>` | From repo root, inside the run-branch worktree (`.centella/runs/<run-id>/worktrees/staging`): `git merge --no-ff centella/subtasks/<run-id>/<id>`. Exit 0 clean; exit 1 on conflict, leaving the worktree mid-merge for an integrator; exit 2 on precondition failure (run-branch worktree or subtask branch missing) — `integrate_wave` treats exit 2 as fatal via `die()` and does *not* spawn an integrator, since the worktree-less case would fail in confusing ways. |
-| `finalize.sh <run-id>` | Run-branch verifier. Exits 0 if `refs/heads/centella/runs/<run-id>` exists and contains at least one commit beyond the working branch; exits non-zero with a diagnosis otherwise. The working branch is **never** modified — centella does not merge into it locally; the PR (opened by `push_and_open_pr()`) is the proposed integration. The push and PR step lives in `push_and_open_pr()` in `centella.py` (see below) so it can compose the PR body with `compose_pr_body()`, write `run.json`, and emit Python-style multi-line failure messages. |
-| `cleanup.sh [--run-id <id> \| --all-runs \| --bootstrap] [--branches \| --subtask-branches]` | Default (no flag): scans `.centella/runs/*/state.json` for the most-recently-failed run (most recent without `finished_at`), confirms y/N, then removes only that run's worktrees + prunes git metadata. State dir stays as audit. `--run-id <id>` is an explicit single-run cleanup (worktrees only). `--all-runs` runs the same per-run cleanup across every run dir under `.centella/runs/` (excluding `_bootstrap-*`). `--bootstrap` removes orphaned `_bootstrap-*` directories (runs that died before classify completed; not enumerable by `discover_runs`). `--branches` (combinable with `--run-id` or `--all-runs`) additionally deletes the matching run branches *and* subtask branches (`centella/runs/<id>` and `centella/subtasks/<id>/*`). `--subtask-branches` deletes only the subtask branches and keeps `centella/runs/<id>` (the post-finalize default — the run branch is the PR head and must outlive the orchestrator). Without either flag, all branches are kept as an audit trail. State dirs are always preserved by `cleanup.sh` — full nuke-the-run is the Ctrl-C path in the orchestrator (`_cleanup_on_abnormal_exit(full_purge=True)`). |
+| `setup-run.sh <run-id>` | Creates `pila/runs/<run-id>` **only if absent** — never force-resets it (an existing branch carries completed waves; resetting it would destroy resume state). Records the working branch (HEAD-at-run-start) to `.pila/runs/<run-id>/working-branch` on first run only. Adds the run-branch worktree at `.pila/runs/<run-id>/worktrees/staging` if missing. Appends `.pila/` to the repo's `.git/info/exclude` (idempotent). Safe on `--resume`. |
+| `new-worktree.sh <id> <run-id>` | Creates `pila/subtasks/<run-id>/<id>` worktree at `.pila/runs/<run-id>/worktrees/<id>` branched off the current `pila/runs/<run-id>` tip; reuses an existing worktree/branch if present (resume after handoff). Prints the absolute worktree path. The run-branch (`pila/runs/…`) and subtask-branch (`pila/subtasks/…`) prefixes are deliberately disjoint so neither is an ancestor ref of the other — git's loose ref store cannot hold a ref AT a path and another ref UNDER that same path simultaneously. |
+| `integrate.sh <id> <run-id>` | From repo root, inside the run-branch worktree (`.pila/runs/<run-id>/worktrees/staging`): `git merge --no-ff pila/subtasks/<run-id>/<id>`. Exit 0 clean; exit 1 on conflict, leaving the worktree mid-merge for an integrator; exit 2 on precondition failure (run-branch worktree or subtask branch missing) — `integrate_wave` treats exit 2 as fatal via `die()` and does *not* spawn an integrator, since the worktree-less case would fail in confusing ways. |
+| `finalize.sh <run-id>` | Run-branch verifier. Exits 0 if `refs/heads/pila/runs/<run-id>` exists and contains at least one commit beyond the working branch; exits non-zero with a diagnosis otherwise. The working branch is **never** modified — pila does not merge into it locally; the PR (opened by `push_and_open_pr()`) is the proposed integration. The push and PR step lives in `push_and_open_pr()` in `pila.py` (see below) so it can compose the PR body with `compose_pr_body()`, write `run.json`, and emit Python-style multi-line failure messages. |
+| `cleanup.sh [--run-id <id> \| --all-runs \| --bootstrap] [--branches \| --subtask-branches]` | Default (no flag): scans `.pila/runs/*/state.json` for the most-recently-failed run (most recent without `finished_at`), confirms y/N, then removes only that run's worktrees + prunes git metadata. State dir stays as audit. `--run-id <id>` is an explicit single-run cleanup (worktrees only). `--all-runs` runs the same per-run cleanup across every run dir under `.pila/runs/` (excluding `_bootstrap-*`). `--bootstrap` removes orphaned `_bootstrap-*` directories (runs that died before classify completed; not enumerable by `discover_runs`). `--branches` (combinable with `--run-id` or `--all-runs`) additionally deletes the matching run branches *and* subtask branches (`pila/runs/<id>` and `pila/subtasks/<id>/*`). `--subtask-branches` deletes only the subtask branches and keeps `pila/runs/<id>` (the post-finalize default — the run branch is the PR head and must outlive the orchestrator). Without either flag, all branches are kept as an audit trail. State dirs are always preserved by `cleanup.sh` — full nuke-the-run is the Ctrl-C path in the orchestrator (`_cleanup_on_abnormal_exit(full_purge=True)`). |
 
-A run branch `centella/runs/<run-id>` is never reset once created — this is the invariant `--resume` depends on. See `DESIGN.md` §6 ("the run branch is the resume contract").
+A run branch `pila/runs/<run-id>` is never reset once created — this is the invariant `--resume` depends on. See `DESIGN.md` §6 ("the run branch is the resume contract").
 
 ### Push and PR (Python; called from `phase_finalize`)
 
 The push + PR step is implemented in Python rather than in `finalize.sh`. It runs after `finalize.sh`'s verifier check succeeds, unless `--no-push` is in effect.
 
-| Function (centella.py) | Behavior |
+| Function (pila.py) | Behavior |
 |--------|----------|
-| `push_and_open_pr(st, no_verify)` | Pushes `centella/runs/<run-id>` to `origin` (with `--no-verify` appended if the CLI flag was set), then opens a PR via `gh pr create --base <working-branch> --head centella/runs/<run-id> --title centella: <run-id> --body-file -` piping `compose_pr_body(st.data, st.run_id)`. Push failure dies non-zero with a multi-line message naming the run branch (where the work lives) and the working branch (unchanged from run start; the intended PR base), the captured stderr, and the exact retry command; updates `.centella/runs/<run-id>/run.json` with `push_error`. PR-creation failure is **non-fatal**: logs a warning with the pushed-branch URL and the retry command; updates `run.json` with `pr_error` and returns 0 (the run is complete; only the PR is missing). |
+| `push_and_open_pr(st, no_verify)` | Pushes `pila/runs/<run-id>` to `origin` (with `--no-verify` appended if the CLI flag was set), then opens a PR via `gh pr create --base <working-branch> --head pila/runs/<run-id> --title pila: <run-id> --body-file -` piping `compose_pr_body(st.data, st.run_id)`. Push failure dies non-zero with a multi-line message naming the run branch (where the work lives) and the working branch (unchanged from run start; the intended PR base), the captured stderr, and the exact retry command; updates `.pila/runs/<run-id>/run.json` with `push_error`. PR-creation failure is **non-fatal**: logs a warning with the pushed-branch URL and the retry command; updates `run.json` with `pr_error` and returns 0 (the run is complete; only the PR is missing). |
 | `_check_gh_cli(no_push)` | Preflight gate. Short-circuits silently when `--no-push` is set. Else verifies `shutil.which("gh")`, `gh auth status` exits 0, and `git remote get-url origin` succeeds. Each failure dies with an actionable message + the `--no-push` escape hatch. |
 
-`--no-push` skips the entire push + PR step (the run completes with the run branch local-only; the working branch is unchanged). CLI flag, `CENTELLA_NO_PUSH` env, `no_push = true` in `centella.toml` — same precedence pattern as `--source-of-truth`. `--no-verify` is CLI-only and only affects the push step (worker `git commit`s inside worktrees still run all hooks).
+`--no-push` skips the entire push + PR step (the run completes with the run branch local-only; the working branch is unchanged). CLI flag, `PILA_NO_PUSH` env, `no_push = true` in `pila.toml` — same precedence pattern as `--source-of-truth`. `--no-verify` is CLI-only and only affects the push step (worker `git commit`s inside worktrees still run all hooks).
 
 Maps to `DESIGN.md`: §6 (Finalization — Push and PR).
 
 ---
 
-## 8. Coordination directory layout (`.centella/`)
+## 8. Coordination directory layout (`.pila/`)
 
 Created in the main repository (not in any worktree — worktrees are disposable).
-`setup-run.sh` git-excludes `.centella/` by appending it to the target
+`setup-run.sh` git-excludes `.pila/` by appending it to the target
 repo's `.git/info/exclude` rather than to the user's tracked `.gitignore`
 (we deliberately do not modify files the user has committed).
 
-Every run's artifacts live under `.centella/runs/<run-id>/`. The parent
-`.centella/` directory is otherwise empty of run data; it only hosts the
+Every run's artifacts live under `.pila/runs/<run-id>/`. The parent
+`.pila/` directory is otherwise empty of run data; it only hosts the
 `runs/` directory. Two concurrent runs in the same repository share no
 coordination state.
 
 ```
-.centella/
+.pila/
 └── runs/
     └── <run-id>/                    (or _bootstrap-<6hex> pre-classify)
         ├── state.json               run state — see field table below
         ├── run.json                 sidecar — see field table below
-        ├── working-branch           the branch HEAD-at-run-start; used as the PR base (centella does not merge into it locally)
+        ├── working-branch           the branch HEAD-at-run-start; used as the PR base (pila does not merge into it locally)
         ├── plan.json                merged planner output
         ├── subtasks/<id>.json       per-subtask spec handed to each implementer
         ├── criteria/<id>.md         informational success-criteria notes (DESIGN §9)
@@ -1027,14 +1027,14 @@ completion, the orchestrator atomically renames it to the final
 Open file handles (per-worker logs in particular) survive the rename
 because POSIX file handles reference inodes, not paths.
 
-`run.json` fields (a minimal sidecar enabling `centella --list` and resume
+`run.json` fields (a minimal sidecar enabling `pila --list` and resume
 discovery without parsing the full `state.json`):
 
 | Field | Shape | Notes |
 |-------|-------|-------|
 | `run_id` | str | the run identifier (matches the directory name and the branch suffix) |
-| `branch` | str | the run branch — always `centella/runs/<run_id>` |
-| `working_branch` | str | the branch HEAD-at-run-start; used as the PR base (centella does not merge into it locally) |
+| `branch` | str | the run branch — always `pila/runs/<run_id>` |
+| `working_branch` | str | the branch HEAD-at-run-start; used as the PR base (pila does not merge into it locally) |
 | `started_at` | ISO-8601 str | wall-clock start time (also mirrored in `state.json`) |
 | `finished_at` | ISO-8601 str \| null | wall-clock end time, set at finalize success |
 | `task` | str | the task description (mirrored from `state.json`) |
@@ -1048,27 +1048,27 @@ discovery without parsing the full `state.json`):
 - `pr_url` and `pr_error` are mutually exclusive.
 - If `pr_url` is set, `pushed_at` must be set (cannot have a PR without a push).
 
-A corrupt sidecar is flagged but does not block the rest of the system; `centella --list` will render that run with `status=corrupt-sidecar` and the user can inspect or delete the file.
+A corrupt sidecar is flagged but does not block the rest of the system; `pila --list` will render that run with `status=corrupt-sidecar` and the user can inspect or delete the file.
 
-`centella --list` derives a single status per run via `_derive_run_status(run_json, state_json)`. The taxonomy is checked in priority order — earlier rows fire first:
+`pila --list` derives a single status per run via `_derive_run_status(run_json, state_json)`. The taxonomy is checked in priority order — earlier rows fire first:
 
 | Status | When it fires | Typical next step |
 |--------|---------------|-------------------|
-| `corrupt-sidecar` | `run.json` violates one of the three invariants above | inspect the file under `.centella/runs/<id>/run.json` |
-| `push-failed` | `push_error` is set | re-run `git push -u origin centella/<id>` after fixing the access issue |
+| `corrupt-sidecar` | `run.json` violates one of the three invariants above | inspect the file under `.pila/runs/<id>/run.json` |
+| `push-failed` | `push_error` is set | re-run `git push -u origin pila/<id>` after fixing the access issue |
 | `pr-failed` | `pr_error` is set (and push succeeded) | re-run `gh pr create` manually using the command logged at finalize |
 | `done-pushed-pr` | `pr_url` is set | the happy path: PR open, work merged locally |
 | `done-pushed-no-pr` | `pushed_at` set but `pr_url` not | rare: push succeeded, PR wasn't attempted (e.g., gh removed between push and PR) |
 | `done-local` | `finished_at` set, no `pushed_at` | the user passed `--no-push`; push manually if desired |
 | `in-progress` | none of the above | the run is still active (or died very early); resume with `--resume --run-id <id>` |
 
-`RUN_STATUSES` in `centella.py` declares the seven values; a test coupling check asserts the tuple matches every value `_derive_run_status` can return.
+`RUN_STATUSES` in `pila.py` declares the seven values; a test coupling check asserts the tuple matches every value `_derive_run_status` can return.
 
 `state.json` fields. This table is canonical: every field the orchestrator
 writes to `st.data` must appear here, and every field listed here must be
-written somewhere in `orchestrator/centella.py`. The coupling test in
+written somewhere in `orchestrator/pila.py`. The coupling test in
 `tests/test_state_fields.py` enforces parity in both directions against the
-`STATE_FIELDS` tuple in `centella.py`.
+`STATE_FIELDS` tuple in `pila.py`.
 
 | Field | Shape | Purpose |
 |-------|-------|---------|
@@ -1088,9 +1088,9 @@ written somewhere in `orchestrator/centella.py`. The coupling test in
 | `answers` | dict[str, str] | user answers to classifier questions (and source-of-truth) |
 | `needs_source_of_truth` | bool | whether classifier asked for source-of-truth disambiguation |
 | `source_of_truth_pref` | str | resolved preference (`codebase` / `research` / `both`) |
-| `clarify` | bool | whether asking the user is allowed for this run (resolved from `--clarify` / `CENTELLA_CLARIFY` / `centella.toml` / default `False`) |
+| `clarify` | bool | whether asking the user is allowed for this run (resolved from `--clarify` / `PILA_CLARIFY` / `pila.toml` / default `False`) |
 | `verbosity` | str | resolved verbosity level (`quiet` / `normal` / `stream` / `debug`); re-resolved fresh on every run, including `--resume`, so the user can dial up or down without editing state |
-| `inspect_dirs` | list[str] | extra absolute paths granted to inspect-bucket workers (classifier, planner, reconciler) via `--add-dir`. Resolved from `--inspect-dir` / `CENTELLA_INSPECT_DIRS` / `inspect_dirs` in `centella.toml`; re-resolved fresh on every run, including `--resume`, so the user can add or remove paths without editing state. Empty list when nothing is configured |
+| `inspect_dirs` | list[str] | extra absolute paths granted to inspect-bucket workers (classifier, planner, reconciler) via `--add-dir`. Resolved from `--inspect-dir` / `PILA_INSPECT_DIRS` / `inspect_dirs` in `pila.toml`; re-resolved fresh on every run, including `--resume`, so the user can add or remove paths without editing state. Empty list when nothing is configured |
 | `test_runner` | list[str] | detected short-circuit test command |
 | `integrator_failure` | dict | unresolvable conflict from `integrate_wave` (non-fatal signal log) |
 | `integrator_warnings` | dict[str, str] | non-fatal commit warnings from `integrate_wave` (non-fatal signal log) |
@@ -1098,14 +1098,14 @@ written somewhere in `orchestrator/centella.py`. The coupling test in
 | `conformance` | dict[str, dict] | per-subtask conformer output and `conformance_warnings` (non-fatal signal log) — keys are subtask ids, values are `{result, warnings}` where `result` is the last conformer payload (or null on crash) and `warnings` is the list of advisory strings produced across all conformance rounds. Populated only on subtasks whose implementer reached `status: "complete"`. See DESIGN §9 *Post-work conformance* |
 
 `pending-questions.json` (written by `gather_answers` on non-TTY exit, read by
-the plugin skill in `commands/centella.md`):
+the plugin skill in `commands/pila.md`):
 
 | Field | Shape | Notes |
 |-------|-------|-------|
 | `questions` | array of `{id, question, why_underivable?}` | the classifier-surfaced intent questions not already in `--answers` |
 
 `answers.json` (written by the plugin skill, passed back via
-`--answers .centella/answers.json`):
+`--answers .pila/answers.json`):
 
 | Field | Shape | Notes |
 |-------|-------|-------|
@@ -1244,7 +1244,7 @@ type. Required fields, current shape:
   by the self-heal skill's patch-generation worker; like `judge`, it is
   post-run and not used by the orchestrator's main `claude_p()`.
 
-Schemas are embedded as Python dicts in `centella.py` and serialized inline.
+Schemas are embedded as Python dicts in `pila.py` and serialized inline.
 
 Maps to `DESIGN.md`: §7, §14.
 
@@ -1257,7 +1257,7 @@ Maps to `DESIGN.md`: §14.
 ### NDJSON envelope schema
 
 Every `claude_p()` invocation appends one JSON object (one line) to
-`.centella/runs/<run-id>/calls.ndjson` immediately after the call returns.
+`.pila/runs/<run-id>/calls.ndjson` immediately after the call returns.
 The file is opened for append at run start and is never truncated — it is
 always a valid NDJSON file through the last complete line even under a hard
 kill. It is never read by the orchestrator at runtime; reading is a
@@ -1266,7 +1266,7 @@ post-run operation performed by the judge and heal skills.
 | Field | Type | Notes |
 |-------|------|-------|
 | `call_id` | str (UUID v4) | unique identifier for this invocation; referenced by judge verdicts |
-| `run_id` | str | the run identifier — matches the directory name under `.centella/runs/` |
+| `run_id` | str | the run identifier — matches the directory name under `.pila/runs/` |
 | `call_type` | str | one of `WORKER_TYPES`: `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer` |
 | `model` | str | the model alias passed to `--model` for this invocation (e.g. `opus`, `sonnet`) |
 | `system_prompt` | str | the full system prompt injected via `--append-system-prompt` |
@@ -1288,7 +1288,7 @@ on one `call_type` at a time.
 ### Capture file path
 
 ```
-.centella/runs/<run-id>/calls.ndjson
+.pila/runs/<run-id>/calls.ndjson
 ```
 
 One file per run. Written by the orchestrator; the judge and heal skills
@@ -1316,9 +1316,9 @@ worker's system prompt: given any member of `WORKER_TYPES`, it returns
 `(source_kind, content, location_hint)` where `source_kind` is `"file"`,
 `content` is the prompt body, and `location_hint` is the relative path
 `"prompts/<call_type>.md"`. Raises `ValueError` for an unknown
-`call_type`. (Earlier iterations of centella also exposed a `validator`
+`call_type`. (Earlier iterations of pila also exposed a `validator`
 call type whose prompt lived as a `VALIDATOR_SYSTEM` constant inside
-`centella.py`; that worker was retired when the criteria file became
+`pila.py`; that worker was retired when the criteria file became
 informational, and `resolve_prompt` no longer carries a
 file-or-constant branch.)
 
@@ -1361,10 +1361,10 @@ enforcement functions:
 |-----------|----------------------|
 | `test_resolve_source_of_truth.py` | `resolve_source_of_truth()` |
 | `test_resolve_models.py` | `resolve_models()` — per-worker precedence (CLI > env > TOML), defaults, validation, empty/whitespace handling |
-| `test__read_toml_key.py` | `_read_toml_key()` — the shared `centella.toml` line parser used by both resolvers |
+| `test__read_toml_key.py` | `_read_toml_key()` — the shared `pila.toml` line parser used by both resolvers |
 | `test_gather_answers_validation.py` | the source-of-truth validation gate in `gather_answers()` |
 | `test_retryable_failure.py` | `_retryable_failure()`, **including a coupling test** that the retryable markers actually appear in the strings emitted by `check_branch_has_commits` and the inline dirty-worktree check |
-| `test_state_fields.py` | `STATE_FIELDS` tuple parity, in both directions: against the §8 field table, and against every `st.data[...] = …` / `setdefault(...)` write in `centella.py`. This is the mechanism §8's "this table is canonical" claim relies on |
+| `test_state_fields.py` | `STATE_FIELDS` tuple parity, in both directions: against the §8 field table, and against every `st.data[...] = …` / `setdefault(...)` write in `pila.py`. This is the mechanism §8's "this table is canonical" claim relies on |
 | `test_validate_plan.py` | `validate_plan()` (every rule in §5) |
 | `test_validate_result.py` | `validate_result()` (every status-branch invariant) |
 | `test_check_merge_committed.py` | `check_merge_committed()` (real-git fixtures) |

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Centella will be documented in this file.
+All notable changes to Pila will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -15,33 +15,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is ≈ 1 classifier + 2 planners + 1 reconciler + 18 implementers +
   ~18 conformers + a few continuations / integrators ≈ 45–55 workers
   worst-case; the new default leaves margin without inviting runaway
-  cost. `CENTELLA_MAX_WORKERS` env var and `max_workers` in
-  `centella.toml` are new escape hatches (same precedence as
+  cost. `PILA_MAX_WORKERS` env var and `max_workers` in
+  `pila.toml` are new escape hatches (same precedence as
   `--confidence-rounds`: CLI > env > TOML > default).
 - **Protected-path scope narrowed.** The diff-scope check that gates
   implementers and conformers previously rejected any write under
-  `.claude/` wholesale. It now protects only `.centella/`, `.git/`,
+  `.claude/` wholesale. It now protects only `.pila/`, `.git/`,
   and top-level `.claude/` files (`settings.json`,
   `settings.local.json`); the three documented Claude Code
   user-deliverable subtrees (`.claude/agents/`, `.claude/commands/`,
-  `.claude/skills/`) are exempt. Centella's own self-healing skill
+  `.claude/skills/`) are exempt. Pila's own self-healing skill
   instructs downstream consumers to write subagent files at
   `.claude/agents/<name>.md`; the over-broad protection previously
   blocked the very pattern the skill teaches. DESIGN.md §9,
   IMPLEMENTATION.md, and `prompts/conformer.md` are updated to match.
 - **`--no-clarify` is now `--clarify`; no-questions is the new
-  default.** The flag's polarity is inverted: by default centella runs
+  default.** The flag's polarity is inverted: by default pila runs
   without surfacing intent questions to the user. The classifier's
   codebase→research filter still runs and the implementer applies the
   same filter before any mid-execution decision — "no questions" never
   means "skip the rigor." Pass `--clarify` (or set
-  `CENTELLA_CLARIFY=true` / `clarify = true` in `centella.toml`) to
+  `PILA_CLARIFY=true` / `clarify = true` in `pila.toml`) to
   opt into surfacing the questions that survive the filter.
 - **Clarification filter is DRY-ed across the prompts.** The wording
   shown to workers now lives in a single shared fragment
   (`prompts/_clarification_filter.md`), included into
   `prompts/classifier.md` and `prompts/implementer.md` at load time
-  by a new `load_prompt()` helper in `orchestrator/centella.py`.
+  by a new `load_prompt()` helper in `orchestrator/pila.py`.
   Previously the same filter was restated three times and could
   drift. Worker-facing text now also pushes back explicitly on the
   base model's training prior to ask questions liberally — ~90% of
@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Cross-planner file-overlap warning at plan-validation time.** When
   two planners both list the same path in `files_likely_touched`,
-  centella now logs a warning right after reconciliation (before the
+  pila now logs a warning right after reconciliation (before the
   scheduler builds the DAG) instead of waiting for the integrator to
   crash mid-wave. Empirically (n=3 historical runs) the signal is
   clean: the one successful run had zero overlaps; both failed runs
@@ -61,26 +61,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolution (extending the reconciler's action vocabulary to handle
   file-claim conflicts the same way it handles capability-tag
   vocabulary drift) is tracked as follow-up work.
-- `CENTELLA_MAX_WORKERS` env var and `max_workers` key in
-  `centella.toml` resolve through the new `resolve_max_workers()`
+- `PILA_MAX_WORKERS` env var and `max_workers` key in
+  `pila.toml` resolve through the new `resolve_max_workers()`
   helper, mirroring `resolve_confidence_rounds()`'s precedence.
   `--max-workers` argparse type is now `_positive_int` (was `int`):
   bad values (0, -1, "nope") are rejected at parse time with a clean
   argparse error instead of falling through to a downstream default.
 - `is_protected_path(path)` module-level helper in
-  `orchestrator/centella.py` is the new single source of truth for
+  `orchestrator/pila.py` is the new single source of truth for
   what the diff-scope check rejects. `check_diff_scope()` and
   documentation reference it; the previous inline tuple is gone.
-- `CENTELLA_CLARIFY` env var and `clarify` key in `centella.toml`
+- `PILA_CLARIFY` env var and `clarify` key in `pila.toml`
   (same precedence as `--source-of-truth`: CLI > env > file > default
   `False`). New helper `_resolve_bool_pref` factors the resolution
   shape shared with `--no-push` to keep them from drifting.
 
 ### Removed
 
-- **All legacy / backwards-compat code paths.** Centella now has **no
+- **All legacy / backwards-compat code paths.** Pila now has **no
   migration path from prior versions** — start fresh. Specifically:
-  the `cleanup.sh --legacy` mode and the `.centella/state.json`
+  the `cleanup.sh --legacy` mode and the `.pila/state.json`
   detection guard in `main()` (which together migrated installations
   off the pre-per-run layout) are deleted; the `validate_resume_state`
   check that rejected pre-inversion `no_clarify` state files is
@@ -92,8 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`codebase` / `research` / `both` / `ask`) collapses to three.
   Default is now `both` (codebase first; research as fallback) — the
   preference is never surfaced as an interactive question, because
-  setting `--source-of-truth` / `CENTELLA_SOURCE_OF_TRUTH` /
-  `source_of_truth` in `centella.toml` already expresses an explicit
+  setting `--source-of-truth` / `PILA_SOURCE_OF_TRUTH` /
+  `source_of_truth` in `pila.toml` already expresses an explicit
   intent, and an unset preference implicitly accepts `both`.
   `gather_answers` no longer prompts for source-of-truth or emits the
   `source_of_truth` / `source_of_truth_hint` fields in
@@ -118,9 +118,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Finalize no longer merges the run branch into the working branch
   locally.** Phase 6 now verifies the run branch is non-empty, pushes it
   to `origin`, and opens a PR via `gh pr create --base <working-branch>
-  --head centella/runs/<run-id>`. The working branch is **not** modified
+  --head pila/runs/<run-id>`. The working branch is **not** modified
   locally; the PR is the proposed integration. Previously, a successful
-  run landed a `centella: integrate completed run into <working-branch>`
+  run landed a `pila: integrate completed run into <working-branch>`
   merge commit on the working branch *and* opened a PR with the same
   base, duplicating the same change in two places. `--no-push` still
   skips the push + PR step (the run branch is left local-only; the
@@ -132,11 +132,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-subtask branches are auto-deleted at finalize.** A new
   `cleanup.sh --subtask-branches` flag (mutually exclusive with
   `--branches`) is now invoked from `phase_finalize` after push+PR. It
-  deletes every `centella/subtasks/<run-id>/*` branch and keeps the
-  run branch `centella/runs/<run-id>` (the PR head must outlive the
+  deletes every `pila/subtasks/<run-id>/*` branch and keeps the
+  run branch `pila/runs/<run-id>` (the PR head must outlive the
   orchestrator). The per-subtask commits remain reachable from the run
   branch's `--no-ff` merge graph; the per-worker audit trail is now
-  `git log centella/runs/<run-id> --graph`. Previously every successful
+  `git log pila/runs/<run-id> --graph`. Previously every successful
   run left ~17–20 orphan subtask branches that the user had to delete
   by hand.
 
@@ -151,8 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Opus is materially more expensive per token than Sonnet; a typical
   run is meaningfully more expensive than before. To restore the
   pre-0.3 all-sonnet behavior in one knob, set `--model sonnet`,
-  `CENTELLA_MODEL=sonnet`, or `model = sonnet` in `centella.toml`.
-  Per-worker overrides (`--model-<worker>`, `CENTELLA_MODEL_<WORKER>`,
+  `PILA_MODEL=sonnet`, or `model = sonnet` in `pila.toml`.
+  Per-worker overrides (`--model-<worker>`, `PILA_MODEL_<WORKER>`,
   `model_<worker>`) let you dial individual workers independently.
 
 - `validate_checkpoint()` rejects a wider set of placeholder tokens.
@@ -179,7 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently saw EOF, the script exited 0 without doing anything, and the
   orchestrator continued past it. Every successful run was leaving its
   full set of subtask worktrees on disk under
-  `.centella/runs/<run-id>/worktrees/` despite the "cleanup ran" log
+  `.pila/runs/<run-id>/worktrees/` despite the "cleanup ran" log
   line. A defense-in-depth pin in `phase_finalize` now asserts the
   invocation includes the run id.
 
@@ -197,21 +197,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforcement functions.
 - Per-worker model selection. Default `sonnet`; override with `--model`
   (sets all five workers) or `--model-<worker>` (per-worker; values:
-  `sonnet` / `opus` / `haiku`). Env equivalents `CENTELLA_MODEL` and
-  `CENTELLA_MODEL_<WORKER>`; TOML keys `model` and `model_<worker>` in
-  `centella.toml`. Resolution order, highest first: per-worker CLI →
+  `sonnet` / `opus` / `haiku`). Env equivalents `PILA_MODEL` and
+  `PILA_MODEL_<WORKER>`; TOML keys `model` and `model_<worker>` in
+  `pila.toml`. Resolution order, highest first: per-worker CLI →
   global CLI → per-worker env → global env → per-worker TOML → global
   TOML → default. Invalid values rejected at startup. Models are
   re-resolved on `--resume` (not persisted in state).
 - `--source-of-truth` CLI flag for one-off overrides of the
-  `CENTELLA_SOURCE_OF_TRUTH` env var and `centella.toml`.
+  `PILA_SOURCE_OF_TRUTH` env var and `pila.toml`.
 
 ### Changed
 
 - Source-of-truth resolution precedence flipped: env var now beats
-  `centella.toml` (and the new `--source-of-truth` flag beats both).
-  CLI/env are session-scoped knobs; `centella.toml` is the committed
+  `pila.toml` (and the new `--source-of-truth` flag beats both).
+  CLI/env are session-scoped knobs; `pila.toml` is the committed
   repo default.
 
-[Unreleased]: https://github.com/enricai/centella/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/enricai/centella/releases/tag/v0.2.0
+[Unreleased]: https://github.com/enricai/pila/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/enricai/pila/releases/tag/v0.2.0

@@ -21,32 +21,32 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CENTELLA_PY = REPO_ROOT / "orchestrator" / "centella.py"
+PILA_PY = REPO_ROOT / "orchestrator" / "pila.py"
 
 
 # --- InterruptedBySignal --------------------------------------------------
 
-def test_interrupted_by_signal_is_base_exception(centella):
+def test_interrupted_by_signal_is_base_exception(pila):
     """Must subclass BaseException (not Exception) so the broad
     `except Exception` handlers inside orchestrate() don't swallow it."""
-    assert issubclass(centella.InterruptedBySignal, BaseException)
-    assert not issubclass(centella.InterruptedBySignal, Exception)
+    assert issubclass(pila.InterruptedBySignal, BaseException)
+    assert not issubclass(pila.InterruptedBySignal, Exception)
 
 
 # --- _install_signal_handlers --------------------------------------------
 
-def test_install_signal_handlers_registers_sigterm(centella, monkeypatch):
+def test_install_signal_handlers_registers_sigterm(pila, monkeypatch):
     """SIGTERM gets a custom handler installed."""
     installed: dict = {}
 
     def fake_signal(signum, handler):
         installed[signum] = handler
-    monkeypatch.setattr(centella.signal, "signal", fake_signal)
-    centella._install_signal_handlers()
+    monkeypatch.setattr(pila.signal, "signal", fake_signal)
+    pila._install_signal_handlers()
     assert _signal.SIGTERM in installed
 
 
-def test_install_signal_handlers_registers_sighup_on_posix(centella, monkeypatch):
+def test_install_signal_handlers_registers_sighup_on_posix(pila, monkeypatch):
     """SIGHUP gets a handler too, when available."""
     if not hasattr(_signal, "SIGHUP"):
         pytest.skip("SIGHUP not available on this platform")
@@ -54,12 +54,12 @@ def test_install_signal_handlers_registers_sighup_on_posix(centella, monkeypatch
 
     def fake_signal(signum, handler):
         installed[signum] = handler
-    monkeypatch.setattr(centella.signal, "signal", fake_signal)
-    centella._install_signal_handlers()
+    monkeypatch.setattr(pila.signal, "signal", fake_signal)
+    pila._install_signal_handlers()
     assert _signal.SIGHUP in installed
 
 
-def test_install_signal_handlers_does_not_touch_sigint(centella, monkeypatch):
+def test_install_signal_handlers_does_not_touch_sigint(pila, monkeypatch):
     """SIGINT must keep Python's default (KeyboardInterrupt) — not
     intercepted by InterruptedBySignal. main() handles KeyboardInterrupt
     separately for the full-purge path."""
@@ -67,22 +67,22 @@ def test_install_signal_handlers_does_not_touch_sigint(centella, monkeypatch):
 
     def fake_signal(signum, handler):
         installed[signum] = handler
-    monkeypatch.setattr(centella.signal, "signal", fake_signal)
-    centella._install_signal_handlers()
+    monkeypatch.setattr(pila.signal, "signal", fake_signal)
+    pila._install_signal_handlers()
     assert _signal.SIGINT not in installed
 
 
-def test_signal_handler_raises_interrupted_by_signal(centella, monkeypatch):
+def test_signal_handler_raises_interrupted_by_signal(pila, monkeypatch):
     """When the installed SIGTERM handler is invoked, it raises
     InterruptedBySignal — that's what bubbles up to main()."""
     handlers: dict = {}
 
     def fake_signal(signum, handler):
         handlers[signum] = handler
-    monkeypatch.setattr(centella.signal, "signal", fake_signal)
-    centella._install_signal_handlers()
+    monkeypatch.setattr(pila.signal, "signal", fake_signal)
+    pila._install_signal_handlers()
     handler = handlers[_signal.SIGTERM]
-    with pytest.raises(centella.InterruptedBySignal):
+    with pytest.raises(pila.InterruptedBySignal):
         handler(_signal.SIGTERM, None)
 
 
@@ -96,13 +96,13 @@ class _FakeState:
         self.run_dir = run_dir
 
 
-def test_cleanup_handles_none_state_gracefully(centella):
+def test_cleanup_handles_none_state_gracefully(pila):
     """Defensive: cleanup early-returns on a None state rather than
     raising. Used when main() bails before constructing State."""
-    centella._cleanup_on_abnormal_exit(None, full_purge=False)  # must not raise
+    pila._cleanup_on_abnormal_exit(None, full_purge=False)  # must not raise
 
 
-def test_cleanup_removes_worktrees_dir(centella, tmp_path, monkeypatch):
+def test_cleanup_removes_worktrees_dir(pila, tmp_path, monkeypatch):
     """_cleanup_on_abnormal_exit calls `git worktree remove --force` for
     each subdir of run_dir/worktrees/. Test by stubbing subprocess.run
     and confirming the calls."""
@@ -116,9 +116,9 @@ def test_cleanup_removes_worktrees_dir(centella, tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         calls.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(centella.subprocess, "run", fake_run)
+    monkeypatch.setattr(pila.subprocess, "run", fake_run)
 
-    centella._cleanup_on_abnormal_exit(st, full_purge=False)
+    pila._cleanup_on_abnormal_exit(st, full_purge=False)
 
     # Two worktree-remove calls + one prune.
     remove_calls = [c for c in calls if c[:3] == ["git", "worktree", "remove"]]
@@ -126,7 +126,7 @@ def test_cleanup_removes_worktrees_dir(centella, tmp_path, monkeypatch):
     assert any(c for c in calls if c == ["git", "worktree", "prune"])
 
 
-def test_cleanup_full_purge_deletes_run_dir(centella, tmp_path, monkeypatch):
+def test_cleanup_full_purge_deletes_run_dir(pila, tmp_path, monkeypatch):
     """With full_purge=True, the run_dir is removed via shutil.rmtree."""
     run_id = "feat-x-aaa111"
     run_dir = tmp_path / "runs" / run_id
@@ -134,17 +134,17 @@ def test_cleanup_full_purge_deletes_run_dir(centella, tmp_path, monkeypatch):
     (run_dir / "state.json").write_text("{}")
     st = _FakeState(run_id, run_dir)
 
-    monkeypatch.setattr(centella.subprocess, "run",
+    monkeypatch.setattr(pila.subprocess, "run",
                         lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, "", ""))
 
     assert run_dir.exists()
-    centella._cleanup_on_abnormal_exit(st, full_purge=True)
+    pila._cleanup_on_abnormal_exit(st, full_purge=True)
     assert not run_dir.exists(), (
         "full_purge=True must remove the run_dir entirely"
     )
 
 
-def test_cleanup_no_purge_preserves_run_dir(centella, tmp_path, monkeypatch):
+def test_cleanup_no_purge_preserves_run_dir(pila, tmp_path, monkeypatch):
     """full_purge=False leaves the run_dir intact (worktrees may be
     removed, but state.json and the dir itself survive)."""
     run_id = "feat-x-aaa111"
@@ -153,15 +153,15 @@ def test_cleanup_no_purge_preserves_run_dir(centella, tmp_path, monkeypatch):
     (run_dir / "state.json").write_text("{}")
     st = _FakeState(run_id, run_dir)
 
-    monkeypatch.setattr(centella.subprocess, "run",
+    monkeypatch.setattr(pila.subprocess, "run",
                         lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, "", ""))
 
-    centella._cleanup_on_abnormal_exit(st, full_purge=False)
+    pila._cleanup_on_abnormal_exit(st, full_purge=False)
     assert run_dir.exists(), "full_purge=False must preserve the run_dir"
     assert (run_dir / "state.json").exists(), "state.json must survive non-purge cleanup"
 
 
-def test_cleanup_full_purge_deletes_branches(centella, tmp_path, monkeypatch):
+def test_cleanup_full_purge_deletes_branches(pila, tmp_path, monkeypatch):
     """full_purge=True invokes `git for-each-ref` to enumerate branches
     and `git branch -D` to delete each one."""
     run_id = "feat-x-aaa111"
@@ -170,28 +170,28 @@ def test_cleanup_full_purge_deletes_branches(centella, tmp_path, monkeypatch):
     st = _FakeState(run_id, run_dir)
 
     branches_to_delete = [
-        f"centella/runs/{run_id}",
-        f"centella/subtasks/{run_id}/feat-001",
+        f"pila/runs/{run_id}",
+        f"pila/subtasks/{run_id}/feat-001",
     ]
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
         calls.append(list(cmd))
         if cmd[:2] == ["git", "for-each-ref"]:
-            # The cleanup walks two globs: refs/heads/centella/runs/<id>
-            # (the run branch, exact match) and refs/heads/centella/subtasks/<id>/
+            # The cleanup walks two globs: refs/heads/pila/runs/<id>
+            # (the run branch, exact match) and refs/heads/pila/subtasks/<id>/
             # (the subtask-branch prefix). Distinguish by the runs/ vs subtasks/
             # segment so each glob returns the matching branch.
             glob = cmd[3]
-            if glob == f"refs/heads/centella/runs/{run_id}":
-                return subprocess.CompletedProcess(cmd, 0, f"centella/runs/{run_id}\n", "")
-            if glob == f"refs/heads/centella/subtasks/{run_id}/":
-                return subprocess.CompletedProcess(cmd, 0, f"centella/subtasks/{run_id}/feat-001\n", "")
+            if glob == f"refs/heads/pila/runs/{run_id}":
+                return subprocess.CompletedProcess(cmd, 0, f"pila/runs/{run_id}\n", "")
+            if glob == f"refs/heads/pila/subtasks/{run_id}/":
+                return subprocess.CompletedProcess(cmd, 0, f"pila/subtasks/{run_id}/feat-001\n", "")
             return subprocess.CompletedProcess(cmd, 0, "", "")
         return subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(centella.subprocess, "run", fake_run)
+    monkeypatch.setattr(pila.subprocess, "run", fake_run)
 
-    centella._cleanup_on_abnormal_exit(st, full_purge=True)
+    pila._cleanup_on_abnormal_exit(st, full_purge=True)
 
     delete_calls = [c for c in calls if c[:3] == ["git", "branch", "-D"]]
     assert len(delete_calls) == 2, f"expected 2 branch deletes, got {delete_calls}"
@@ -200,8 +200,8 @@ def test_cleanup_full_purge_deletes_branches(centella, tmp_path, monkeypatch):
 # --- main() try/except/finally pinning -----------------------------------
 
 def _main_body() -> str:
-    """Extract main()'s body from centella.py source."""
-    src = CENTELLA_PY.read_text()
+    """Extract main()'s body from pila.py source."""
+    src = PILA_PY.read_text()
     m = re.search(
         r"^def main\(\) -> None:\n(.*?)(?=^(?:def |class |if __name__))",
         src, re.DOTALL | re.MULTILINE,

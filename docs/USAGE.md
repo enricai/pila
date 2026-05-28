@@ -1,8 +1,8 @@
-# A worked example: one Centella run, end to end
+# A worked example: one Pila run, end to end
 
 ## What this document is
 
-A walkthrough. It follows a single Centella run from invocation to merge so
+A walkthrough. It follows a single Pila run from invocation to merge so
 you know what to expect on stdout and on disk at each phase. It is *not* a
 reference — for the architecture and the reasons it works that way, see
 [`docs/DESIGN.md`](DESIGN.md); for the code surface (function names, cap
@@ -37,26 +37,26 @@ becomes noise.
 From the root of the target repository:
 
 ```bash
-export CENTELLA_SOURCE_OF_TRUTH=codebase
-centella "Add a --dry-run flag to the CLI that prints the plan without executing it, plus a regression test"
+export PILA_SOURCE_OF_TRUTH=codebase
+pila "Add a --dry-run flag to the CLI that prints the plan without executing it, plus a regression test"
 
 # Equivalent one-off invocation without the env var:
-centella --source-of-truth codebase "Add a --dry-run flag …"
+pila --source-of-truth codebase "Add a --dry-run flag …"
 
 # Same idea for the model — judgment workers default to `opus` and the
 # acting workers (implementer, conformer) default to `sonnet`; `--model
 # <alias>` sets every worker. Per-worker overrides exist
 # (e.g. --model-implementer opus).
-centella --model opus "Add a --dry-run flag …"
+pila --model opus "Add a --dry-run flag …"
 ```
 
-Setting `CENTELLA_SOURCE_OF_TRUTH=codebase` up front pins the
+Setting `PILA_SOURCE_OF_TRUTH=codebase` up front pins the
 source-of-truth preference for this run — useful when the default
 (`both`) is not what you want.
 
 Within the first few seconds you will see preflight output on stdout — git
 identity check, working-tree-clean check, a live `claude -p` smoke test —
-and a fresh `.centella/` directory appears in the repo root. It is
+and a fresh `.pila/` directory appears in the repo root. It is
 git-excluded automatically (via `.git/info/exclude`, not your tracked
 `.gitignore`).
 
@@ -72,13 +72,13 @@ printing, or should it also validate the plan and exit non-zero if the
 plan would have failed?"* That decision is not in the codebase; the
 classifier asks.
 
-In an interactive terminal Centella prompts you; you type answers, the run
-continues. In a non-interactive context (CI, a plugin skill) Centella
-instead writes `.centella/pending-questions.json` and exits with code 10 —
+In an interactive terminal Pila prompts you; you type answers, the run
+continues. In a non-interactive context (CI, a plugin skill) Pila
+instead writes `.pila/pending-questions.json` and exits with code 10 —
 not an error, a structured "need answers" signal. The plugin skill at
-[`commands/centella.md`](../commands/centella.md) shows the questions to
-the user, writes their answers to `.centella/answers.json`, and resumes
-with `--resume --answers .centella/answers.json`.
+[`commands/pila.md`](../commands/pila.md) shows the questions to
+the user, writes their answers to `.pila/answers.json`, and resumes
+with `--resume --answers .pila/answers.json`.
 
 ## Step 3 — Planning and scheduling
 
@@ -99,13 +99,13 @@ subtasks become two waves of one subtask each — the test cannot run until
 the flag exists. The full rationale for the wave model is in
 [`DESIGN.md`](DESIGN.md) §5.
 
-The merged plan lives at `.centella/plan.json`; per-subtask spec files
-appear at `.centella/subtasks/<id>.json`.
+The merged plan lives at `.pila/plan.json`; per-subtask spec files
+appear at `.pila/subtasks/<id>.json`.
 
 ## Step 4 — Wave execution
 
-For each wave Centella creates a per-subtask git worktree off the run
-branch (`centella/runs/<run-id>`), then spawns an implementer worker in
+For each wave Pila creates a per-subtask git worktree off the run
+branch (`pila/runs/<run-id>`), then spawns an implementer worker in
 each worktree. Workers run concurrently, capped by `--max-parallel`
 (default 4).
 
@@ -115,16 +115,16 @@ On stdout you'll see lines like (with a hypothetical `<run-id>` of
 ```
 [wave 1] implementer feat-add-dry-run-flag: start
 [wave 1] implementer feat-add-dry-run-flag: ok (3 turns, 12.4s)
-[wave 1] integrating feat-add-dry-run-flag into centella/runs/feat-add-dry-run-flag-a3f7c2
-[wave 1] validating centella/runs/feat-add-dry-run-flag-a3f7c2
+[wave 1] integrating feat-add-dry-run-flag into pila/runs/feat-add-dry-run-flag-a3f7c2
+[wave 1] validating pila/runs/feat-add-dry-run-flag-a3f7c2
 ```
 
 And `git worktree list` will show entries like:
 
 ```
 /your/repo                                                                       abc1234 [main]
-/your/repo/.centella/runs/feat-add-dry-run-flag-a3f7c2/worktrees/staging         def5678 [centella/runs/feat-add-dry-run-flag-a3f7c2]
-/your/repo/.centella/runs/feat-add-dry-run-flag-a3f7c2/worktrees/feat-add-dry-run-flag  ghi9012 [centella/subtasks/feat-add-dry-run-flag-a3f7c2/feat-add-dry-run-flag]
+/your/repo/.pila/runs/feat-add-dry-run-flag-a3f7c2/worktrees/staging         def5678 [pila/runs/feat-add-dry-run-flag-a3f7c2]
+/your/repo/.pila/runs/feat-add-dry-run-flag-a3f7c2/worktrees/feat-add-dry-run-flag  ghi9012 [pila/subtasks/feat-add-dry-run-flag-a3f7c2/feat-add-dry-run-flag]
 ```
 
 After every implementer commits in its worktree, the integrator merges
@@ -145,32 +145,32 @@ Before phase 6 opens a PR proposing to merge into your working branch,
 run-branch-as-integration-buffer (DESIGN §6) buys you:
 
 ```bash
-git log centella/runs/<run-id> --oneline
-git diff main..centella/runs/<run-id>
+git log pila/runs/<run-id> --oneline
+git diff main..pila/runs/<run-id>
 ```
 
 You will see one commit per subtask (one per worker), with subtask id in
 the subject line. If the diff looks wrong — too broad, missed an edge
 case, conflicting with something you wanted preserved — this is where you
-intervene. Either re-run Centella with a refined task, hand-edit the run
+intervene. Either re-run Pila with a refined task, hand-edit the run
 branch, or abandon and `./scripts/cleanup.sh --run-id <run-id> --branches`.
 
 ## Step 6 — Finalization
 
-Phase 6 verifies `centella/runs/<run-id>` is non-empty, pushes it to
+Phase 6 verifies `pila/runs/<run-id>` is non-empty, pushes it to
 `origin`, and opens a PR via `gh pr create --base <working-branch>
---head centella/runs/<run-id>`. Your working branch (the branch you
-were on when you invoked Centella, recorded in
-`.centella/runs/<run-id>/working-branch`) is **not** modified locally —
+--head pila/runs/<run-id>`. Your working branch (the branch you
+were on when you invoked Pila, recorded in
+`.pila/runs/<run-id>/working-branch`) is **not** modified locally —
 review and merge the PR on GitHub when you're satisfied. The run branch
-`centella/runs/<run-id>` remains in your repo as the PR head until you
-merge the PR. The per-subtask branches `centella/subtasks/<run-id>/*`
+`pila/runs/<run-id>` remains in your repo as the PR head until you
+merge the PR. The per-subtask branches `pila/subtasks/<run-id>/*`
 are **deleted automatically** at finalize — they were the mechanism for
 parallel implementer isolation and carry no information that isn't
 already in the run branch's merge graph. Each worker's full commit
 history is still reachable from the run branch (the integrator merges
 each subtask with `--no-ff`, so every worker's commits appear as a
-named merge bubble in `git log centella/runs/<run-id> --graph`).
+named merge bubble in `git log pila/runs/<run-id> --graph`).
 
 When you no longer need the run branch either (e.g., after the PR is
 merged on GitHub):
@@ -180,7 +180,7 @@ merged on GitHub):
 ```
 
 deletes the run branch and any remaining subtask branches. The per-run
-state directory `.centella/runs/<run-id>/` is kept as a smaller audit
+state directory `.pila/runs/<run-id>/` is kept as a smaller audit
 trail; `rm -rf` it manually when you no longer need that either. For an
 audit cleanup across every past run, use `--all-runs --branches`.
 
@@ -190,29 +190,29 @@ audit cleanup across every past run, use `--all-runs --branches`.
 resolve (an external dependency, an ambiguous spec, a failing test it
 cannot fix). The wave aborts *before* integration, the blocker reason
 lands in `state['blocked'][<subtask-id>]` and `subtask_status[<id>] =
-"blocked"` inside `.centella/runs/<run-id>/state.json`, and Centella
+"blocked"` inside `.pila/runs/<run-id>/state.json`, and Pila
 exits non-zero. You read the blocker, fix the upstream issue (often by
 editing the task and re-running, sometimes by hand-resolving), then
-`./centella --resume`. See [`DESIGN.md`](DESIGN.md) §8 for the
+`./pila --resume`. See [`DESIGN.md`](DESIGN.md) §8 for the
 evidence-gated loop logic that produces this signal.
 
 **Integration fails.** The integrator can't merge a subtask branch into
 the run branch — usually a conflict it cannot resolve behaviorally.
-Centella records the failure in `state['integrator_failure']` (inside
-`.centella/runs/<run-id>/state.json`) and exits. Pull up the conflicting
+Pila records the failure in `state['integrator_failure']` (inside
+`.pila/runs/<run-id>/state.json`) and exits. Pull up the conflicting
 branches yourself, resolve, and resume.
 
 **The run is interrupted.** Ctrl-C, system reboot, budget-cap hit. Run
-`./centella --resume` from the same directory. The resume cursor is
+`./pila --resume` from the same directory. The resume cursor is
 `state['completed_waves']`; finished waves are not re-run. The full state
 schema is documented in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) §8.
 
 ## Tuning for your workflow
 
 - `--source-of-truth codebase|research|both` — one-off CLI override;
-  beats env and `centella.toml`. Unset → default `both`.
-- `CENTELLA_SOURCE_OF_TRUTH=codebase|research|both` — sticky preference.
-- `centella.toml` at the repo root with `source_of_truth = codebase` —
+  beats env and `pila.toml`. Unset → default `both`.
+- `PILA_SOURCE_OF_TRUTH=codebase|research|both` — sticky preference.
+- `pila.toml` at the repo root with `source_of_truth = codebase` —
   committed per-repo default; outranked by env and CLI.
 - `--model sonnet|opus|haiku` — model for every worker this run.
   Without any override the per-worker defaults apply: judgment workers
@@ -221,15 +221,15 @@ schema is documented in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) §8.
   `--model-classifier`, `--model-planner`, `--model-reconciler`,
   `--model-implementer`, `--model-integrator`, `--model-conformer`
   flags override the global default. Env-var equivalents are
-  `CENTELLA_MODEL` (and `CENTELLA_MODEL_<WORKER>` for the per-worker
+  `PILA_MODEL` (and `PILA_MODEL_<WORKER>` for the per-worker
   overrides); TOML keys are `model` / `model_<worker>` in
-  `centella.toml`. Full precedence table in
+  `pila.toml`. Full precedence table in
   [`IMPLEMENTATION.md`](IMPLEMENTATION.md#model-selection). To restore
   the pre-0.3 all-sonnet behavior in one knob, set `--model sonnet` or
-  `CENTELLA_MODEL=sonnet`.
+  `PILA_MODEL=sonnet`.
 - `--max-workers N` — cap total `claude -p` subprocess count over the
   run. Default: `60` (`DEFAULT_CAPS["max_total_workers"]`). Also
-  `CENTELLA_MAX_WORKERS` env var or `max_workers` in `centella.toml`
+  `PILA_MAX_WORKERS` env var or `max_workers` in `pila.toml`
   (same precedence as `--confidence-rounds`: CLI > env > TOML > default).
   Note that the post-work conformance phase (DESIGN §9) spawns up to
   `conformance_rounds` additional workers per *successful* subtask (default
@@ -243,8 +243,8 @@ schema is documented in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) §8.
 - `--clarify` — opt into surfacing intent questions to the user
   (default: off). Without it the classifier's filter still runs but
   surviving questions are dropped, and the implementer makes a
-  documented best-effort decision. Also `CENTELLA_CLARIFY` env var
-  and `clarify = true` in `centella.toml`.
+  documented best-effort decision. Also `PILA_CLARIFY` env var
+  and `clarify = true` in `pila.toml`.
 - `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70` — lower auto-compaction threshold
   for worker processes.
 

@@ -1,4 +1,4 @@
-# Centella reconciler
+# Pila reconciler
 
 You bridge **capability-tag vocabulary drift** between parallel planners.
 
@@ -132,7 +132,7 @@ Input:
      "intent": "Wrap each slm_call so envelopes flow to events.ndjson",
      "provides": ["slm-capture-shim"], "requires": []},
     {"id": "feat-002", "title": "events.ndjson emitter",
-     "intent": "Write captured envelopes to .centella/runs/<id>/events.ndjson",
+     "intent": "Write captured envelopes to .pila/runs/<id>/events.ndjson",
      "provides": ["events-ndjson-emitter"], "requires": ["slm-capture-shim"]},
     {"id": "test-001", "title": "Test slm capture",
      "intent": "Verify envelopes are captured for every slm_call",

@@ -5,7 +5,7 @@ Covers:
   - override_system_prompt replaces system_prompt end-to-end.
   - A replay call does not write to any calls.ndjson (no capture pollution).
   - Return value is (envelope, structured_output) 2-tuple.
-  - replay_capture is importable from the centella module.
+  - replay_capture is importable from the pila module.
 """
 from __future__ import annotations
 
@@ -50,16 +50,16 @@ _CAPTURE_RECORD = {
 }
 
 
-def _stub_invoke(centella, monkeypatch, envelope=_GOOD_ENVELOPE):
-    """Patch centella._invoke to return envelope; return captured call_args list."""
+def _stub_invoke(pila, monkeypatch, envelope=_GOOD_ENVELOPE):
+    """Patch pila._invoke to return envelope; return captured call_args list."""
     captured = []
 
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         captured.append({"cmd": cmd, "cwd": cwd})
         return envelope
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
     return captured
 
 
@@ -67,19 +67,19 @@ def _stub_invoke(centella, monkeypatch, envelope=_GOOD_ENVELOPE):
 # Criterion 1: args match capture fields
 # ---------------------------------------------------------------------------
 
-def test_args_match_capture_fields(centella, tmp_path, monkeypatch):
+def test_args_match_capture_fields(pila, tmp_path, monkeypatch):
     """replay_capture passes system_prompt, user_content, call_type→schema_key,
     and model from the capture record through to claude_p / _invoke."""
     collected_cmd: list[list[str]] = []
 
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         collected_cmd.append(list(cmd))
         return _GOOD_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
 
-    asyncio.run(centella.replay_capture(_CAPTURE_RECORD))
+    asyncio.run(pila.replay_capture(_CAPTURE_RECORD))
 
     assert collected_cmd, "fake_invoke was never called"
     cmd = collected_cmd[0]
@@ -115,20 +115,20 @@ def test_args_match_capture_fields(centella, tmp_path, monkeypatch):
 # Criterion 2: override_system_prompt is plumbed through
 # ---------------------------------------------------------------------------
 
-def test_override_system_prompt(centella, tmp_path, monkeypatch):
+def test_override_system_prompt(pila, tmp_path, monkeypatch):
     """When override_system_prompt is supplied, it replaces the captured
     system_prompt in the invocation."""
     collected_cmd: list[list[str]] = []
 
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         collected_cmd.append(list(cmd))
         return _GOOD_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
 
     override = "PATCHED: use a different classifier strategy."
-    asyncio.run(centella.replay_capture(
+    asyncio.run(pila.replay_capture(
         _CAPTURE_RECORD,
         override_system_prompt=override,
     ))
@@ -149,19 +149,19 @@ def test_override_system_prompt(centella, tmp_path, monkeypatch):
 # Criterion 3: no calls.ndjson written (no capture pollution)
 # ---------------------------------------------------------------------------
 
-def test_replay_does_not_pollute_captures(centella, tmp_path, monkeypatch):
+def test_replay_does_not_pollute_captures(pila, tmp_path, monkeypatch):
     """replay_capture must not write to any calls.ndjson file — replays must
     not pollute the captures stream."""
 
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         return _GOOD_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
 
     # Run replay with cwd set to tmp_path so if any files are written they
     # land there where we can detect them.
-    asyncio.run(centella.replay_capture(
+    asyncio.run(pila.replay_capture(
         _CAPTURE_RECORD,
         cwd=str(tmp_path),
     ))
@@ -172,7 +172,7 @@ def test_replay_does_not_pollute_captures(centella, tmp_path, monkeypatch):
         f"calls.ndjson was written during replay: {ndjson_files}")
 
 
-def test_replay_does_not_modify_existing_capture_file(centella, tmp_path,
+def test_replay_does_not_modify_existing_capture_file(pila, tmp_path,
                                                        monkeypatch):
     """If a calls.ndjson already exists (from a prior live run), replay must
     leave it unmodified."""
@@ -180,13 +180,13 @@ def test_replay_does_not_modify_existing_capture_file(centella, tmp_path,
     original_content = '{"call_id":"existing"}\n'
     existing.write_text(original_content)
 
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         return _GOOD_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
 
-    asyncio.run(centella.replay_capture(
+    asyncio.run(pila.replay_capture(
         _CAPTURE_RECORD,
         cwd=str(tmp_path),
     ))
@@ -199,16 +199,16 @@ def test_replay_does_not_modify_existing_capture_file(centella, tmp_path,
 # Criterion 4: return value shape
 # ---------------------------------------------------------------------------
 
-def test_return_value_shape(centella, tmp_path, monkeypatch):
+def test_return_value_shape(pila, tmp_path, monkeypatch):
     """replay_capture returns a 2-tuple (envelope, structured_output)."""
 
-    async def fake_invoke(cmd, cwd, timeout, sid, centella_dir, verbosity,
+    async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
                           progress=None):
         return _GOOD_ENVELOPE
 
-    monkeypatch.setattr(centella, "_invoke", fake_invoke)
+    monkeypatch.setattr(pila, "_invoke", fake_invoke)
 
-    result = asyncio.run(centella.replay_capture(_CAPTURE_RECORD))
+    result = asyncio.run(pila.replay_capture(_CAPTURE_RECORD))
 
     assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
     assert len(result) == 2, f"Expected 2-tuple, got {len(result)}-tuple"
@@ -227,12 +227,12 @@ def test_return_value_shape(centella, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Criterion 5: importable from centella module
+# Criterion 5: importable from pila module
 # ---------------------------------------------------------------------------
 
-def test_replay_capture_importable(centella):
-    """replay_capture must be a top-level name in the centella module."""
-    assert hasattr(centella, "replay_capture"), (
-        "replay_capture is not defined in orchestrator/centella.py")
-    assert callable(centella.replay_capture), (
+def test_replay_capture_importable(pila):
+    """replay_capture must be a top-level name in the pila module."""
+    assert hasattr(pila, "replay_capture"), (
+        "replay_capture is not defined in orchestrator/pila.py")
+    assert callable(pila.replay_capture), (
         "replay_capture is not callable")

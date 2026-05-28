@@ -1,4 +1,4 @@
-# Centella — Design Document
+# Pila — Design Document
 
 > Deterministic, headless task orchestrator for Claude Code. Classifies an
 > engineering task, decomposes it into granular subtasks, schedules them into
@@ -20,7 +20,7 @@ document defines what *should* be true and the code is the defect.
 
 ## 1. Purpose
 
-Given one task description, Centella drives it to a validated, integrated result
+Given one task description, Pila drives it to a validated, integrated result
 without further human input — except where input is genuinely impossible to
 derive. Every loop is bounded, every decision is made from the codebase or from
 research, and state is kept on disk so a run is observable and resumable.
@@ -58,7 +58,7 @@ the CLI as a dependency. The other uses an agent library whose calls return
 typed objects — less brittle, because there is no marshalling of CLI strings
 and stdout — but it authenticates against the metered API rather than the
 subscription. Running on the subscription rather than the API was a hard
-requirement, so Centella takes the CLI-subprocess form. The brittleness that
+requirement, so Pila takes the CLI-subprocess form. The brittleness that
 choice accepts (parsing process output rather than typed objects) is contained
 by two later mechanisms: worktree isolation limits the blast radius of a
 misbehaving worker, and every worker result is validated against a schema
@@ -92,7 +92,7 @@ Orchestrator (deterministic — owns all control flow, caps, state)
 ```
 
 **Why classification precedes clarification.** Phase 1 runs before Phase 0
-because Centella cannot know what to ask until it knows what kind of task this
+because Pila cannot know what to ask until it knows what kind of task this
 is — the set of questions worth asking is a function of the classification.
 Phase 0 is skipped entirely for fully-specified tasks.
 
@@ -120,7 +120,7 @@ happens. Each worker's stream of tool calls, text, and intermediate
 results is read line-by-line, written verbatim to a per-worker log file,
 and summarized inline at a user-controllable verbosity level. The
 default level shows one-line summary per worker event; the user can dial
-down to centella's pre-streaming terse output (`-q`) or up to raw event
+down to pila's pre-streaming terse output (`-q`) or up to raw event
 payloads (`-vv`). Errors emit at every level. The per-worker file is
 the ground-truth audit trail; the inline view is the live feed.
 
@@ -229,7 +229,7 @@ the dependency is satisfied in the filesystem the dependent subtask starts from.
 
 ### Isolation
 
-Parallel workers that write to a shared directory race. Centella gives each
+Parallel workers that write to a shared directory race. Pila gives each
 implementer its own git worktree — an isolated checkout backed by the same
 repository. Parallel writes land in separate working directories and never
 collide. This is what makes "a wave of parallel implementers" safe even when
@@ -248,8 +248,8 @@ three inputs known by the end of Phase 1:
   precision).
 
 The result looks like `feat-add-telemetry-skills-a3f7c2`. It is the same
-string in three places: the run branch name (`centella/runs/<run-id>`), the
-per-run state directory (`.centella/runs/<run-id>/`), and the title of the
+string in three places: the run branch name (`pila/runs/<run-id>`), the
+per-run state directory (`.pila/runs/<run-id>/`), and the title of the
 PR opened at finalize. A user looking at any of the three can grep for the
 others.
 
@@ -261,18 +261,18 @@ is no shared "staging" namespace that two runs could collide on.
 ### The run branch as an integration buffer
 
 Integration does not happen on the user's working branch. Each run has its
-own **run branch** (`centella/runs/<run-id>`) that receives every subtask's
+own **run branch** (`pila/runs/<run-id>`) that receives every subtask's
 work; the user's branch is untouched until the run finishes and succeeds. A
 failed or messy integration therefore never lands on the branch the user
 cares about. Multiple runs in the same repository each have their own run
 branch and integrate independently.
 
-Subtask branches live under a sibling namespace: `centella/subtasks/<run-id>/<sid>`.
+Subtask branches live under a sibling namespace: `pila/subtasks/<run-id>/<sid>`.
 The run-branch and subtask-branch prefixes are deliberately disjoint
-(`centella/runs/…` vs. `centella/subtasks/…`) because git's loose ref store
+(`pila/runs/…` vs. `pila/subtasks/…`) because git's loose ref store
 cannot hold both a ref AT a path and a ref UNDER that same path
-simultaneously — `centella/<run-id>` as a leaf ref and
-`centella/<run-id>/<sid>` as a child ref would collide on the first
+simultaneously — `pila/<run-id>` as a leaf ref and
+`pila/<run-id>/<sid>` as a child ref would collide on the first
 `git worktree add`. Sibling prefixes make the collision structurally
 impossible.
 
@@ -303,7 +303,7 @@ depends on.
 When more than one run is in flight in the same repository, `--resume`
 needs to know *which* run to resume. The orchestrator auto-picks when
 exactly one run exists, and requires an explicit `--run-id` otherwise; the
-discovery scans `.centella/runs/*/state.json`. Resume never guesses across
+discovery scans `.pila/runs/*/state.json`. Resume never guesses across
 multiple runs.
 
 ### Why merge, not cherry-pick
@@ -346,7 +346,7 @@ markers (`<<<<<<<`). A merge that left markers behind aborts the
 run. There is no LLM-level wave validator beyond that: per-subtask
 quality is the implementer's confidence gate (§8); whether the
 integrated tree is *behaviorally* correct is a question the
-conformance phase touches and the human PR review confirms. Centella
+conformance phase touches and the human PR review confirms. Pila
 does not re-run subtask criteria at the wave boundary — that role
 belonged to an earlier wave-level validator that was removed when the
 criteria file became informational (§8, §9).
@@ -373,7 +373,7 @@ The final step turns the completed run branch into a reviewable artifact
 and never touches the user's working branch.
 
 **The run branch is the integration artifact.** Every wave's work is
-already integrated on `centella/runs/<run-id>`. Centella does not merge
+already integrated on `pila/runs/<run-id>`. Pila does not merge
 the run branch into the working branch locally — that would duplicate the
 same change in two places (a local commit and a PR) and put the working
 branch in a state the user did not request. The working branch is the same
@@ -385,7 +385,7 @@ is opened via `gh pr create` against the working branch (the branch
 HEAD-at-run-start). The PR title is the run id; the body is generated
 deterministically from the run state — task, category, source-of-truth,
 wave count, worker count, run timestamps. This is the single point at
-which centella reaches the network; everything before is local. Two flags
+which pila reaches the network; everything before is local. Two flags
 control it:
 
 - `--no-push` skips both the push and the PR; the run completes with the
@@ -411,21 +411,21 @@ create` command to retry. The principle is that the user always knows
 exactly what state things are in and exactly which branch holds the work
 to be resolved.
 
-**Why push by default.** When centella is invoked in CI or any unattended
+**Why push by default.** When pila is invoked in CI or any unattended
 context, a successful run that leaves work only on a local branch is a
 silent failure mode — the work exists but the user has no signal that it
 needs to be reviewed. Defaulting to push + PR turns every run into a
-reviewable artifact. `--no-push` exists for users running centella offline
+reviewable artifact. `--no-push` exists for users running pila offline
 or in repositories without a GitHub remote.
 
 **Branch cleanup at finalize.** After the push + PR (or after the run
 completes under `--no-push`), the orchestrator deletes the per-subtask
-branches `centella/subtasks/<run-id>/*` automatically. They were the
+branches `pila/subtasks/<run-id>/*` automatically. They were the
 mechanism by which parallel implementers committed in isolation; once
 their work has been merged into the run branch their individual commit
 histories are still reachable from the run branch's `--no-ff` merges, so
 the named refs are pure clutter. The **run branch** itself
-(`centella/runs/<run-id>`) is *kept* — it is the PR head, and deleting it
+(`pila/runs/<run-id>`) is *kept* — it is the PR head, and deleting it
 locally before the PR is merged would dangle the PR base reference. The
 per-run state directory (`state.json`, `run.json`, logs, criteria,
 checkpoints) is also kept as an audit trail. A user who wants to
@@ -440,9 +440,9 @@ close), or an unhandled exception fires. In each case the orchestrator
 runs a cleanup pass before exiting, and the cleanup *scope* depends on
 the cause.
 
-**Ctrl-C (SIGINT) → full purge.** The user explicitly told centella to
+**Ctrl-C (SIGINT) → full purge.** The user explicitly told pila to
 abort. Worktrees, run branch + per-subtask branches
-(`centella/runs/<run-id>` and `centella/subtasks/<run-id>/*`), and the
+(`pila/runs/<run-id>` and `pila/subtasks/<run-id>/*`), and the
 per-run state directory are all removed. The run is gone; `--resume`
 cannot recover it.
 
@@ -503,7 +503,7 @@ a measurement. Models are systematically overconfident and will state high
 confidence on a wrong root cause without hesitation. Looping on that number
 just loops on the same vibe.
 
-Centella keeps the loop and the high-confidence bar but **anchors the score to
+Pila keeps the loop and the high-confidence bar but **anchors the score to
 evidence**. Before an implementer writes any code it must clear a set of
 domain-specific *evidence gates*, and each gate must carry a concrete artifact
 — a file-and-line citation, a reproduction, a measurement, a cited research
@@ -598,7 +598,7 @@ is what the confidence gate at §8 is for.
 
 The implementer may update the file freely as its understanding
 evolves. There is no lock. This is a reversal of an earlier discipline
-in centella that locked the criteria file by sha256 hash on first write
+in pila that locked the criteria file by sha256 hash on first write
 and used a worker-initiated `criteria_revision_proposal` channel to
 thread any later edits through orchestrator approval. The lock was
 introduced to guard against a stuck model lowering its own bar to
@@ -667,14 +667,14 @@ Two further disciplines apply, and they sit at the §12 axis:
   advisory removes that incentive while still surfacing the residual to the
   human and to telemetry.
 - **No backsliding.** The conformer can add commits but must not write to
-  protected paths. The diff-scope check — no writes to `.centella/`,
+  protected paths. The diff-scope check — no writes to `.pila/`,
   `.git/`, or `.claude/` *except for the user-deliverable subtrees*
   `.claude/agents/`, `.claude/commands/`, and `.claude/skills/` — is
   re-run against the conformer's commits, on the same protected paths
   and with the same terminality as it ran against the implementer's
   commits. The `.claude/` carve-out exists because those three subtrees
   are the documented Claude Code customization locations: refusing to
-  write them would make centella unable to produce a subagent or
+  write them would make pila unable to produce a subagent or
   slash-command as a legitimate deliverable, even though `.claude/`
   top-level files (`settings.json`, `settings.local.json`) are
   coordination and must stay protected. (Earlier iterations of this
@@ -702,7 +702,7 @@ process to make a running worker compact itself, and a worker has no reliable
 view of its own context percentage. An external monitor can *observe* context
 occupancy but has no way to *act* on it.
 
-Centella replaces compaction with **orchestrator-driven fresh-context handoff**,
+Pila replaces compaction with **orchestrator-driven fresh-context handoff**,
 which achieves compaction's actual goal — bounded context with preserved
 progress — without depending on a channel that does not exist:
 
@@ -737,12 +737,12 @@ worktree. A worktree is disposable — it is removed at cleanup — so a checkpo
 stored inside it would vanish exactly when a successor worker needs to read it.
 Coordination state must outlive the worktree that produced it.
 
-Coordination state is **per-run**, rooted at `.centella/runs/<run-id>/`.
+Coordination state is **per-run**, rooted at `.pila/runs/<run-id>/`.
 State, plan, criteria, checkpoints, logs, the worktrees themselves, and the
 PR-result sidecar all live under that directory. Two runs in the same
 repository share no coordination state — each has its own subtree, and
 neither can clobber the other's `state.json`, log files, or worktrees by
-collision. The parent `.centella/` is otherwise empty of run data; it only
+collision. The parent `.pila/` is otherwise empty of run data; it only
 hosts the `runs/` directory.
 
 ---
@@ -775,17 +775,17 @@ time. DESIGN.md (this section) is the architectural specification; the
 prompt fragment is the directly-loaded text. They must stay in agreement
 under CLAUDE.md's three-layer rule.
 
-By default centella does not surface intent questions to the user at all.
+By default pila does not surface intent questions to the user at all.
 Workers run the filter, treat anything that survives as a forced best-effort
-decision, and document it. Pass `--clarify` (or set `CENTELLA_CLARIFY=true`
-/ `clarify = true` in `centella.toml`) to opt into surfacing the surviving
+decision, and document it. Pass `--clarify` (or set `PILA_CLARIFY=true`
+/ `clarify = true` in `pila.toml`) to opt into surfacing the surviving
 questions — interactively if a TTY is attached, otherwise via
 `pending-questions.json` and the standard deferred-resume flow. The
 no-questions default reflects that most intent questions are closable by
 deeper investigation, and that an LLM's instinct to ask is something the
 system has to push back against, not ride.
 
-When a feature task's request leaves the source of truth ambiguous, centella
+When a feature task's request leaves the source of truth ambiguous, pila
 resolves it from a preference: `codebase` (build from existing patterns only),
 `research` (build from researched best-practice standards), or `both` (codebase
 first; research only where the codebase is insufficient). The preference is
@@ -801,7 +801,7 @@ question does not apply, runs without it. Whichever path resolved the
 preference, its value becomes a setting carried to every planner and
 implementer, so the whole run draws from one consistent source of truth.
 
-When Centella runs under `--clarify` in a context where it cannot block for
+When Pila runs under `--clarify` in a context where it cannot block for
 an answer, the clarification step is non-blocking: it records the questions,
 exits with a distinct status, and lets the surrounding layer collect answers
 and resume.
@@ -817,7 +817,7 @@ problem to a decision point neither the codebase nor research can resolve
 with a deprecated client, when both choices exist as patterns elsewhere in
 the codebase and the task description does not say.
 
-Centella treats this as the same kind of question as a Phase-1 clarification,
+Pila treats this as the same kind of question as a Phase-1 clarification,
 not as a different category. The filter is identical: investigate the
 codebase first; treat research as the second-line resolver; ask the user
 only what neither can settle. The only difference is *when* the question
@@ -892,7 +892,7 @@ catalogued in `IMPLEMENTATION.md`.
 ## 13. Caps and escalation
 
 Every loop in the system has a hard bound. Nothing spins forever; when a bound
-is reached, Centella escalates rather than looping. But the bounds are of **two
+is reached, Pila escalates rather than looping. But the bounds are of **two
 different kinds**, and the difference is itself a design point — it is the §12
 principle applied to caps.
 
@@ -926,7 +926,7 @@ hard backstop is the worker's overall turn limit, which the orchestrator does
 control.
 
 The evidence-gate bound is exposed to users as `--confidence-rounds` (also
-`CENTELLA_CONFIDENCE_ROUNDS` and `centella.toml`); the orchestrator passes the
+`PILA_CONFIDENCE_ROUNDS` and `pila.toml`); the orchestrator passes the
 resolved value into each worker's prompt. The user-visible knob is real — the
 worker reads it — but the worker is what counts iterations against it, so the
 guarantee is still prompt-governed in the sense above. Surfacing the knob
@@ -972,7 +972,7 @@ the *principle* — correctable-mistake versus broken-worker — is the design.
 
 ## 14. Telemetry, judging, and self-healing
 
-Every LLM call in Centella passes through one of the six worker types in
+Every LLM call in Pila passes through one of the six worker types in
 `WORKER_TYPES`: `classifier`, `planner`, `reconciler`, `implementer`,
 `integrator`, or `conformer`. Each worker type is a distinct **call type** — a
 first-class identifier that partitions every captured call into its role in the
@@ -1033,7 +1033,7 @@ worker in the system (§7).
 Each run's telemetry lives at:
 
 ```
-.centella/runs/<run-id>/calls.ndjson
+.pila/runs/<run-id>/calls.ndjson
 ```
 
 One file per run. The file is opened for append at run start and written to
@@ -1100,7 +1100,7 @@ what the architecture can guarantee.
   suppressed. A narrower "auto-approve edits only" mode was considered and
   rejected: it still prompts on shell commands, which would stall an unattended
   run the first time a worker needs to run one. The blast radius is bounded by
-  worktree isolation, not eliminated. Centella should be run on repositories the
+  worktree isolation, not eliminated. Pila should be run on repositories the
   user trusts, ideally inside a container, and the run branch reviewed
   before it is relied on.
 - **A worker that exhausts its turn limit without checkpointing loses its
@@ -1134,7 +1134,7 @@ what the architecture can guarantee.
   clone are explicitly supported via the per-run state and branch design.
   Multiple clones running concurrently are also fine — they are independent
   by construction — but the per-run namespacing applies only within one
-  clone; centella does nothing to coordinate across clones (it has no need
+  clone; pila does nothing to coordinate across clones (it has no need
   to).
 - **Push assumes a remote named `origin`.** Finalize pushes to `origin` and
   opens the PR against the same remote's GitHub repo. A fork pattern where
@@ -1146,7 +1146,7 @@ what the architecture can guarantee.
 - **System-wide worker concurrency scales with run count.** Each run obeys
   its own `max_parallel` cap; with N concurrent runs the total active
   worker count can be N × max_parallel. The blast radius is bounded per
-  run but not globally; users running many concurrent centella invocations
+  run but not globally; users running many concurrent pila invocations
   should be aware of the headless-usage cost implication.
 
 ---
@@ -1155,7 +1155,7 @@ what the architecture can guarantee.
 
 A design document should be honest about how much of the system has been
 *demonstrated* to work, as opposed to *reasoned* to work. The distinction is
-the first thing anyone running Centella needs.
+the first thing anyone running Pila needs.
 
 **Demonstrated.** The deterministic scaffolding has been exercised. The git
 worktree mechanics — branch setup, per-subtask worktrees, wave-to-wave
@@ -1175,7 +1175,7 @@ by test; the worker behavior is the unverified surface.
 
 Two parts of the surface described in this document are *new* and have not
 yet been exercised end-to-end: the per-run namespacing (run-id derivation,
-`.centella/runs/<run-id>/` layout, parallel-run coexistence, multi-run
+`.pila/runs/<run-id>/` layout, parallel-run coexistence, multi-run
 resume), and the push-and-PR finalization step (`gh pr create`, run.json
 sidecar with `pushed_at`/`pr_url`/error fields, `--no-push` and
 `--no-verify`). The single-run, local-finalize design described in earlier
@@ -1183,7 +1183,7 @@ revisions of this document has been exercised; the broader design here
 becomes verified only after the corresponding code lands and a first run
 exercises it.
 
-**Recommended first step.** Run Centella once on a throwaway repository with a
+**Recommended first step.** Run Pila once on a throwaway repository with a
 small, fully-specified task before trusting it on real work.
 
 ---

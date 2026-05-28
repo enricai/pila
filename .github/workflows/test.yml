@@ -33,7 +33,7 @@ jobs:
         run: pip install pytest pytest-cov
 
       - name: Syntax check (from CLAUDE.md task-completion checklist)
-        run: python -c "import ast; ast.parse(open('orchestrator/centella.py').read())"
+        run: python -c "import ast; ast.parse(open('orchestrator/pila.py').read())"
 
       - name: Run tests with coverage
         run: pytest tests/ -ra --cov=orchestrator --cov-report=term --cov-report=xml

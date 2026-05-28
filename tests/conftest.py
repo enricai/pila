@@ -1,7 +1,7 @@
-"""Shared pytest fixtures for the centella test suite.
+"""Shared pytest fixtures for the pila test suite.
 
-centella.py is a single script (no package), so we load it once as a
-module via importlib and expose it to every test via the `centella`
+pila.py is a single script (no package), so we load it once as a
+module via importlib and expose it to every test via the `pila`
 fixture.
 """
 from __future__ import annotations
@@ -12,13 +12,13 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CENTELLA_PY = REPO_ROOT / "orchestrator" / "centella.py"
+PILA_PY = REPO_ROOT / "orchestrator" / "pila.py"
 
 
 @pytest.fixture(scope="session")
-def centella():
-    """The centella module loaded from orchestrator/centella.py."""
-    spec = importlib.util.spec_from_file_location("centella", CENTELLA_PY)
+def pila():
+    """The pila module loaded from orchestrator/pila.py."""
+    spec = importlib.util.spec_from_file_location("pila", PILA_PY)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

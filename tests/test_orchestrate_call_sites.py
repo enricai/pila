@@ -15,22 +15,22 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CENTELLA_PY = REPO_ROOT / "orchestrator" / "centella.py"
+PILA_PY = REPO_ROOT / "orchestrator" / "pila.py"
 
 
 def _function_body(name: str) -> str:
     """Extract the source text of `def <name>(` or `async def <name>(`
-    from centella.py, ending at the next top-level def/async def. Used
+    from pila.py, ending at the next top-level def/async def. Used
     to scope source-text assertions to one function so a string that
     happens to appear elsewhere in the file doesn't false-pass."""
-    src = CENTELLA_PY.read_text()
+    src = PILA_PY.read_text()
     for prefix in (f"async def {name}(", f"def {name}("):
         idx = src.find(prefix)
         if idx >= 0:
             start = idx
             break
     else:
-        raise AssertionError(f"function `{name}` not found in centella.py")
+        raise AssertionError(f"function `{name}` not found in pila.py")
     # End at the next top-level def or async def (matching the same
     # column-0 indentation). The conservative bound is the next
     # occurrence of either, whichever comes first.
@@ -47,7 +47,7 @@ def test_orchestrate_calls_absorb_supplied_answers_on_resume():
     """The documented user flow for a deferred non-interactive
     clarification (Phase-1 OR DESIGN §11 mid-execution) requires that
     `--answers FILE` is re-read on `--resume`. The P5-1 fix wired this
-    by adding `absorb_supplied_answers(args, st, centella_dir)` inside
+    by adding `absorb_supplied_answers(args, st, pila_dir)` inside
     the `if args.resume:` branch. Pin that call so a future refactor
     that removes it fails this test instead of silently re-breaking
     the documented flow.

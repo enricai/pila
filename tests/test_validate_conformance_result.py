@@ -29,110 +29,110 @@ def _good_result(subtask_id="t1", **overrides):
     return base
 
 
-def test_empty_well_formed_result_passes(centella, tmp_path):
-    err = centella.validate_conformance_result(_good_result(), str(tmp_path))
+def test_empty_well_formed_result_passes(pila, tmp_path):
+    err = pila.validate_conformance_result(_good_result(), str(tmp_path))
     assert err is None
 
 
-def test_non_dict_result_rejected(centella, tmp_path):
-    assert centella.validate_conformance_result([], str(tmp_path)) is not None
-    assert centella.validate_conformance_result(None, str(tmp_path)) is not None
-    assert centella.validate_conformance_result("oops", str(tmp_path)) is not None
+def test_non_dict_result_rejected(pila, tmp_path):
+    assert pila.validate_conformance_result([], str(tmp_path)) is not None
+    assert pila.validate_conformance_result(None, str(tmp_path)) is not None
+    assert pila.validate_conformance_result("oops", str(tmp_path)) is not None
 
 
-def test_residual_without_files_read_rejected(centella, tmp_path):
+def test_residual_without_files_read_rejected(pila, tmp_path):
     """A rule violation that wasn't fixed requires the conformer to have
     *seen* at least one rules file — otherwise the violation is fabricated."""
     res = _good_result(
         rules_files_read=[],
         rule_violations_residual=[{"rule": "x", "why_not_fixed": "y"}],
     )
-    err = centella.validate_conformance_result(res, str(tmp_path))
+    err = pila.validate_conformance_result(res, str(tmp_path))
     assert err is not None
     assert "rule_violations_residual" in err
     assert "rules_files_read" in err
 
 
-def test_residual_with_files_read_accepted(centella, tmp_path):
+def test_residual_with_files_read_accepted(pila, tmp_path):
     res = _good_result(
         rules_files_read=["CLAUDE.md"],
         rule_violations_residual=[{"rule": "x", "why_not_fixed": "y"}],
     )
-    assert centella.validate_conformance_result(res, str(tmp_path)) is None
+    assert pila.validate_conformance_result(res, str(tmp_path)) is None
 
 
-def test_fixed_violation_with_empty_rule_rejected(centella, tmp_path):
+def test_fixed_violation_with_empty_rule_rejected(pila, tmp_path):
     res = _good_result(
         rules_files_read=["CLAUDE.md"],
         rule_violations_fixed=[
             {"rule": "", "fix": "added a hint", "evidence": "src/x.py:1"},
         ],
     )
-    err = centella.validate_conformance_result(res, str(tmp_path))
+    err = pila.validate_conformance_result(res, str(tmp_path))
     assert err is not None
     assert "rule_violations_fixed[0]" in err
 
 
-def test_fixed_violation_with_whitespace_rule_rejected(centella, tmp_path):
+def test_fixed_violation_with_whitespace_rule_rejected(pila, tmp_path):
     res = _good_result(
         rules_files_read=["CLAUDE.md"],
         rule_violations_fixed=[
             {"rule": "   \n  ", "fix": "x", "evidence": "y"},
         ],
     )
-    err = centella.validate_conformance_result(res, str(tmp_path))
+    err = pila.validate_conformance_result(res, str(tmp_path))
     assert err is not None
 
 
-def test_docs_update_path_must_exist(centella, tmp_path):
+def test_docs_update_path_must_exist(pila, tmp_path):
     res = _good_result(
         docs_updates=[{"path": "docs/UNKNOWN.md", "reason": "stale"}],
     )
-    err = centella.validate_conformance_result(res, str(tmp_path))
+    err = pila.validate_conformance_result(res, str(tmp_path))
     assert err is not None
     assert "docs_updates[0]" in err
     assert "docs/UNKNOWN.md" in err
 
 
-def test_docs_update_with_existing_path_accepted(centella, tmp_path):
+def test_docs_update_with_existing_path_accepted(pila, tmp_path):
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "API.md").write_text("# api\n")
     res = _good_result(
         docs_updates=[{"path": "docs/API.md", "reason": "added new flag"}],
     )
-    assert centella.validate_conformance_result(res, str(tmp_path)) is None
+    assert pila.validate_conformance_result(res, str(tmp_path)) is None
 
 
-def test_tests_update_path_must_exist(centella, tmp_path):
+def test_tests_update_path_must_exist(pila, tmp_path):
     res = _good_result(
         tests_updates=[{"path": "tests/test_missing.py", "reason": "added"}],
     )
-    err = centella.validate_conformance_result(res, str(tmp_path))
+    err = pila.validate_conformance_result(res, str(tmp_path))
     assert err is not None
     assert "tests_updates[0]" in err
 
 
-def test_tests_update_with_existing_path_accepted(centella, tmp_path):
+def test_tests_update_with_existing_path_accepted(pila, tmp_path):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_new.py").write_text("def test_x(): pass\n")
     res = _good_result(
         tests_updates=[{"path": "tests/test_new.py", "reason": "new coverage"}],
     )
-    assert centella.validate_conformance_result(res, str(tmp_path)) is None
+    assert pila.validate_conformance_result(res, str(tmp_path)) is None
 
 
-def test_empty_path_string_rejected(centella, tmp_path):
+def test_empty_path_string_rejected(pila, tmp_path):
     res = _good_result(
         docs_updates=[{"path": "", "reason": "stale"}],
     )
-    err = centella.validate_conformance_result(res, str(tmp_path))
+    err = pila.validate_conformance_result(res, str(tmp_path))
     assert err is not None
     assert "empty 'path'" in err
 
 
 # --- path-traversal rejection (fourth-pass audit follow-up) ----------------
 
-def test_docs_update_with_traversal_path_rejected(centella, tmp_path):
+def test_docs_update_with_traversal_path_rejected(pila, tmp_path):
     """A worker that emits `../foo` would have `(wt / rel).exists()`
     return True for any sibling-of-worktree path. The validator must
     reject such entries with a clear error — these are honesty failures,
@@ -144,13 +144,13 @@ def test_docs_update_with_traversal_path_rejected(centella, tmp_path):
     res = _good_result(
         docs_updates=[{"path": "../sibling.md", "reason": "drift"}],
     )
-    err = centella.validate_conformance_result(res, str(tmp_path))
+    err = pila.validate_conformance_result(res, str(tmp_path))
     assert err is not None, "traversal path must be rejected"
     assert "escapes the worktree" in err
     assert "../sibling.md" in err
 
 
-def test_tests_update_with_absolute_outside_path_rejected(centella, tmp_path):
+def test_tests_update_with_absolute_outside_path_rejected(pila, tmp_path):
     """An absolute path that doesn't live under the worktree must be
     rejected — even if the path itself exists on disk."""
     # /etc/hostname exists on most systems; if not, fall back to something
@@ -160,12 +160,12 @@ def test_tests_update_with_absolute_outside_path_rejected(centella, tmp_path):
     res = _good_result(
         tests_updates=[{"path": str(outside), "reason": "added"}],
     )
-    err = centella.validate_conformance_result(res, str(tmp_path))
+    err = pila.validate_conformance_result(res, str(tmp_path))
     assert err is not None, "absolute outside-worktree path must be rejected"
     assert "escapes the worktree" in err
 
 
-def test_nested_traversal_to_legitimate_subtree_still_rejected(centella, tmp_path):
+def test_nested_traversal_to_legitimate_subtree_still_rejected(pila, tmp_path):
     """Even a path that combines traversal with a return into the worktree
     is rejected — the resolved final destination must be under the
     worktree, but the path *components* having `..` at all is treated as
@@ -181,6 +181,6 @@ def test_nested_traversal_to_legitimate_subtree_still_rejected(centella, tmp_pat
                        "reason": "round-trip path"}],
     )
     # Document the current behavior: resolved-inside-worktree is accepted.
-    err = centella.validate_conformance_result(res, str(tmp_path))
+    err = pila.validate_conformance_result(res, str(tmp_path))
     assert err is None, \
         f"path that resolves inside worktree should be accepted, got: {err}"

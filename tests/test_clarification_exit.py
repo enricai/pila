@@ -18,22 +18,22 @@ import pytest
 
 # ----- cap rename ------------------------------------------------------------
 
-def test_subtask_continuations_default(centella):
+def test_subtask_continuations_default(pila):
     """The unified per-subtask re-spawn budget — consumed by BOTH
     context-exhaustion handoffs and DESIGN §11 clarifications — is 3."""
-    assert centella.DEFAULT_CAPS["subtask_continuations"] == 3
+    assert pila.DEFAULT_CAPS["subtask_continuations"] == 3
 
 
-def test_handoff_continuations_removed(centella):
+def test_handoff_continuations_removed(pila):
     """The old separate cap name must not survive the rename — a
     consumer that reads it would silently get a KeyError at runtime."""
-    assert "handoff_continuations" not in centella.DEFAULT_CAPS
+    assert "handoff_continuations" not in pila.DEFAULT_CAPS
 
 
 # ----- schema: status enum + clarification_question field --------------------
 
-def test_status_enum_includes_needs_clarification(centella):
-    impl = centella.SCHEMAS["implementer"]
+def test_status_enum_includes_needs_clarification(pila):
+    impl = pila.SCHEMAS["implementer"]
     enum = impl["properties"]["status"]["enum"]
     assert "needs-clarification" in enum
     # Existing enum values must still be present — the rename was
@@ -42,11 +42,11 @@ def test_status_enum_includes_needs_clarification(centella):
         assert expected in enum
 
 
-def test_clarification_question_field_shape(centella):
+def test_clarification_question_field_shape(pila):
     """The clarification_question field, when present, must require all
     three sub-fields. The schema requirement is the structural defense
     against a worker shipping a half-formed question."""
-    impl = centella.SCHEMAS["implementer"]
+    impl = pila.SCHEMAS["implementer"]
     cq = impl["properties"]["clarification_question"]
     # nullable
     assert "null" in cq["type"]
@@ -97,76 +97,76 @@ def _write_valid_checkpoint(tmp_path: Path) -> Path:
     return p
 
 
-def test_validate_result_passes_well_formed_clarification(centella, tmp_path):
+def test_validate_result_passes_well_formed_clarification(pila, tmp_path):
     cp = _write_valid_checkpoint(tmp_path)
     res = _good_clarification_result(str(cp))
-    assert centella.validate_result(res) is None
+    assert pila.validate_result(res) is None
 
 
-def test_validate_result_rejects_missing_clarification_question(centella, tmp_path):
+def test_validate_result_rejects_missing_clarification_question(pila, tmp_path):
     cp = _write_valid_checkpoint(tmp_path)
     res = _good_clarification_result(str(cp))
     res["clarification_question"] = None
-    err = centella.validate_result(res)
+    err = pila.validate_result(res)
     assert err is not None
     assert "clarification_question" in err
     assert "DESIGN §11" in err
 
 
-def test_validate_result_rejects_empty_question_field(centella, tmp_path):
+def test_validate_result_rejects_empty_question_field(pila, tmp_path):
     cp = _write_valid_checkpoint(tmp_path)
     res = _good_clarification_result(str(cp))
     res["clarification_question"]["question"] = ""
-    err = centella.validate_result(res)
+    err = pila.validate_result(res)
     assert err is not None
     assert "question" in err
 
 
-def test_validate_result_rejects_empty_why_underivable(centella, tmp_path):
+def test_validate_result_rejects_empty_why_underivable(pila, tmp_path):
     """`why_underivable` is the gate against the worker drifting toward
     'ask instead of research' (DESIGN §11). An empty value means the
     worker didn't justify the question — terminal."""
     cp = _write_valid_checkpoint(tmp_path)
     res = _good_clarification_result(str(cp))
     res["clarification_question"]["why_underivable"] = "   "
-    err = centella.validate_result(res)
+    err = pila.validate_result(res)
     assert err is not None
     assert "why_underivable" in err
 
 
-def test_validate_result_rejects_missing_checkpoint_path(centella, tmp_path):
+def test_validate_result_rejects_missing_checkpoint_path(pila, tmp_path):
     cp = _write_valid_checkpoint(tmp_path)
     res = _good_clarification_result(str(cp))
     res["checkpoint_path"] = None
-    err = centella.validate_result(res)
+    err = pila.validate_result(res)
     assert err is not None
     assert "checkpoint_path" in err
     assert "work-in-progress must survive" in err
 
 
-def test_validate_result_rejects_nonexistent_checkpoint_file(centella, tmp_path):
+def test_validate_result_rejects_nonexistent_checkpoint_file(pila, tmp_path):
     res = _good_clarification_result(str(tmp_path / "ghost.md"))
-    err = centella.validate_result(res)
+    err = pila.validate_result(res)
     assert err is not None
     assert "does not exist" in err
 
 
-def test_validate_result_rejects_empty_question_id(centella, tmp_path):
+def test_validate_result_rejects_empty_question_id(pila, tmp_path):
     """Question id is the key for the answer in state.json. Empty id
     means the answer cannot be routed back — terminal."""
     cp = _write_valid_checkpoint(tmp_path)
     res = _good_clarification_result(str(cp))
     res["clarification_question"]["id"] = ""
-    err = centella.validate_result(res)
+    err = pila.validate_result(res)
     assert err is not None
     assert "id" in err
 
 
 # ----- existing invariants still hold (regression guard) ---------------------
 
-def test_incomplete_handoff_still_requires_checkpoint(centella):
+def test_incomplete_handoff_still_requires_checkpoint(pila):
     """The cap rename did not affect this invariant; pin it."""
-    err = centella.validate_result({
+    err = pila.validate_result({
         "subtask_id": "x", "status": "incomplete-handoff",
         "checkpoint_path": None,
     })
@@ -174,8 +174,8 @@ def test_incomplete_handoff_still_requires_checkpoint(centella):
     assert "incomplete-handoff" in err
 
 
-def test_blocked_still_requires_blocker(centella):
-    err = centella.validate_result({
+def test_blocked_still_requires_blocker(pila):
+    err = pila.validate_result({
         "subtask_id": "x", "status": "blocked", "blocker": "",
     })
     assert err is not None

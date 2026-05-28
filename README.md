@@ -1,8 +1,8 @@
-# Centella
+# Pila
 
-**Centella** is an autonomous task driver for Claude Code. One prompt. Finished, committed, validated code. No steering mid-run, no polishing when it's done.
+**Pila** is an autonomous task driver for Claude Code. One prompt. Finished, committed, validated code. No steering mid-run, no polishing when it's done.
 
-Most tools that call themselves autonomous still require you: to confirm a direction, catch a hallucination, or clean up the result before it's usable. Centella doesn't. It classifies the task, decomposes it, implements each piece in parallel isolated worktrees, validates the integrated result, and merges — beginning to end, unattended.
+Most tools that call themselves autonomous still require you: to confirm a direction, catch a hallucination, or clean up the result before it's usable. Pila doesn't. It classifies the task, decomposes it, implements each piece in parallel isolated worktrees, validates the integrated result, and merges — beginning to end, unattended.
 
 It runs entirely on the **Claude Code CLI and your existing subscription** — no Anthropic API key, no per-call billing. If you have Claude Code installed and logged in, you have everything it needs.
 
@@ -10,20 +10,20 @@ It runs entirely on the **Claude Code CLI and your existing subscription** — n
 
 Most AI "orchestrators" let the model pilot: the model decides what to do next, declares when it's done, and judges whether it succeeded. That's where drift, hallucinated completion, and silent failures come from — and why you end up steering.
 
-Centella inverts the relationship. **The model writes code. The program runs everything else.** Phases, wave scheduling, retries, caps, merge logic, and success-criteria enforcement are ordinary Python — real loops and conditionals that cannot drift.
+Pila inverts the relationship. **The model writes code. The program runs everything else.** Phases, wave scheduling, retries, caps, merge logic, and success-criteria enforcement are ordinary Python — real loops and conditionals that cannot drift.
 
 - **No silent failures.** Every worker output is JSON-schema-validated before the orchestrator acts on it. A worker cannot, by malformed output or confident hallucination, cause the system to do something undefined.
 - **Confidence is the only hard gate.** The implementer self-gates on evidence-anchored confidence in `root_cause` and `solution` (≥9 on both, see DESIGN.md §8) — falsifiers tested, contradictions reconciled, gaps named with concrete artifacts. A worker that cannot justify the score exits `blocked` with the gap analysis. Everything else — tests passing, lint clean, build green, per-criterion satisfaction — is best-effort: surfaced as advisory warnings on the subtask result, never escalated to `failed` or `blocked` by the orchestrator. The criteria file is the implementer's working note, not a gate.
 - **Workers must justify confidence with evidence, not feelings.** Before writing code, an implementer clears domain-specific evidence gates — file-and-line citations, reproductions, falsification attempts. A self-reported score without hard artifacts doesn't clear the bar.
 - **Parallel work that's actually safe.** Each implementer gets an isolated git worktree. Parallel writes never collide. Conflicts surface one wave at a time, close to the work that caused them.
 - **Resumable by design.** A reboot, network blip, budget cap, or external kill (SIGTERM from CI / systemd / a closed terminal) loses nothing — the run branch is the durable record, worktrees are torn down, and `--resume` picks up from the last completed wave. The one exception is Ctrl-C, which is treated as an explicit "throw this away" gesture: the run's branches, worktrees, and state dir are removed and `--resume` cannot recover it. (For a *resumable* abort, prefer `kill <pid>` over Ctrl-C.)
-- **Parallel-safe across runs.** Multiple `./centella` invocations in the same repository each get a unique `run_id` (a derived branch + state directory). Their branches, worktrees, and `.centella/` state never collide. Launch a fix and a feature in parallel without coordination.
+- **Parallel-safe across runs.** Multiple `./pila` invocations in the same repository each get a unique `run_id` (a derived branch + state directory). Their branches, worktrees, and `.pila/` state never collide. Launch a fix and a feature in parallel without coordination.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![tests](https://github.com/enricai/centella/actions/workflows/test.yml/badge.svg)](https://github.com/enricai/centella/actions/workflows/test.yml)
-[![syntax](https://github.com/enricai/centella/actions/workflows/syntax.yml/badge.svg)](https://github.com/enricai/centella/actions/workflows/syntax.yml)
-[![shellcheck](https://github.com/enricai/centella/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/enricai/centella/actions/workflows/shellcheck.yml)
+[![tests](https://github.com/enricai/pila/actions/workflows/test.yml/badge.svg)](https://github.com/enricai/pila/actions/workflows/test.yml)
+[![syntax](https://github.com/enricai/pila/actions/workflows/syntax.yml/badge.svg)](https://github.com/enricai/pila/actions/workflows/syntax.yml)
+[![shellcheck](https://github.com/enricai/pila/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/enricai/pila/actions/workflows/shellcheck.yml)
 [![Version](https://img.shields.io/badge/version-0.2.0-orange.svg)](CHANGELOG.md)
 
 ## How it works
@@ -34,14 +34,14 @@ separate process, so there is no subagent nesting anywhere. Control flow lives
 in real Python: `for` loops, `if` statements, counters. It cannot drift.
 
 ```
-centella "<task>"
+pila "<task>"
    ├─ Phase 1  Classify into 1..8 categories                    → 1 claude -p
    │             ↓ derive run_id (category + slug + start-hex)
    ├─ Phase 0  Clarify — intent-only questions, default zero
    ├─ Phase 2  Plan — one planner per category (parallel)        → N claude -p
    │             ↓ reconcile cross-domain capability tags          → 0 or 1 claude -p
    ├─ Phase 3  Schedule — global dependency graph → topo waves   (pure Python)
-   ├─ Phase 4  Create centella/runs/<run-id> branch + worktree (per-run unique)
+   ├─ Phase 4  Create pila/runs/<run-id> branch + worktree (per-run unique)
    ├─ Phase 5  Per wave: implement (parallel, isolated worktrees) → claude -p each
    │           integrate into the run branch; validate the run branch
    └─ Phase 6  Push run branch; open PR against working branch; cleanup
@@ -59,7 +59,7 @@ read [`docs/DESIGN.md`](docs/DESIGN.md).
 - A git repository with `user.email` and `user.name` configured
 - A reasonably clean working tree
 
-**You don't need to install Python yourself.** Centella is a Python
+**You don't need to install Python yourself.** Pila is a Python
 3.10+ program (hence the badge), but both install paths below
 provision a hermetic Python 3.12 via [`uv`](https://docs.astral.sh/uv/),
 so your system Python — or its absence — is irrelevant. The orchestrator
@@ -67,44 +67,44 @@ itself remains stdlib-only.
 
 ## Install
 
-One command. Pick the path that matches how you'll use Centella.
+One command. Pick the path that matches how you'll use Pila.
 
 ### Inside Claude Code (recommended)
 
 ```
-/plugin marketplace add enricai/centella
-/plugin install centella@enricai-centella
+/plugin marketplace add enricai/pila
+/plugin install pila@enricai-pila
 ```
 
 Then in any Claude Code session:
 
 ```
-/centella Fix the login timeout bug and add a regression test
+/pila Fix the login timeout bug and add a regression test
 ```
 
 ### From a terminal
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash
 ```
 
 This installs `uv` (if missing), provisions Python 3.12, clones the repo
-into `~/.centella`, and symlinks `centella` into `~/.local/bin`. After
+into `~/.pila`, and symlinks `pila` into `~/.local/bin`. After
 it finishes:
 
 ```bash
-centella "Fix the login timeout bug and add a regression test"
+pila "Fix the login timeout bug and add a regression test"
 ```
 
 To inspect the installer before piping to bash:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/enricai/centella/main/scripts/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh -o install.sh
 bash install.sh --dry-run            # print actions without executing
 bash install.sh                       # then run for real
 ```
 
-Customize with `--prefix DIR` (default `~/.centella`), `--bin-dir DIR`
+Customize with `--prefix DIR` (default `~/.pila`), `--bin-dir DIR`
 (default `~/.local/bin`), or `--ref REF` (default `main`).
 
 ### Manual (clone + run)
@@ -112,8 +112,8 @@ Customize with `--prefix DIR` (default `~/.centella`), `--bin-dir DIR`
 If you'd rather not run any installer:
 
 ```bash
-git clone https://github.com/enricai/centella.git
-centella "your task"
+git clone https://github.com/enricai/pila.git
+pila "your task"
 ```
 
 The launcher routes through `uv` when it's on `PATH`, otherwise falls
@@ -123,84 +123,84 @@ back to your system `python3` (requires Python 3.10+).
 
 ```bash
 # From the root of the target git repository:
-centella "Fix the login timeout bug and add a regression test"
-# (substitute centella if you used the manual install)
+pila "Fix the login timeout bug and add a regression test"
+# (substitute pila if you used the manual install)
 
 # Or pass a path to a .txt / .md file whose contents are the task —
 # useful for multi-paragraph briefs that are awkward to quote on the shell:
-centella path/to/task.md
+pila path/to/task.md
 
 # Resume an interrupted or budget-capped run. Auto-picks if exactly one
 # in-flight run exists; otherwise requires --run-id (see `--list`).
-centella --resume
-centella --resume --run-id fix-login-timeout-bug-b81e90
+pila --resume
+pila --resume --run-id fix-login-timeout-bug-b81e90
 
 # List in-flight and completed runs in this repository:
-centella --list
+pila --list
 
 # Skip the default push + PR at finalize (run completes with the run
 # branch local-only; your working branch is unchanged):
-centella "task" --no-push
+pila "task" --no-push
 
 # Skip pre-push hooks at finalize (the user's explicit override; defaults
 # off). Affects only the final `git push`; worker commits still run hooks.
-centella "task" --no-verify
+pila "task" --no-verify
 
 # Opt into intent questions (default: no questions are surfaced).
-centella "task" --clarify
+pila "task" --clarify
 
 # Pre-supply clarification answers (JSON object):
 # Keys are question ids from the classifier, plus "source_of_truth"
 # set to "codebase", "research", or "both".
-centella "task" --answers answers.json
+pila "task" --answers answers.json
 
 # Override caps (defaults: 60 total workers, 4 in parallel per wave).
-# --max-workers also reads CENTELLA_MAX_WORKERS or max_workers in
-# centella.toml; --max-parallel is CLI-only.
-centella "task" --max-workers 80 --max-parallel 6
-export CENTELLA_MAX_WORKERS=80
+# --max-workers also reads PILA_MAX_WORKERS or max_workers in
+# pila.toml; --max-parallel is CLI-only.
+pila "task" --max-workers 80 --max-parallel 6
+export PILA_MAX_WORKERS=80
 
 # Dial how persistent the planner and implementer are at building
 # confidence before they exit blocked (default 8 evidence-gate rounds
 # inside each worker; see DESIGN §8):
-centella "task" --confidence-rounds 12
-export CENTELLA_CONFIDENCE_ROUNDS=12
+pila "task" --confidence-rounds 12
+export PILA_CONFIDENCE_ROUNDS=12
 
 # Override the default source-of-truth preference (`both`) — pass
 # --source-of-truth on the command line for a one-off, set
-# CENTELLA_SOURCE_OF_TRUTH for the session, or commit a centella.toml
+# PILA_SOURCE_OF_TRUTH for the session, or commit a pila.toml
 # at the repo root with the line `source_of_truth = codebase` (or
 # research / both).
-# Precedence (highest first): --source-of-truth > env > centella.toml.
-export CENTELLA_SOURCE_OF_TRUTH=codebase    # or: research, both
-centella "task" --source-of-truth codebase
+# Precedence (highest first): --source-of-truth > env > pila.toml.
+export PILA_SOURCE_OF_TRUTH=codebase    # or: research, both
+pila "task" --source-of-truth codebase
 
 # Choose the model. Without overrides, judgment workers (classifier /
 # planner / reconciler / integrator) default to opus and the acting
 # workers (implementer, conformer) default to sonnet — see
 # docs/IMPLEMENTATION.md §2 "Model selection" for the full env-var /
 # CLI-flag / TOML-key table.
-# Set CENTELLA_MODEL=sonnet (or --model sonnet) to restore the
+# Set PILA_MODEL=sonnet (or --model sonnet) to restore the
 # pre-0.3 all-sonnet behavior in one knob.
-export CENTELLA_MODEL=sonnet                # or: opus, haiku
-centella "task" --model opus
-centella "task" --model-implementer opus --model-classifier haiku
+export PILA_MODEL=sonnet                # or: opus, haiku
+pila "task" --model opus
+pila "task" --model-implementer opus --model-classifier haiku
 
 # Optional but recommended — lower the auto-compaction threshold
 # for worker processes (default is 95%):
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70
 ```
 
-Inside Claude Code (after `/plugin install centella@enricai-centella`):
+Inside Claude Code (after `/plugin install pila@enricai-pila`):
 
 ```
-/centella Fix the login timeout bug and add a regression test
+/pila Fix the login timeout bug and add a regression test
 ```
 
 ## Configuration
 
 Complete reference for every CLI flag, environment variable, and
-`centella.toml` key the orchestrator reads.
+`pila.toml` key the orchestrator reads.
 
 ### CLI flags
 
@@ -210,72 +210,72 @@ Complete reference for every CLI flag, environment variable, and
 | `--resume` | off | Resume an interrupted run. Auto-picks if exactly one run exists; requires `--run-id` if multiple. |
 | `--run-id ID` | — | Select a specific run by id (e.g., for `--resume` or `--phase` when multiple runs are in flight). |
 | `--list` | off | Enumerate in-flight and completed runs in this repository (run id, started, status, branch). |
-| `--no-push` | off | Skip the default push + PR at finalize. The run completes with the run branch local-only; your working branch is unchanged. Overrides `CENTELLA_NO_PUSH` / `centella.toml`. |
+| `--no-push` | off | Skip the default push + PR at finalize. The run completes with the run branch local-only; your working branch is unchanged. Overrides `PILA_NO_PUSH` / `pila.toml`. |
 | `--no-verify` | off | Pass `--no-verify` to the finalize `git push` only (skips pre-push hooks). Worker commits inside worktrees still run all hooks. The user's explicit override per CLAUDE.md's hooks principle. |
 | `--answers FILE` | — | JSON object of pre-supplied clarification answers (keyed by question `id`; may include `source_of_truth`). |
-| `--clarify` | off | Opt into surfacing intent questions to the user. Default: questions are dropped after the classifier's codebase→research filter, and the implementer makes a documented best-effort decision. Also `CENTELLA_CLARIFY` env var or `clarify = true` in `centella.toml`. |
-| `--max-workers N` | `60` | Cap on total `claude -p` invocations across the run. Also `CENTELLA_MAX_WORKERS` env var or `max_workers` in `centella.toml`. |
+| `--clarify` | off | Opt into surfacing intent questions to the user. Default: questions are dropped after the classifier's codebase→research filter, and the implementer makes a documented best-effort decision. Also `PILA_CLARIFY` env var or `clarify = true` in `pila.toml`. |
+| `--max-workers N` | `60` | Cap on total `claude -p` invocations across the run. Also `PILA_MAX_WORKERS` env var or `max_workers` in `pila.toml`. |
 | `--max-parallel N` | `4` | Cap on concurrent workers within a wave. |
-| `--confidence-rounds N` | `8` | Evidence-gate rounds the planner and implementer may run before exiting blocked (DESIGN §8). Overrides `CENTELLA_CONFIDENCE_ROUNDS` and `centella.toml`. |
+| `--confidence-rounds N` | `8` | Evidence-gate rounds the planner and implementer may run before exiting blocked (DESIGN §8). Overrides `PILA_CONFIDENCE_ROUNDS` and `pila.toml`. |
 | `--skip-smoke` | off | Skip the live `claude -p` preflight smoke test. |
-| `--source-of-truth VALUE` | `both` | `codebase` / `research` / `both`. Overrides `CENTELLA_SOURCE_OF_TRUTH` and `centella.toml`. |
-| `--inspect-dir PATH` | none | Extra directory the inspect-bucket workers (classifier, planner, reconciler) may read; forwarded to `claude -p` as `--add-dir`. Repeatable. Also `CENTELLA_INSPECT_DIRS` (colon-separated) or `inspect_dirs` in `centella.toml` (comma-separated). |
+| `--source-of-truth VALUE` | `both` | `codebase` / `research` / `both`. Overrides `PILA_SOURCE_OF_TRUTH` and `pila.toml`. |
+| `--inspect-dir PATH` | none | Extra directory the inspect-bucket workers (classifier, planner, reconciler) may read; forwarded to `claude -p` as `--add-dir`. Repeatable. Also `PILA_INSPECT_DIRS` (colon-separated) or `inspect_dirs` in `pila.toml` (comma-separated). |
 | `--model ALIAS` | per-worker (judgment: `opus`; acting workers — implementer, conformer: `sonnet`) | `sonnet` / `opus` / `haiku`. Sets every worker this run; without it the per-worker defaults apply. |
-| `--model-<worker> ALIAS` | per-worker default (`implementer`, `conformer` → `sonnet`; everything else → `opus`) | Per-worker override. `<worker>` is one of `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer`. Overrides `--model`, `CENTELLA_MODEL`, and `centella.toml`. |
-| `--judge-model ALIAS` | `sonnet` | Model alias for the post-run judge skill. Also `CENTELLA_MODEL_JUDGE` or `model_judge` in `centella.toml`. |
-| `--heal-model ALIAS` | `sonnet` | Model alias for the post-run self-heal skill. Also `CENTELLA_MODEL_HEAL` or `model_heal` in `centella.toml`. |
-| `--heal-max-rounds N` | `10` | Maximum heal-loop iterations per `call_type`. Also `CENTELLA_HEAL_MAX_ROUNDS` or `heal_max_rounds` in `centella.toml`. |
-| `--heal-success-threshold RATE` | `0.9` | Pass-rate threshold for the heal-loop SUCCESS verdict. Also `CENTELLA_HEAL_SUCCESS_THRESHOLD` or `heal_success_threshold` in `centella.toml`. |
-| `--verbosity LEVEL` | `stream` | `quiet` / `normal` / `stream` / `debug`. Controls inline per-worker activity output; full per-worker stream is always saved to `.centella/logs/<sid>.log`. |
-| `-v` / `-vv` | `0` (off) | Shortcuts that anchor to `normal`: `-v` = `stream`, `-vv` = `debug`. With no `-v` and no `--verbosity`, falls through to `CENTELLA_VERBOSITY` / `centella.toml` / default `stream`. |
+| `--model-<worker> ALIAS` | per-worker default (`implementer`, `conformer` → `sonnet`; everything else → `opus`) | Per-worker override. `<worker>` is one of `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer`. Overrides `--model`, `PILA_MODEL`, and `pila.toml`. |
+| `--judge-model ALIAS` | `sonnet` | Model alias for the post-run judge skill. Also `PILA_MODEL_JUDGE` or `model_judge` in `pila.toml`. |
+| `--heal-model ALIAS` | `sonnet` | Model alias for the post-run self-heal skill. Also `PILA_MODEL_HEAL` or `model_heal` in `pila.toml`. |
+| `--heal-max-rounds N` | `10` | Maximum heal-loop iterations per `call_type`. Also `PILA_HEAL_MAX_ROUNDS` or `heal_max_rounds` in `pila.toml`. |
+| `--heal-success-threshold RATE` | `0.9` | Pass-rate threshold for the heal-loop SUCCESS verdict. Also `PILA_HEAL_SUCCESS_THRESHOLD` or `heal_success_threshold` in `pila.toml`. |
+| `--verbosity LEVEL` | `stream` | `quiet` / `normal` / `stream` / `debug`. Controls inline per-worker activity output; full per-worker stream is always saved to `.pila/logs/<sid>.log`. |
+| `-v` / `-vv` | `0` (off) | Shortcuts that anchor to `normal`: `-v` = `stream`, `-vv` = `debug`. With no `-v` and no `--verbosity`, falls through to `PILA_VERBOSITY` / `pila.toml` / default `stream`. |
 | `-q` / `-qq` | `0` (off) | Shortcuts that anchor to `normal`: `-q` = `normal` (pre-streaming behavior), `-qq` = `quiet`. With no `-q` and no `--verbosity`, falls through to the same chain as `-v`. |
-| `--telemetry` / `--no-telemetry` | on | Enable / disable telemetry NDJSON event writing. Also `CENTELLA_TELEMETRY=1`/`0` or `telemetry=true`/`false` in `centella.toml`. |
-| `--telemetry-dir DIR` | `events` | Subdirectory name under the run dir for telemetry NDJSON events. Also `CENTELLA_TELEMETRY_DIR` or `telemetry_dir` in `centella.toml`. |
-| `--judge-dir DIR` | `judge-out` | Subdirectory name under the run dir for LLM judge output. Also `CENTELLA_JUDGE_DIR` or `judge_dir` in `centella.toml`. |
-| `--heal-dir DIR` | `heal-out` | Subdirectory name under the run dir for LLM self-heal output. Also `CENTELLA_HEAL_DIR` or `heal_dir` in `centella.toml`. |
+| `--telemetry` / `--no-telemetry` | on | Enable / disable telemetry NDJSON event writing. Also `PILA_TELEMETRY=1`/`0` or `telemetry=true`/`false` in `pila.toml`. |
+| `--telemetry-dir DIR` | `events` | Subdirectory name under the run dir for telemetry NDJSON events. Also `PILA_TELEMETRY_DIR` or `telemetry_dir` in `pila.toml`. |
+| `--judge-dir DIR` | `judge-out` | Subdirectory name under the run dir for LLM judge output. Also `PILA_JUDGE_DIR` or `judge_dir` in `pila.toml`. |
+| `--heal-dir DIR` | `heal-out` | Subdirectory name under the run dir for LLM self-heal output. Also `PILA_HEAL_DIR` or `heal_dir` in `pila.toml`. |
 | `--phase PHASE` | — | Run a post-run skill phase (`judge` or `heal`) against an existing run's captured LLM calls instead of starting a new run. Use `--run-id` to select when multiple runs exist. |
 
-### Environment variables and `centella.toml` keys
+### Environment variables and `pila.toml` keys
 
-| Env var | `centella.toml` key | Description |
+| Env var | `pila.toml` key | Description |
 |---------|---------------------|-------------|
-| `CENTELLA_SOURCE_OF_TRUTH` | `source_of_truth` | Sticky source-of-truth preference (`codebase` / `research` / `both`). Overridden by `--source-of-truth`. Unset → default `both`. |
-| `CENTELLA_MODEL` | `model` | Model alias applied to every worker. Overridden by `--model` and per-worker overrides. Unset → per-worker defaults (judgment workers `opus`, acting workers — implementer, conformer — `sonnet`). |
-| `CENTELLA_MODEL_<WORKER>` | `model_<worker>` | Per-worker override (e.g. `CENTELLA_MODEL_IMPLEMENTER=opus`). Overridden by `--model-<worker>`. `<worker>` ∈ `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer`. Unset → `implementer` and `conformer` → `sonnet`; everything else → `opus`. |
-| `CENTELLA_CONFIDENCE_ROUNDS` | `confidence_rounds` | Evidence-gate rounds per worker (positive integer). Overridden by `--confidence-rounds`. Unset → default `8`. |
-| `CENTELLA_INSPECT_DIRS` | `inspect_dirs` | Extra directories the inspect-bucket workers (classifier, planner, reconciler) may read; forwarded as `--add-dir`. Env value is colon-separated; TOML value is comma-separated. Overridden by `--inspect-dir` (repeatable). Unset → none. |
-| `CENTELLA_VERBOSITY` | `verbosity` | Inline-output verbosity (`quiet` / `normal` / `stream` / `debug`). Overridden by `--verbosity`. `-v` / `-vv` / `-q` / `-qq` shortcuts override both. Unset → default `stream`. |
-| `CENTELLA_NO_PUSH` | `no_push` | Sticky opt-out from push + PR at finalize (truthy → skip). Overridden by `--no-push`. `--no-verify` has no env/TOML mirror — it is a per-invocation override only. Unset → default `false` (push + PR happen). |
-| `CENTELLA_CLARIFY` | `clarify` | Sticky opt-in to surfacing intent questions to the user (truthy → on). Overridden by `--clarify`. Unset → default `false`. |
-| `CENTELLA_MODEL_JUDGE` | `model_judge` | Model alias for the post-run judge skill. Overridden by `--judge-model`. Unset → default `sonnet`. |
-| `CENTELLA_MODEL_HEAL` | `model_heal` | Model alias for the post-run self-heal skill. Overridden by `--heal-model`. Unset → default `sonnet`. |
-| `CENTELLA_HEAL_MAX_ROUNDS` | `heal_max_rounds` | Maximum heal-loop iterations per `call_type`. Overridden by `--heal-max-rounds`. Unset → default `10`. |
-| `CENTELLA_HEAL_SUCCESS_THRESHOLD` | `heal_success_threshold` | Pass-rate threshold for the heal-loop SUCCESS verdict. Overridden by `--heal-success-threshold`. Unset → default `0.9`. |
-| `CENTELLA_TELEMETRY` | `telemetry` | Enable / disable telemetry NDJSON event writing (boolean). Overridden by `--telemetry` / `--no-telemetry`. Unset → default `true` (telemetry on). |
-| `CENTELLA_TELEMETRY_DIR` | `telemetry_dir` | Subdirectory name under the run dir for telemetry NDJSON events. Overridden by `--telemetry-dir`. Unset → default `events`. |
-| `CENTELLA_JUDGE_DIR` | `judge_dir` | Subdirectory name under the run dir for LLM judge output. Overridden by `--judge-dir`. Unset → default `judge-out`. |
-| `CENTELLA_HEAL_DIR` | `heal_dir` | Subdirectory name under the run dir for LLM self-heal output. Overridden by `--heal-dir`. Unset → default `heal-out`. |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | — | **Claude Code CLI variable**, not consumed by centella. Set to `70` to backstop worker auto-compaction. |
+| `PILA_SOURCE_OF_TRUTH` | `source_of_truth` | Sticky source-of-truth preference (`codebase` / `research` / `both`). Overridden by `--source-of-truth`. Unset → default `both`. |
+| `PILA_MODEL` | `model` | Model alias applied to every worker. Overridden by `--model` and per-worker overrides. Unset → per-worker defaults (judgment workers `opus`, acting workers — implementer, conformer — `sonnet`). |
+| `PILA_MODEL_<WORKER>` | `model_<worker>` | Per-worker override (e.g. `PILA_MODEL_IMPLEMENTER=opus`). Overridden by `--model-<worker>`. `<worker>` ∈ `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer`. Unset → `implementer` and `conformer` → `sonnet`; everything else → `opus`. |
+| `PILA_CONFIDENCE_ROUNDS` | `confidence_rounds` | Evidence-gate rounds per worker (positive integer). Overridden by `--confidence-rounds`. Unset → default `8`. |
+| `PILA_INSPECT_DIRS` | `inspect_dirs` | Extra directories the inspect-bucket workers (classifier, planner, reconciler) may read; forwarded as `--add-dir`. Env value is colon-separated; TOML value is comma-separated. Overridden by `--inspect-dir` (repeatable). Unset → none. |
+| `PILA_VERBOSITY` | `verbosity` | Inline-output verbosity (`quiet` / `normal` / `stream` / `debug`). Overridden by `--verbosity`. `-v` / `-vv` / `-q` / `-qq` shortcuts override both. Unset → default `stream`. |
+| `PILA_NO_PUSH` | `no_push` | Sticky opt-out from push + PR at finalize (truthy → skip). Overridden by `--no-push`. `--no-verify` has no env/TOML mirror — it is a per-invocation override only. Unset → default `false` (push + PR happen). |
+| `PILA_CLARIFY` | `clarify` | Sticky opt-in to surfacing intent questions to the user (truthy → on). Overridden by `--clarify`. Unset → default `false`. |
+| `PILA_MODEL_JUDGE` | `model_judge` | Model alias for the post-run judge skill. Overridden by `--judge-model`. Unset → default `sonnet`. |
+| `PILA_MODEL_HEAL` | `model_heal` | Model alias for the post-run self-heal skill. Overridden by `--heal-model`. Unset → default `sonnet`. |
+| `PILA_HEAL_MAX_ROUNDS` | `heal_max_rounds` | Maximum heal-loop iterations per `call_type`. Overridden by `--heal-max-rounds`. Unset → default `10`. |
+| `PILA_HEAL_SUCCESS_THRESHOLD` | `heal_success_threshold` | Pass-rate threshold for the heal-loop SUCCESS verdict. Overridden by `--heal-success-threshold`. Unset → default `0.9`. |
+| `PILA_TELEMETRY` | `telemetry` | Enable / disable telemetry NDJSON event writing (boolean). Overridden by `--telemetry` / `--no-telemetry`. Unset → default `true` (telemetry on). |
+| `PILA_TELEMETRY_DIR` | `telemetry_dir` | Subdirectory name under the run dir for telemetry NDJSON events. Overridden by `--telemetry-dir`. Unset → default `events`. |
+| `PILA_JUDGE_DIR` | `judge_dir` | Subdirectory name under the run dir for LLM judge output. Overridden by `--judge-dir`. Unset → default `judge-out`. |
+| `PILA_HEAL_DIR` | `heal_dir` | Subdirectory name under the run dir for LLM self-heal output. Overridden by `--heal-dir`. Unset → default `heal-out`. |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | — | **Claude Code CLI variable**, not consumed by pila. Set to `70` to backstop worker auto-compaction. |
 
 ### Precedence
 
 - **Source-of-truth** (highest first): `--source-of-truth` →
-  `CENTELLA_SOURCE_OF_TRUTH` → `centella.toml` → default `both`.
+  `PILA_SOURCE_OF_TRUTH` → `pila.toml` → default `both`.
 - **Model** (per worker, highest first): `--model-<worker>` →
-  `--model` → `CENTELLA_MODEL_<WORKER>` → `CENTELLA_MODEL` →
-  `model_<worker>` in `centella.toml` → `model` in `centella.toml` →
+  `--model` → `PILA_MODEL_<WORKER>` → `PILA_MODEL` →
+  `model_<worker>` in `pila.toml` → `model` in `pila.toml` →
   per-worker default (`implementer`, `conformer` → `sonnet`; everything
   else → `opus`). The judgment-vs-acting split keeps the
   most-frequently-invoked workers on the lower-cost model while
   every judgment step gets Opus-grade reasoning. To restore the
-  pre-0.3 all-sonnet behavior in one knob, set `CENTELLA_MODEL=sonnet`
+  pre-0.3 all-sonnet behavior in one knob, set `PILA_MODEL=sonnet`
   or pass `--model sonnet`.
 - **Confidence rounds** (highest first): `--confidence-rounds` →
-  `CENTELLA_CONFIDENCE_ROUNDS` → `confidence_rounds` in
-  `centella.toml` → default `8`.
+  `PILA_CONFIDENCE_ROUNDS` → `confidence_rounds` in
+  `pila.toml` → default `8`.
 - **Verbosity** (highest first): `--verbosity` → `-v`/`-vv`/`-q`/`-qq`
   shortcuts (anchored to `normal`, not to the resolved default) →
-  `CENTELLA_VERBOSITY` → `verbosity` in `centella.toml` → default
+  `PILA_VERBOSITY` → `verbosity` in `pila.toml` → default
   `stream`.
 
 See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) §2 for the
@@ -283,7 +283,7 @@ rationale behind these orders and the full validation contract.
 
 ## Worker types
 
-Centella spawns six kinds of `claude -p` worker. Each is a separate
+Pila spawns six kinds of `claude -p` worker. Each is a separate
 subprocess; there is no in-session agent nesting.
 
 | Worker | Prompt source | Default model | Runs per task | Returns |
@@ -291,16 +291,16 @@ subprocess; there is no in-session agent nesting.
 | `classifier` | `prompts/classifier.md` | opus | 1 | category set + intent questions |
 | `planner` | `prompts/planner.md` | opus | one per category (parallel) | subtask list with deps |
 | `reconciler` | `prompts/reconciler.md` | opus | 0 or 1 (spawned only when planners' capability tags don't align) | renames / added_provides / added_subtasks / unresolvable |
-| `implementer` | `prompts/implementer.md` | sonnet | one per subtask (per wave, parallel) | commits on a `centella/subtasks/<run-id>/<subtask-id>` branch |
+| `implementer` | `prompts/implementer.md` | sonnet | one per subtask (per wave, parallel) | commits on a `pila/subtasks/<run-id>/<subtask-id>` branch |
 | `conformer` | `prompts/conformer.md` | sonnet | one per subtask, only on the implementer's success path | advisory `conformance_warnings` on the subtask result; doc/test/rule-fix commits prefixed `conformer:` on the same branch (DESIGN §9 *Post-work conformance*) |
-| `integrator` | `prompts/integrator.md` | opus | on conflict during wave integration | resolved merge commit on `centella/runs/<run-id>` |
+| `integrator` | `prompts/integrator.md` | opus | on conflict during wave integration | resolved merge commit on `pila/runs/<run-id>` |
 
 **Per-worker model defaults:** judgment workers (classifier, planner,
 reconciler, integrator) default to Opus; the acting workers
 (implementer, conformer) default to Sonnet — their job is concrete
 subtask execution where throughput matters more than broad-context
 judgment. To revert to the
-all-Sonnet pattern of earlier versions, set `CENTELLA_MODEL=sonnet` or
+all-Sonnet pattern of earlier versions, set `PILA_MODEL=sonnet` or
 pass `--model sonnet`. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) §2
 *Model selection* for the full precedence table.
 
@@ -333,22 +333,22 @@ live `claude` binary would be needed; out of scope for the current suite).
 
 | Path | What it is |
 |------|------------|
-| `orchestrator/centella.py` | The orchestrator — all phases, waves, caps, retries |
+| `orchestrator/pila.py` | The orchestrator — all phases, waves, caps, retries |
 | `prompts/classifier.md` | System prompt: classify task + surface intent questions |
 | `prompts/planner.md` | System prompt: decompose one category into a subtask plan |
 | `prompts/reconciler.md` | System prompt: reconcile cross-domain capability-tag drift between planner outputs |
 | `prompts/implementer.md` | System prompt: execute one subtask end to end |
 | `prompts/integrator.md` | System prompt: resolve merge conflicts behaviorally |
-| `scripts/setup-run.sh` | Create per-run branch + worktree (`centella/runs/<run-id>`) |
+| `scripts/setup-run.sh` | Create per-run branch + worktree (`pila/runs/<run-id>`) |
 | `scripts/new-worktree.sh` | Create per-subtask branch + worktree off the run branch |
 | `scripts/integrate.sh` | Merge a subtask branch into the run branch |
 | `scripts/finalize.sh` | Verify the run branch is non-empty and ready to push (the working branch is not modified locally — the push + PR step lives in Python's `push_and_open_pr`, called from `phase_finalize` unless `--no-push`) |
-| `scripts/cleanup.sh` | Remove worktrees for one run (default `--run-id`) or all runs (`--all-runs`). State dir always preserved as audit. `--branches` also deletes the matching `centella/runs/<id>` run branch *and* `centella/subtasks/<id>/*` subtask branches. `--subtask-branches` deletes only the subtask branches and keeps `centella/runs/<id>` (the post-finalize default — the run branch is the PR head). `--bootstrap` removes orphaned `_bootstrap-*` dirs (runs that died before classify completed). |
-| `centella` | Executable entry-point wrapper |
-| `commands/centella.md` | Thin plugin skill — reachable as `/centella` from Claude Code |
+| `scripts/cleanup.sh` | Remove worktrees for one run (default `--run-id`) or all runs (`--all-runs`). State dir always preserved as audit. `--branches` also deletes the matching `pila/runs/<id>` run branch *and* `pila/subtasks/<id>/*` subtask branches. `--subtask-branches` deletes only the subtask branches and keeps `pila/runs/<id>` (the post-finalize default — the run branch is the PR head). `--bootstrap` removes orphaned `_bootstrap-*` dirs (runs that died before classify completed). |
+| `pila` | Executable entry-point wrapper |
+| `commands/pila.md` | Thin plugin skill — reachable as `/pila` from Claude Code |
 | `docs/DESIGN.md` | Full design document and rationale |
 | `docs/IMPLEMENTATION.md` | Current code-surface spec (functions, caps, schemas) |
-| `docs/USAGE.md` | End-to-end walkthrough of one Centella run |
+| `docs/USAGE.md` | End-to-end walkthrough of one Pila run |
 | `CONTRIBUTING.md` | Development setup, task-completion checklist, PR conventions |
 
 ## Safety
@@ -357,52 +357,52 @@ Acting workers use `--dangerously-skip-permissions`. That is a real risk
 surface — it is what makes the run unattended. It is bounded by worktree
 isolation (each worker operates in its own isolated checkout, not your main
 working tree) but not eliminated. **Run on repositories you trust, ideally in
-a container, and review the run branch (`centella/runs/<run-id>`) before relying
+a container, and review the run branch (`pila/runs/<run-id>`) before relying
 on the result.** Push + PR at finalize is the natural review surface; you
 can also pass `--no-push` to keep finalize fully local.
 
-The run writes only to `.centella/runs/<run-id>/` (auto-excluded from git
-via `.git/info/exclude`) and to `centella/runs/<run-id>` plus
-`centella/subtasks/<run-id>/<subtask-id>` branches. Phase 6 (unless
+The run writes only to `.pila/runs/<run-id>/` (auto-excluded from git
+via `.git/info/exclude`) and to `pila/runs/<run-id>` plus
+`pila/subtasks/<run-id>/<subtask-id>` branches. Phase 6 (unless
 `--no-push`) pushes the run branch to `origin` and opens a PR against
 your working branch — your working branch itself is never modified
-locally. After a run, the run branch (`centella/runs/<run-id>`) is kept
+locally. After a run, the run branch (`pila/runs/<run-id>`) is kept
 as an audit trail; per-subtask branches are auto-deleted at finalize,
 but each worker's commits remain reachable from the run branch's
-`--no-ff` merge graph (`git log centella/runs/<run-id> --graph`). Remove
+`--no-ff` merge graph (`git log pila/runs/<run-id> --graph`). Remove
 the run branch (and any leftover subtask branches) with
 `scripts/cleanup.sh --run-id <id> --branches` (or `--all-runs --branches`
 for an audit cleanup across every past run).
 
 ## Troubleshooting
 
-- **`claude: command not found`** — Centella shells out to the Claude Code
+- **`claude: command not found`** — Pila shells out to the Claude Code
   CLI; install it from https://claude.ai/code and confirm with
   `claude --version`. There is no fallback path.
 
-- **Exits with code 10** — not an error. Centella needs clarification
+- **Exits with code 10** — not an error. Pila needs clarification
   answers and you are running non-interactively. Read
-  `.centella/pending-questions.json`, write the answers to
-  `.centella/answers.json`, then `./centella --resume --answers .centella/answers.json`.
-  The plugin skill at `commands/centella.md` handles this relay
-  automatically when invoked as `/centella`.
+  `.pila/pending-questions.json`, write the answers to
+  `.pila/answers.json`, then `./pila --resume --answers .pila/answers.json`.
+  The plugin skill at `commands/pila.md` handles this relay
+  automatically when invoked as `/pila`.
 
 - **Run interrupted (Ctrl-C)** — Ctrl-C is treated as the user's explicit
   "throw this away" gesture. The run's worktrees, branches, and state dir
-  are all removed (`centella/runs/<run-id>` and
-  `centella/subtasks/<run-id>/*` branches included). The run is
+  are all removed (`pila/runs/<run-id>` and
+  `pila/subtasks/<run-id>/*` branches included). The run is
   *not* resumable. If you want to abort temporarily and resume later, use
   `kill <pid>` (SIGTERM) instead — see the next entry.
 
 - **Run terminated by signal (SIGTERM, SIGHUP, CI cancel, terminal close, reboot)** —
   worktrees are torn down but state.json + run branch are preserved.
-  Resume with `./centella --resume` (auto-picks if exactly one run) or
-  `./centella --resume --run-id <id>`. Run `centella --list` to see what's
+  Resume with `./pila --resume` (auto-picks if exactly one run) or
+  `./pila --resume --run-id <id>`. Run `pila --list` to see what's
   in flight.
 
 - **A subtask reports `blocked`** — the implementer hit something it
   cannot resolve and bailed before integration. Read the blocker reason in
-  `.centella/state.json` under `blocked[<subtask-id>]`, address the
+  `.pila/state.json` under `blocked[<subtask-id>]`, address the
   upstream cause, then resume. See [`docs/DESIGN.md`](docs/DESIGN.md) §8
   for the evidence-gated loop.
 
@@ -412,27 +412,27 @@ for an audit cleanup across every past run).
   run, use `--all-runs --branches`. Then re-invoke as normal.
 
 - **Push or PR failed at finalize** — the run completed locally. Check
-  `centella --list` for the run's status (`push-failed` / `pr-failed`)
-  and read `.centella/runs/<run-id>/run.json` for the captured stderr.
+  `pila --list` for the run's status (`push-failed` / `pr-failed`)
+  and read `.pila/runs/<run-id>/run.json` for the captured stderr.
   The error message at finalize names the exact retry command. Local
   commits are intact on the run branch.
 
 ## FAQ
 
 **Do I need an Anthropic API key?**
-No. Centella runs entirely on the Claude Code CLI and your existing
+No. Pila runs entirely on the Claude Code CLI and your existing
 subscription. The orchestrator shells out to `claude -p` workers; no API
 key is read or sent.
 
-**Can I run multiple Centella instances in the same repository?**
+**Can I run multiple Pila instances in the same repository?**
 Yes. Each invocation derives a unique `run_id` and namespaces all of its
-state under `.centella/runs/<run-id>/` and its branches under
-`centella/runs/<run-id>` (run branch) and `centella/subtasks/<run-id>/<sid>`
+state under `.pila/runs/<run-id>/` and its branches under
+`pila/runs/<run-id>` (run branch) and `pila/subtasks/<run-id>/<sid>`
 (subtask branches) — so parallel runs in the same clone never collide.
 Use `--list` to see what's in flight and `--resume --run-id <id>` to
 resume a specific one.
 
-**Does Centella work outside a git repository?**
+**Does Pila work outside a git repository?**
 No. Per-subtask isolation is provided by `git worktree`; the worktree
 mechanism is load-bearing, not optional.
 
@@ -447,11 +447,11 @@ See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) §4 for
 contract.
 
 **Can I see what each worker did?**
-Yes. Every worker commits to its own `centella/subtasks/<run-id>/<subtask-id>`
+Yes. Every worker commits to its own `pila/subtasks/<run-id>/<subtask-id>`
 branch during the run; at finalize, those branches are auto-deleted, but
 the integrator merges each one into the run branch with `--no-ff`, so
-every worker's commits remain reachable from `centella/runs/<run-id>` as a
-named merge bubble. `git log centella/runs/<run-id> --graph` is your
+every worker's commits remain reachable from `pila/runs/<run-id>` as a
+named merge bubble. `git log pila/runs/<run-id> --graph` is your
 per-worker audit trail. When you no longer need the run branch either,
 `scripts/cleanup.sh --run-id <id> --branches` removes it (and any
 leftover subtask branches); `--all-runs --branches` removes all of them.
