@@ -49,6 +49,18 @@ clean_one_run() {
     for d in "${run_dir}/worktrees"/*/; do
       [ -d "$d" ] || continue
       git worktree remove --force "$d" 2>/dev/null || true
+      # Fall back to rm -rf when `git worktree remove` administratively
+      # succeeded but left the directory behind (timeout mid-rmtree) or
+      # when git no longer tracks the worktree (already pruned) and so
+      # nonzero-exits without touching disk. Without this fallback, a
+      # stale worktree directory persists across cleanups and blocks
+      # `--resume`'s new-worktree.sh from re-creating the worktree at
+      # the same path. Path is sandboxed under
+      # .pila/runs/<run-id>/worktrees/<sid>; the leading `[ -d ]` plus
+      # the glob restricts scope to that directory's children.
+      if [ -d "$d" ]; then
+        rm -rf "$d"
+      fi
     done
     # Remove the now-empty worktrees dir if everything went; harmless if
     # something stayed behind (rmdir refuses non-empty).

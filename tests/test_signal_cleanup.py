@@ -144,6 +144,103 @@ def test_cleanup_full_purge_deletes_run_dir(pila, tmp_path, monkeypatch):
     )
 
 
+def test_cleanup_rm_rf_fallback_when_git_leaves_dir(pila, tmp_path,
+                                                    monkeypatch):
+    """When `git worktree remove` returns nonzero (or zero) but does NOT
+    actually delete the directory — e.g. git already pruned the worktree
+    from its registry on a previous pass — the cleanup must fall back to
+    rm -rf so the surviving directory doesn't block --resume's
+    new-worktree.sh from re-creating the worktree at the same path.
+
+    Observed in finalmemoriam on 2026-05-28: an overnight run timed out
+    on node_modules under the old 30s cap, cleanup logged a failure,
+    git later pruned its registry, and the surviving worktree dir
+    blocked --resume the next morning with
+    `fatal: '...' already exists`."""
+    run_id = "feat-x-aaa111"
+    run_dir = tmp_path / "runs" / run_id
+    wt_a = run_dir / "worktrees" / "feat-001"
+    wt_a.mkdir(parents=True)
+    # Put something in the worktree (simulates leftover node_modules).
+    (wt_a / "leftover.txt").write_text("stale")
+    st = _FakeState(run_id, run_dir)
+
+    # Simulate git's behavior in the failure scenario: subprocess.run
+    # succeeds (no exception) but git does nothing on disk (returns
+    # nonzero because the worktree isn't tracked).
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, "", "fatal: not a worktree")
+    monkeypatch.setattr(pila.subprocess, "run", fake_run)
+
+    assert wt_a.exists()
+    pila._cleanup_on_abnormal_exit(st, full_purge=False)
+    assert not wt_a.exists(), (
+        "cleanup must rm -rf the worktree dir when git worktree remove "
+        "leaves it behind, otherwise --resume's new-worktree.sh will "
+        "fail with 'already exists' when it tries to re-create the "
+        "worktree at the same path."
+    )
+
+
+def test_cleanup_rm_rf_fallback_after_timeout(pila, tmp_path, monkeypatch):
+    """Mirror of the above for the timeout case: subprocess.TimeoutExpired
+    is raised mid-removal, but the directory survives (with partial
+    contents). Cleanup must still fall back to rm -rf so the surviving
+    dir doesn't block --resume."""
+    run_id = "feat-x-aaa111"
+    run_dir = tmp_path / "runs" / run_id
+    wt_a = run_dir / "worktrees" / "feat-001"
+    wt_a.mkdir(parents=True)
+    (wt_a / "leftover.txt").write_text("stale")
+    st = _FakeState(run_id, run_dir)
+
+    def fake_run(cmd, **kwargs):
+        # Only timeout for the worktree-remove call; let prune succeed.
+        if cmd[:3] == ["git", "worktree", "remove"]:
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 0))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(pila.subprocess, "run", fake_run)
+
+    pila._cleanup_on_abnormal_exit(st, full_purge=False)
+    assert not wt_a.exists(), (
+        "cleanup must rm -rf after a TimeoutExpired so the surviving "
+        "dir doesn't persist across runs."
+    )
+
+
+def test_cleanup_rm_rf_skips_when_path_escapes_sandbox(pila, tmp_path,
+                                                      monkeypatch):
+    """Belt-and-suspenders: the rm -rf fallback must verify the
+    resolved path lies within the worktrees dir before deleting. If a
+    refactor or symlink ever caused entry.resolve().parent to escape
+    the sandbox, the rm would be a no-op rather than a destructive
+    misfire."""
+    run_id = "feat-x-aaa111"
+    run_dir = tmp_path / "runs" / run_id
+    worktrees_dir = run_dir / "worktrees"
+    worktrees_dir.mkdir(parents=True)
+    # Create a real file outside the sandbox.
+    outside = tmp_path / "outside_target"
+    outside.mkdir()
+    (outside / "important.txt").write_text("do not delete")
+    # Symlink from inside the worktrees dir to the outside path.
+    sym = worktrees_dir / "feat-001"
+    sym.symlink_to(outside)
+    st = _FakeState(run_id, run_dir)
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+    monkeypatch.setattr(pila.subprocess, "run", fake_run)
+
+    pila._cleanup_on_abnormal_exit(st, full_purge=False)
+    # The symlink itself may or may not survive (resolve depends on
+    # what counts as a directory iteration), but the OUTSIDE target
+    # must survive — that's the load-bearing invariant.
+    assert outside.exists()
+    assert (outside / "important.txt").exists()
+    assert (outside / "important.txt").read_text() == "do not delete"
+
+
 def test_cleanup_no_purge_preserves_run_dir(pila, tmp_path, monkeypatch):
     """full_purge=False leaves the run_dir intact (worktrees may be
     removed, but state.json and the dir itself survive)."""

@@ -943,6 +943,7 @@ def _cleanup_on_abnormal_exit(st: "State", *, full_purge: bool) -> None:
     # tells the user how to finish manually.
     worktree_remove_timeout = 240
     failed_removals = 0
+    worktrees_dir_resolved = worktrees_dir.resolve() if worktrees_dir.is_dir() else None
     if worktrees_dir.is_dir():
         for entry in worktrees_dir.iterdir():
             if not entry.is_dir():
@@ -954,8 +955,35 @@ def _cleanup_on_abnormal_exit(st: "State", *, full_purge: bool) -> None:
                     timeout=worktree_remove_timeout,
                 )
             except (OSError, subprocess.TimeoutExpired) as e:
+                log(f"  cleanup: git worktree remove failed for {entry}: {e}")
+            # Fall back to direct removal if the directory still exists.
+            # Two real cases this catches:
+            #   1) `git worktree remove` succeeded administratively
+            #      (deregistered from git) but timed out mid-rmtree —
+            #      directory survives with partial contents.
+            #   2) git no longer tracks the worktree (already pruned)
+            #      so `git worktree remove` returns nonzero without
+            #      raising — directory survives untouched.
+            # The user hit case 2 after an overnight run that crashed
+            # while the old 30s timeout was still in place: cleanup
+            # logged "failed", git later pruned the entry on its own
+            # bookkeeping pass, and the surviving directory blocked
+            # `--resume`'s new-worktree.sh from re-creating the
+            # worktree at the same path. Safe to rm because the path
+            # is sandboxed under .pila/runs/<run-id>/worktrees/<sid>;
+            # we re-check via .resolve() to make sure a symlink or
+            # refactor hasn't escaped the sandbox.
+            if entry.exists():
+                try:
+                    resolved = entry.resolve()
+                    if (worktrees_dir_resolved is not None
+                            and resolved.parent == worktrees_dir_resolved):
+                        shutil.rmtree(entry, ignore_errors=True)
+                except OSError as e:
+                    log(f"  cleanup: fallback rm failed for {entry}: {e}")
+            if entry.exists():
                 failed_removals += 1
-                log(f"  cleanup: failed to remove worktree {entry}: {e}")
+                log(f"  cleanup: worktree {entry} survived removal")
     if failed_removals:
         log(f"  cleanup: {failed_removals} worktree(s) not removed within "
             f"{worktree_remove_timeout}s — run "
