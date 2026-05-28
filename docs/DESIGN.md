@@ -467,7 +467,7 @@ The contract: every abnormal-exit path terminates the worker's
 *entire* subprocess subtree before the orchestrator returns control
 to the shell, with a brief grace window for graceful shutdown
 followed by a forceful kill for anything still alive. This is a code
-guarantee (§12 "prompts are advisory, code enforces"), not a polite
+guarantee (§12 *prompts are advisory, code enforces*), not a polite
 ask of `claude -p`. See IMPLEMENTATION.md "Concurrency model" for
 the POSIX mechanism (process-group isolation + group-wide signal
 delivery) that satisfies it.
