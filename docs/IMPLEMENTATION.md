@@ -169,6 +169,45 @@ Base layers (top-down):
   ownership.
 - `WORKDIR /work`, `ENTRYPOINT ["/work/.pila-image/scripts/container-entry.sh"]`.
 
+### Registry publish path (fly.io / remote Machines)
+
+Fly.io Machines pull an image from a registry rather than using a
+locally-built image. The `HOST_UID/HOST_GID` coupling exists only for
+local bind-mounts (so files written by the container into `/work` keep
+the host user's ownership). Remote Machines have no such bind-mount, so
+the Dockerfile's defaults (`ARG HOST_UID=501 / HOST_GID=20`) are used
+as-is — no UID matching required.
+
+`scripts/publish-image.sh` provides the publish build path:
+
+```bash
+# Build and tag for fly.io private registry (no HOST_UID/HOST_GID args):
+./scripts/publish-image.sh --app <fly-app-name>
+
+# Build + push in one step:
+./scripts/publish-image.sh --app <fly-app-name> --push
+
+# Then deploy:
+flyctl deploy --app <fly-app-name> --image registry.fly.io/<fly-app-name>:<VERSION>
+```
+
+Alternative: let fly build remotely (no local container runtime needed):
+
+```bash
+flyctl deploy --build-only --push \
+  --config fly.toml \
+  --dockerfile Dockerfile
+# fly reads the Dockerfile, ARG defaults apply, result is pushed to
+# registry.fly.io/<app> automatically.
+```
+
+The `ENTRYPOINT` (`/work/.pila-image/scripts/container-entry.sh`) is
+identical between the local and registry builds — it is a path inside
+the container resolved at runtime, not baked per-build. On a fly.io
+Machine, the `/work/.pila-image/` path would typically be a fly Volume
+or a pre-staged bind mount rather than a host-side symlink. See
+`DESIGN.md` for how orchestrator source mounting adapts for remote use.
+
 Note the two `.pila*` paths inside the container:
 
 - **`/work/.pila/`** is the run-state directory inside the user's
