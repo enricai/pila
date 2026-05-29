@@ -486,5 +486,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CLI/env are session-scoped knobs; `pila.toml` is the committed
   repo default.
 
-[Unreleased]: https://github.com/enricai/pila/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/enricai/pila/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/enricai/pila/releases/tag/v0.2.1
 [0.2.0]: https://github.com/enricai/pila/releases/tag/v0.2.0

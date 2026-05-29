@@ -24,7 +24,7 @@ Pila inverts the relationship. **The model writes code. The program runs everyth
 [![tests](https://github.com/enricai/pila/actions/workflows/test.yml/badge.svg)](https://github.com/enricai/pila/actions/workflows/test.yml)
 [![syntax](https://github.com/enricai/pila/actions/workflows/syntax.yml/badge.svg)](https://github.com/enricai/pila/actions/workflows/syntax.yml)
 [![shellcheck](https://github.com/enricai/pila/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/enricai/pila/actions/workflows/shellcheck.yml)
-[![Version](https://img.shields.io/badge/version-0.2.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.1-orange.svg)](CHANGELOG.md)
 
 ## How it works
 
@@ -520,7 +520,7 @@ MIT — see [`LICENSE`](LICENSE).
 
 ## Status
 
-v0.2.0 — see [`CHANGELOG.md`](CHANGELOG.md). The orchestrator's phase flow, wave scheduling, cross-domain dependency
+v0.2.1 — see [`CHANGELOG.md`](CHANGELOG.md). The orchestrator's phase flow, wave scheduling, cross-domain dependency
 resolution, and git worktree mechanics are all tested. First contact with a live
 `claude -p` session is the remaining verification step. Limitations and planned
 work are in [`docs/DESIGN.md`](docs/DESIGN.md).
