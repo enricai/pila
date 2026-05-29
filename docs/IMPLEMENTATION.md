@@ -395,6 +395,9 @@ pila/
 │                                   (DESIGN §6 / §0.5)
 ├── Dockerfile                  container image recipe; built locally on first
 │                                   run, tagged `pila:<VERSION>` (§0.5)
+├── fly.toml                    Fly.io Machine config — app, image, vm sizing
+│                                   (4 cpu / 8 GB midpoint), zero warm-pool
+│                                   (min_machines_running=0). See §0.5.
 ├── orchestrator/pila.py        the orchestrator — all control flow (chmod +x)
 ├── prompts/
 │   ├── classifier.md              Phase 1 worker system prompt
