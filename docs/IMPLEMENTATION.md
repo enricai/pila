@@ -28,17 +28,19 @@ inside the container (DESIGN §6 / §0.5 below).
 | `.claude-plugin/plugin.json` | Existing plugin manifest (commands, skills, metadata). The `version` field is the single source of truth for `pila --version`. |
 | `scripts/install.sh` | The `curl \| bash` shell installer. Preflight (git/claude/curl) → runtime preflight (colima on macOS, nerdctl+containerd on Linux) → clone → symlink → verify. Self-contained bash; deps: `bash`, `curl`, `git`. |
 | `pila` (launcher) | Portable bash. Symlink-walks to its own location, runs the per-OS runtime preflight, builds the pila image once per version, and execs `nerdctl run` with TTY flags adapted via `[ -t 0 ]` (see §0.5). Fast paths for `--version` skip container startup. |
-| `Dockerfile` | Image recipe (Debian 12 + Node + pnpm + claude CLI). Built locally on first run, tagged `pila:<VERSION>`. |
+| `Dockerfile` | Image recipe (Debian 12 + Node + pnpm + claude CLI + baked orchestrator source). Built locally on first run, tagged `pila:<VERSION>`. |
 | `scripts/container-entry.sh` | Container PID 1. `cd /work && exec python3 /work/.pila-image/orchestrator/pila.py "$@"`. |
+| `scripts/remote/build-push.sh` | Build and push a self-contained pila image to Fly.io's registry. The baked source at `/work/.pila-image/` lets the image run on Fly Machines without any bind mount. |
 
 ### Python runtime — provisioned inside the container
 
 Pila requires Python 3.10+. The container image installs Debian 12's
 `python3` (currently 3.11), which satisfies the requirement. The host
-needs no Python at all. The orchestrator's source is bind-mounted from
-`$PILA_HOME` into `/work/.pila-image/` at runtime, *not* baked into the
-image — so iterating on `orchestrator/pila.py` does not require an image
-rebuild.
+needs no Python at all. The orchestrator's source is baked into the
+image at `/work/.pila-image/` via the Dockerfile's `COPY` instructions.
+On local runs the launcher's bind mount (`-v $PILA_REPO:/work/.pila-image:ro`)
+shadows the baked copy, so iterating on `orchestrator/pila.py` still
+does not require an image rebuild — the host file is used on the next run.
 
 The orchestrator itself remains stdlib-only — no `pip install`, no
 `pyproject.toml`, no PyPI release. `pytest` is still the only dev
@@ -178,17 +180,26 @@ the host user's ownership). Remote Machines have no such bind-mount, so
 the Dockerfile's defaults (`ARG HOST_UID=501 / HOST_GID=20`) are used
 as-is — no UID matching required.
 
-`scripts/publish-image.sh` provides the publish build path:
+**Baked source.** The Dockerfile's `COPY` instructions bake
+`orchestrator/`, `scripts/`, `prompts/`, and `.claude-plugin/` into the
+image at `/work/.pila-image/`. A Fly Machine that pulls this image can
+run the orchestrator without any bind mount — the ENTRYPOINT
+(`/work/.pila-image/scripts/container-entry.sh`) and the orchestrator
+(`/work/.pila-image/orchestrator/pila.py`) are already present. On
+local runs the launcher's `-v $PILA_REPO:/work/.pila-image:ro` bind
+mount shadows the baked copy, so development iteration (edit a file,
+run pila) still works without rebuilding the image.
+
+`scripts/remote/build-push.sh` provides the remote build path:
 
 ```bash
-# Build and tag for fly.io private registry (no HOST_UID/HOST_GID args):
-./scripts/publish-image.sh --app <fly-app-name>
+# Build locally, tag for fly.io private registry, push, and verify:
+./scripts/remote/build-push.sh --app <fly-app-name> --push
 
-# Build + push in one step:
-./scripts/publish-image.sh --app <fly-app-name> --push
-
-# Then deploy:
-flyctl deploy --app <fly-app-name> --image registry.fly.io/<fly-app-name>:<VERSION>
+# Verify the baked source works inside a Machine:
+flyctl machine run registry.fly.io/<fly-app-name>:<VERSION> \
+  --app <fly-app-name> \
+  -- python3 /work/.pila-image/orchestrator/pila.py --version
 ```
 
 Alternative: let fly build remotely (no local container runtime needed):
@@ -197,16 +208,9 @@ Alternative: let fly build remotely (no local container runtime needed):
 flyctl deploy --build-only --push \
   --config fly.toml \
   --dockerfile Dockerfile
-# fly reads the Dockerfile, ARG defaults apply, result is pushed to
+# fly reads the Dockerfile, COPY bakes the source, result is pushed to
 # registry.fly.io/<app> automatically.
 ```
-
-The `ENTRYPOINT` (`/work/.pila-image/scripts/container-entry.sh`) is
-identical between the local and registry builds — it is a path inside
-the container resolved at runtime, not baked per-build. On a fly.io
-Machine, the `/work/.pila-image/` path would typically be a fly Volume
-or a pre-staged bind mount rather than a host-side symlink. See
-`DESIGN.md` for how orchestrator source mounting adapts for remote use.
 
 Note the two `.pila*` paths inside the container:
 
@@ -214,9 +218,12 @@ Note the two `.pila*` paths inside the container:
   repo (state.json, logs, worktrees, telemetry). It lives on the
   host filesystem via the `/work` bind mount and persists across
   container runs.
-- **`/work/.pila-image/`** is the read-only bind mount of `$PILA_HOME`
-  on the host — pila's own source tree. The ENTRYPOINT script and
-  `orchestrator/pila.py` are read from there, never written to.
+- **`/work/.pila-image/`** is the orchestrator source tree. On local
+  runs it is a read-only bind mount of `$PILA_HOME` on the host; on
+  Fly Machines it is the baked copy from the Dockerfile's `COPY`
+  instructions. Both paths resolve identically at runtime — the
+  ENTRYPOINT and orchestrator code always live at
+  `/work/.pila-image/{scripts,orchestrator}/`.
 
 The container's PID 1 (the entry script) reads from `.pila-image/`
 and writes to `.pila/`. Confusing the two would either break runs
@@ -234,11 +241,19 @@ cd /work
 exec python3 /work/.pila-image/orchestrator/pila.py "$@"
 ```
 
-The orchestrator's source lives at `/work/.pila-image/` (read-only
-bind mount from `$PILA_HOME` on the host), *not* baked into the
-image. Iterating on `orchestrator/pila.py` therefore does not need
-an image rebuild — edit the file on the host, next `pila` invocation
-picks it up.
+The orchestrator's source lives at `/work/.pila-image/`. It is present
+in two ways depending on execution mode:
+
+- **Local runs:** the launcher bind-mounts `$PILA_HOME` read-only at
+  `/work/.pila-image`. Iterating on `orchestrator/pila.py` does not
+  need an image rebuild — the bind mount shadows the baked copy and
+  the host file is picked up on the next `pila` invocation.
+- **Fly.io Machines (remote):** there is no bind mount. The Dockerfile
+  `COPY` instructions bake `orchestrator/`, `scripts/`, `prompts/`,
+  and `.claude-plugin/` into the image at `/work/.pila-image/` so the
+  entrypoint resolves without any host-side path. A new pila version
+  requires rebuilding and pushing the image (see §0.5 "Registry publish
+  path").
 
 ### Bind-mount table
 
@@ -413,8 +428,12 @@ pila/
 │   ├── finalize.sh                verify the run branch exists and is non-empty; ready for push
 │   ├── cleanup.sh                 remove worktrees / branches (default: scoped to one run)
 │   ├── container-entry.sh         container PID 1: `cd /work && exec python3 orchestrator/pila.py`
-│   └── install.sh                 one-command installer (curl | bash); preflight git/claude/curl +
-│                                   runtime preflight (colima / nerdctl) + clones + symlinks
+│   ├── install.sh                 one-command installer (curl | bash); preflight git/claude/curl +
+│   │                               runtime preflight (colima / nerdctl) + clones + symlinks
+│   └── remote/
+│       └── build-push.sh          build and push a self-contained image for Fly.io Machines;
+│                                   the baked /work/.pila-image/ lets the image run without
+│                                   a bind mount (§0.5 "Registry publish path")
 ├── commands/pila.md            thin plugin skill — launches the orchestrator
 ├── skills/
 │   ├── judge-llm-batch/SKILL.md  post-run judge skill — scores a batch of captured

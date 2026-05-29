@@ -1,8 +1,8 @@
-# Pila's Dockerfile has no COPY/ADD instructions — the build context is
-# never consulted. Excluding everything keeps `nerdctl build` from shipping
-# .git, tests, caches, etc. into the build daemon (which on Colima must
-# traverse the host-to-VM bridge). The orchestrator source is bind-mounted
-# at runtime, not baked in.
+# The Dockerfile bakes orchestrator/, scripts/, prompts/, and .claude-plugin/
+# into the image so Fly.io Machines can run without a bind mount (§0.5).
+# Exclude everything else to keep the build context lean — .git, tests,
+# caches, and docs are not needed inside the image and traversing them over
+# the host-to-VM bridge (on Colima/macOS) wastes time.
 #
 # We negate Dockerfile + .dockerignore so legacy builders (older `docker
 # build` / some podman modes) that honor `*` literally still find them.
@@ -11,3 +11,7 @@
 *
 !Dockerfile
 !.dockerignore
+!orchestrator/
+!scripts/
+!prompts/
+!.claude-plugin/
