@@ -5995,9 +5995,12 @@ async def phase_plan(task: str, st: State, caps: dict,
     async def plan_one(category: str) -> dict:
         async with sem:
             st.bump_workers(caps)
-            up = (f"DOMAIN: {category}\n\nCONTEXT:\n{ctx}\n\n"
+            prefix = f"{CATEGORY_ABBREV[category]}-"
+            up = (f"DOMAIN: {category}\nID_PREFIX: {prefix}\n\n"
+                  f"CONTEXT:\n{ctx}\n\n"
                   f"Decompose the {category} aspect of this task into a JSON plan "
-                  "per your instructions.")
+                  "per your instructions. Every subtask id MUST start with "
+                  f"`{prefix}` (e.g., `{prefix}001`).")
             return await claude_p(user_prompt=up, system_prompt=sys_prompt,
                                   schema_key="planner", cwd=os.getcwd(),
                                   allowed_tools=INSPECT_TOOLS, max_turns=100,

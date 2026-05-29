@@ -106,7 +106,7 @@ action from this priority order:
 3. **`added_subtasks`.** If no existing subtask produces or could plausibly
    produce the capability, but a *connector* subtask is reasonable from the
    task description, emit a new subtask. The id must use a domain prefix
-   (`feat-`, `fix-`, `refactor-`, `perf-`, `test-`, `deps-`, `config-`,
+   (`bugfix-`, `feat-`, `refactor-`, `perf-`, `test-`, `deps-`, `config-`,
    `docs-`) and a number that doesn't collide with existing subtask ids
    (e.g., if `feat-001`..`feat-007` exist, use `feat-008`).
 

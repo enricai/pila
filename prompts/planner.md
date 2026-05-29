@@ -13,6 +13,10 @@ or `Bash(find ...)` first, then `Read` the specific file(s) of interest.
 The orchestrator gives you, in your prompt:
 
 - `DOMAIN` — the category you are responsible for.
+- `ID_PREFIX` — the required prefix for every subtask id you emit,
+  derived from your domain by the orchestrator. This is the *only*
+  legal prefix for your output; the orchestrator's validator rejects
+  any other.
 - `CONTEXT` — JSON with the overall `task`, the `source_of_truth`
   (`codebase`, `research`, or `both`), and any `clarification_answers`
   the user gave.
@@ -151,9 +155,10 @@ emit `status: "blocked"`, `subtasks: []`, and the gap analysis in
 
 Rules:
 
-- Subtask ids must be unique within your domain and prefixed with it
-  (`bugfix-`, `feat-`, `refactor-`, `perf-`, `test-`, `deps-`, `config-`,
-  `docs-`).
+- Subtask ids must be unique within your domain and must start with
+  the `ID_PREFIX` given in your input (e.g., `feat-001`, `feat-002` if
+  `ID_PREFIX` is `feat-`). Do not invent a prefix from the domain
+  name — use exactly the string the orchestrator gave you.
 - Never emit `size: large`. If something feels large, decompose it.
 - If your domain has no work for this task, return an empty `subtasks`
   array with `status: "ready"` — an empty plan is a legitimate outcome of

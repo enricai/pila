@@ -980,7 +980,7 @@ The bootstrap directory `.pila/runs/_bootstrap-<6hex>/` is used until classify c
 ### Plan validation — `validate_plan` (after scheduling, before persisting the plan)
 | Check | Catches |
 |-------|---------|
-| ids match domain prefix (`bugfix-`, `feat-`, `refactor-`, `perf-`, `test-`, `deps-`, `config-`, `docs-`) | cross-domain collisions, audit ambiguity |
+| ids match domain prefix (`bugfix-`, `feat-`, `refactor-`, `perf-`, `test-`, `deps-`, `config-`, `docs-`) | cross-domain collisions, audit ambiguity. The planner's user prompt receives the prefix directly as `ID_PREFIX = CATEGORY_ABBREV[domain] + "-"`, so the prompt cannot drift from the validator's allowlist — both derive from the same `CATEGORY_ABBREV` map (in `pila.py`). |
 | no `size: large` subtasks | planner violated the sizing constraint |
 | no empty `success_criteria_seed` | implementer has no criteria starting point |
 | every `depends_on` id exists | dangling edges silently dropped by the scheduler |
