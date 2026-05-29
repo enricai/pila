@@ -460,6 +460,11 @@ export PILA_VERBOSITY=stream
 export PILA_SOURCE_OF_TRUTH=codebase    # or: research, both
 pila "task" --source-of-truth codebase
 
+# Select the execution runtime (default: local). `fly` routes each worker
+# through Fly.io machines instead of local nerdctl containers.
+export PILA_RUNTIME=local               # or: fly
+pila "task" --runtime fly
+
 # Choose the model. Without overrides: judgment workers (classifier,
 # planner, reconciler, provision, integrator) default to opus; acting
 # workers (implementer, conformer) default to sonnet. Use the env var
@@ -582,6 +587,44 @@ priority first):
 
 An invalid value in env or file is rejected at startup via `die()` —
 same shape as `--source-of-truth` resolution.
+
+### Runtime mode
+
+Controls which execution backend runs the per-subtask worker containers.
+`local` uses the local nerdctl/containerd runtime (the existing behavior);
+`fly` routes each worker through Fly.io machines. Default is `local` so
+existing behavior is unchanged for users who have not opted in.
+
+Resolution order (highest priority first):
+
+1. **`--runtime`** CLI flag, values `local` | `fly`. Argparse rejects
+   anything else before the orchestrator runs.
+
+2. **`PILA_RUNTIME`** environment variable, same value set.
+
+3. **`pila.toml` at the repo root** with key `runtime`. Plain
+   `key=value` syntax:
+
+   ```
+   runtime = fly
+   ```
+
+4. **Default `local`.** When unset, pila runs workers in the local
+   container runtime. The default preserves all existing behavior
+   for users who have not configured a remote runtime.
+
+An invalid value in env or file is rejected at startup via `die()` — bad
+config is caught before any worker spawns. Valid values are
+`{local, fly}`.
+
+> The CLI/env > file order reflects the same session-scoped vs.
+> committed-default split as `--source-of-truth`: the CLI flag and env
+> var are one-off overrides, while `pila.toml` is the per-repo default.
+
+Maps to: `resolve_source_of_truth` resolution pattern in `pila.py`
+(`_read_toml_key` + env + CLI precedence). The code counterpart
+(`resolve_runtime`) and the `PILA_RUNTIME` / `--runtime` argparse wiring
+are specified here and implemented by downstream subtasks.
 
 ### Prompt loading and the shared filter fragment
 

@@ -171,6 +171,12 @@ export PILA_SOURCE_OF_TRUTH=codebase   # or: research, both
 ./pila "task" --source-of-truth codebase
 # …or commit a pila.toml at the repo root with: source_of_truth = codebase
 
+# Select the execution runtime (default: local). `fly` routes each worker
+# through Fly.io machines instead of local nerdctl containers.
+export PILA_RUNTIME=local              # or: fly
+./pila "task" --runtime fly
+# …or commit a pila.toml at the repo root with: runtime = fly
+
 # Choose the model. Without overrides: judgment workers (classifier,
 # planner, reconciler, provision, integrator) default to opus; acting
 # workers (implementer, conformer) default to sonnet. Per-worker
