@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Orchestrator memory-leak telemetry: `.pila/runs/<id>/memory.ndjson`.**
+  After three OOM cascades across different parallel-run combinations,
+  we narrowed the diagnostic question to "is the orchestrator itself
+  leaking, or is a 2+ GB peak just the natural shape of a heavy 24-
+  subtask run?" Rather than guessing — bumping Colima further, adding a
+  run-lock, or launching a `tracemalloc` hunt blind — we ship the
+  measurement first. A new background coroutine `_memory_sampler`
+  writes one ndjson line per ~30 s to `memory.ndjson` under each run
+  directory while `orchestrate()` is alive. Each sample records four
+  axes: `rss_kb` (from `resource.getrusage(RUSAGE_SELF).ru_maxrss`),
+  `phase` (a new `current_phase` field on `state.json`, set at each
+  phase entry), `worker_count` (already tracked), `open_fds` (from
+  `/proc/self/fd`), and `thread_count` (from
+  `threading.active_count()`). The sampler is exception-swallowing so a
+  telemetry bug cannot crash the orchestrator, and the cancellation
+  path writes one final sample so the file captures last-known state
+  at exit. After a fresh run, a few lines of `python3 -c "import json;
+  …"` over `memory.ndjson` distinguishes the three diagnostic outcomes:
+  flat RSS (no leak — bump Colima or add a run-lock), linear growth
+  (real leak — escalate to `tracemalloc` localized to whichever phase
+  the by-phase breakdown implicates), or step-function growth tied to
+  `worker_count` (subprocess-handle leak — audit `_invoke`'s cleanup
+  paths). At ~50 bytes/line × 30 s intervals a 4-hour run produces
+  ~25 KB, so we leave the file unbounded.
+
 ### Fixed
 
 - **Installer provisions Colima with 4 GB of swap on fresh installs.**

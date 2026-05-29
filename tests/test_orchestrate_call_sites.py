@@ -1,5 +1,6 @@
-"""Source-text coupling tests for the call sites in orchestrate() and
-settle_subtask() that wire up the P4-P5 features.
+"""Source-text coupling tests for the call sites in `_run_phases` (the
+phase-sequence body extracted from `orchestrate()`) and `settle_subtask()`
+that wire up the P4-P5 features.
 
 The risk this guards against: a future refactor (or AI rewrite) of
 either function removes a load-bearing call site, the unit tests for
@@ -52,7 +53,7 @@ def test_orchestrate_calls_absorb_supplied_answers_on_resume():
     that removes it fails this test instead of silently re-breaking
     the documented flow.
     """
-    body = _function_body("orchestrate")
+    body = _function_body("_run_phases")
     # The resume branch exists.
     assert "if args.resume:" in body, (
         "orchestrate() must keep its `if args.resume:` branch — "
@@ -128,7 +129,7 @@ def test_orchestrate_calls_phase_reconcile_between_plan_and_schedule():
     Pin the source order so a regression fails here instead of in a
     real run with mismatched planner vocabulary.
     """
-    body = _function_body("orchestrate")
+    body = _function_body("_run_phases")
     plan_idx = body.find("await phase_plan(")
     reconcile_idx = body.find("await phase_reconcile(")
     schedule_idx = body.find("schedule(plans)")
@@ -154,7 +155,7 @@ def test_orchestrate_reconcile_feeds_schedule_via_plans_var():
     sees un-reconciled tags. Pin the rebind so a future change can't
     accidentally split the variables.
     """
-    body = _function_body("orchestrate")
+    body = _function_body("_run_phases")
     # The exact call shape we want — assignment back to `plans`.
     assert "plans = await phase_reconcile(plans," in body, (
         "phase_reconcile must be called as `plans = await "

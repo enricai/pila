@@ -1663,6 +1663,17 @@ coordination state.
         │                            line, one line per claude_p call; opened for
         │                            append at run start; written immediately after
         │                            each call returns (DESIGN §14)
+        ├── memory.ndjson            orchestrator memory telemetry — one JSON object
+        │                            per line, one line per ~30 s while orchestrate()
+        │                            is alive; written by `_memory_sampler`. Keys per
+        │                            line: `ts`, `rss_kb`, `phase` (mirrors
+        │                            `state.current_phase`), `worker_count`, `open_fds`
+        │                            (from `/proc/self/fd`; `-1` off Linux), `thread_count`
+        │                            (from `threading.active_count`). Final sample is
+        │                            flushed on sampler cancellation, so the file always
+        │                            captures last-known state at orchestrator exit.
+        │                            Used to distinguish a natural heavy run from a
+        │                            real orchestrator memory leak post-mortem
         └── <heal_subdir>/           heal-loop on-disk state (default: "heal-out/")
             └── <call_type>/         one directory per call_type being healed
                 ├── state.json       heal orchestrator state (history, best, baseline)
@@ -1735,6 +1746,7 @@ written somewhere in `orchestrator/pila.py`. The coupling test in
 | `criteria_revisions` | list[dict] | **deprecated** — append-only audit log of the retired worker-initiated revision channel. No longer written; read-tolerated on resume of old runs. |
 | `blocked` | dict[str, str] | per-subtask blocker reason when a wave aborts |
 | `worker_count` | int | running total of `claude -p` invocations against `max_total_workers` |
+| `current_phase` | str | the orchestrator's active phase string (e.g. `"phase 2: planning"`, `"phase 4-5: implementing"`); written at each phase entry and read by `_memory_sampler` so each `memory.ndjson` sample can be correlated with the phase that produced it. Empty string before phase 1 fires |
 | `telemetry` | dict | calls, cost_usd, input_tokens, output_tokens — printed at run end |
 | `categories` | list[str] | classifier output, post-whitelist filtering |
 | `classifier_questions` | list[dict] | intent questions the classifier surfaced |

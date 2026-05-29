@@ -130,6 +130,11 @@ STATE_FIELDS = (
     "integrator_failure", "integrator_warnings", "scope_warnings",
     "conformance",
     "provision",
+    # current_phase carries the orchestrator's active phase string so the
+    # `_memory_sampler` (telemetry sidecar at memory.ndjson) can correlate
+    # RSS growth with the code path that produced it. Updated at each
+    # phase_* entry. Empty string before phase 1.
+    "current_phase",
 )
 
 CATEGORIES = [
@@ -4241,6 +4246,100 @@ def _capture_call(run_dir: Path, record: dict) -> None:
         os.fsync(f.fileno())
 
 
+def _collect_memory_sample(st: "State") -> dict:
+    """Snapshot orchestrator RSS / current phase / worker count / open FDs /
+    thread count. Stdlib only (no `psutil` dependency).
+
+    The four axes give enough signal to distinguish "natural heavy run" from
+    leak shape:
+      - rss_kb grows linearly with no GC drops → RSS leak, escalate to
+        `tracemalloc`.
+      - open_fds grows with no decline → subprocess pipe / log handle leak,
+        audit `_invoke`'s cleanup paths.
+      - thread_count grows → leaked `_DescendantTracker` background threads
+        not being joined.
+      - phase / worker_count contextualize the other axes.
+
+    `/proc/self/fd` is the canonical Linux FD source; pila's orchestrator
+    runs as PID 1 inside the container (Linux), so the proc-fs path is
+    valid. ru_maxrss is in KB on Linux (in bytes on macOS, but the
+    orchestrator never runs on bare macOS — the launcher does, and we
+    don't sample it). All probes are individually exception-guarded so a
+    container without /proc still produces a partial sample rather than
+    crashing the orchestrator over telemetry."""
+    import resource
+    import threading
+    rss_kb = 0
+    try:
+        ru = resource.getrusage(resource.RUSAGE_SELF)
+        rss_kb = int(ru.ru_maxrss)
+    except Exception:
+        pass
+
+    open_fds = -1
+    try:
+        open_fds = len(os.listdir("/proc/self/fd"))
+    except Exception:
+        pass
+
+    thread_count = -1
+    try:
+        thread_count = threading.active_count()
+    except Exception:
+        pass
+
+    return {
+        "ts": now(),
+        "rss_kb": rss_kb,
+        "phase": st.data.get("current_phase", "<unknown>"),
+        "worker_count": st.data.get("worker_count", 0),
+        "open_fds": open_fds,
+        "thread_count": thread_count,
+    }
+
+
+async def _memory_sampler(st: "State",
+                          interval_sec: float = 30.0) -> None:
+    """Periodic orchestrator-memory sample for leak detection.
+
+    Writes one ndjson line per `interval_sec` to `memory.ndjson` alongside
+    `state.json`. Each line records RSS, current phase, worker count, open
+    FDs, and thread count — enough to correlate growth with the phase and
+    the worker concurrency in flight at that moment.
+
+    Lifecycle: spawned as a fire-and-forget task by `orchestrate()`, cancelled
+    in the `finally` block. On cancellation, one final sample is written
+    before re-raising so the on-disk trail captures the orchestrator's
+    end-of-run state.
+
+    Never crashes the orchestrator: every probe is exception-guarded, the
+    sample-write is exception-guarded, and an exception thrown anywhere
+    inside the loop body is swallowed (telemetry that crashes the
+    orchestrator is worse than no telemetry)."""
+    out = st.run_dir / "memory.ndjson"
+    while True:
+        try:
+            sample = _collect_memory_sample(st)
+            with out.open("a", buffering=1) as f:
+                f.write(json.dumps(sample, separators=(",", ":")) + "\n")
+        except Exception:
+            pass
+        try:
+            await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            # Final sample before exit so the trail captures the
+            # last-moment state. Best-effort: if the write fails (disk
+            # full, run_dir gone), the existing samples on disk are
+            # still useful; don't mask the CancelledError.
+            try:
+                sample = _collect_memory_sample(st)
+                with out.open("a", buffering=1) as f:
+                    f.write(json.dumps(sample, separators=(",", ":")) + "\n")
+            except Exception:
+                pass
+            raise
+
+
 async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
                    cwd: str, allowed_tools: str, max_turns: int, autonomous: bool,
                    caps: dict, st: "State", model: str, sid: str,
@@ -5304,6 +5403,8 @@ async def run_setup_hook(repo_root: Path, log_dir: Path,
         )
 
     log("phase 1½: running .pila-setup.sh")
+    st.data["current_phase"] = "phase 1½: setup-hook"
+    st.save()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "setup-hook.log"
     verbosity = st.data.get("verbosity", VERBOSITY_DEFAULT)
@@ -5759,6 +5860,8 @@ async def phase_classify(task: str, st: State, caps: dict, clarify: bool,
     questions: classify the task and surface only genuinely underivable
     (intent-level) questions."""
     log("phase 1: classifying task")
+    st.data["current_phase"] = "phase 1: classify"
+    st.save()
     sys_prompt = load_prompt("classifier")
     st.bump_workers(caps)
     result = await claude_p(
@@ -6005,6 +6108,8 @@ async def phase_provision(repo_root: Path, st: State, caps: dict,
     else-branch in `orchestrate()` is skipped.
     """
     log("phase 1½: detecting per-repo deps")
+    st.data["current_phase"] = "phase 1½: provision"
+    st.save()
     prov = st.data.setdefault("provision", {})
     log_dir = st.run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -6105,6 +6210,8 @@ async def phase_plan(task: str, st: State, caps: dict,
     """Phase 2: one planner per category, run in parallel (bounded by
     max_parallel). Each returns a JSON plan of granular subtasks."""
     log("phase 2: planning")
+    st.data["current_phase"] = "phase 2: planning"
+    st.save()
     cats = st.data["categories"]
     answers = st.data.get("answers", {})
     sot = answers.get("source_of_truth", "codebase")
@@ -6317,6 +6424,8 @@ async def phase_reconcile(plans: list[dict], task: str, st: State,
 
     log(f"phase 2½: reconciling {len(unresolved)} cross-domain "
         f"capability-tag mismatch(es)")
+    st.data["current_phase"] = "phase 2½: reconcile"
+    st.save()
 
     # Build the reconciler's input. The worker sees the task, the
     # categories that contributed subtasks, every subtask's id/title/
@@ -7377,6 +7486,8 @@ async def phase_execute(pila_dir: Path, st: State, caps: dict,
     """Phases 4-5: create staging, then run waves sequentially; within a wave,
     subtasks in parallel (bounded by max_parallel)."""
     log("phase 4: creating run-branch worktree")
+    st.data["current_phase"] = "phase 4-5: implementing"
+    st.save()
     proc = await run_script("setup-run.sh", st.run_id)
     if proc.returncode != 0:
         die(f"run setup failed: {proc.stderr.strip()}")
@@ -7451,6 +7562,8 @@ async def phase_finalize(pila_dir: Path, st: State, no_push: bool,
     launcher knows whether to add `--no-verify` to its `git push`.
     """
     log("phase 6: finalizing")
+    st.data["current_phase"] = "phase 6: finalize"
+    st.save()
     proc = await run_script("finalize.sh", st.run_id)
     if proc.returncode != 0:
         die(f"finalize failed (run branch is intact): {proc.stderr.strip()}")
@@ -7499,6 +7612,29 @@ async def orchestrate(args, caps: dict, pila_dir: Path, st: State,
                       models: dict[str, str]) -> None:
     """The async portion of a run: every phase that spawns a `claude -p`
     worker. main() handles sync setup, then drives this with `asyncio.run`."""
+    # Memory telemetry: a long-running coroutine that snapshots RSS / phase /
+    # worker count / open FDs / thread count into memory.ndjson every 30s
+    # so we can distinguish "natural heavy run" from "real orchestrator leak"
+    # after the fact. Lifecycle is bounded by this function — cancelled in
+    # the finally so it never outlives the run.
+    sampler_task = asyncio.create_task(_memory_sampler(st))
+    try:
+        await _run_phases(args, caps, pila_dir, st, sot_pref, verbosity,
+                          models)
+    finally:
+        sampler_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sampler_task
+
+
+async def _run_phases(args, caps: dict, pila_dir: Path, st: State,
+                      sot_pref: str, verbosity: str,
+                      models: dict[str, str]) -> None:
+    """The phase sequence of one run. Split out from `orchestrate()`
+    so the latter can wrap it with the memory-sampler try/finally
+    without burying the phase calls behind extra indentation. Source-
+    text coupling tests for the orchestrate call-sites parse this
+    function's body — keep all phase calls here."""
     if args.resume:
         if not st.load():
             die(f"nothing to resume — no state.json at {st.path}")
@@ -7605,6 +7741,8 @@ async def orchestrate(args, caps: dict, pila_dir: Path, st: State,
         # conflicts (yet); empirically these correlate strongly with
         # integrator design-conflict crashes downstream.
         warn_cross_planner_file_overlap(plans)
+        st.data["current_phase"] = "phase 3: scheduling"
+        st.save()
         subtasks, waves = schedule(plans)
         validate_plan(subtasks)
         runner = detect_test_runner()
