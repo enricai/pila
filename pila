@@ -482,17 +482,23 @@ fi
 # fails preflight with "Not logged in" even though the host is logged in.
 #
 # The user extracts the token once and exports CLAUDE_CODE_OAUTH_TOKEN
-# in the shell they run pila from. We forward it pass-through (no
-# =value form), which has nerdctl read the value from the launcher's
-# own env at exec time. The token never appears on the host's argv-
-# visible command line — `ps -ef` shows only "-e CLAUDE_CODE_OAUTH_TOKEN".
+# in the shell they run pila from. We forward it with explicit =value
+# form. NOTE: Colima/nerdctl does NOT honor the pass-through `-e VAR`
+# form (no =value) the way Docker does — verified empirically:
+# `nerdctl run -e PILA_TEST_VAR alpine ...` forwards an EMPTY string,
+# not the launcher's PILA_TEST_VAR value. So we have to expand the
+# value ourselves. The token briefly appears in `ps -ef` while the
+# nerdctl process is starting — acceptable trade-off: on a single-user
+# macOS dev box only the same user can read their own process argv,
+# and the existing ~/.claude/ bind mount already exposes that trust
+# boundary. Multi-user host is out of scope.
 #
 # On Linux native, Claude Code stores credentials at
 # ~/.claude/credentials.json — the existing -v $HOME/.claude bind mount
 # carries that file through. The env var is typically unset there and
 # this block is a no-op; the container falls back to file-based creds.
 if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-  AUTH_MOUNTS+=(-e "CLAUDE_CODE_OAUTH_TOKEN")
+  AUTH_MOUNTS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
 elif [ "$OS" = "Darwin" ]; then
   echo "pila: note — CLAUDE_CODE_OAUTH_TOKEN is not set." >&2
   echo "  macOS keeps the Claude Code OAuth token in Keychain, which the" >&2
