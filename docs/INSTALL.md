@@ -43,6 +43,10 @@ brew install colima
 # Pick `--cpu N --memory M` matching half your host CPU/RAM (bounds
 # 2..8 / 4..16 GB — same as the installer's auto-sizing above). On an
 # 8/16 host: --cpu 4 --memory 8. Colima's 2/2 default is not enough.
+# Also paste the swap-provision YAML block from "Memory pressure: swap
+# configuration" (below) into ~/.colima/default/colima.yaml BEFORE the
+# first `colima start` — that way swap is live on the first boot
+# without a follow-up restart.
 colima start --runtime containerd --mount-type virtiofs --cpu 4 --memory 8
 
 # Then run the installer with the opt-out flag (or env var):
@@ -70,6 +74,75 @@ Notes:
 - If you have Colima already running with a smaller-than-recommended
   VM, re-running the installer will leave the VM alone but log a
   one-line hint with the resize command.
+
+### Memory pressure: swap configuration
+
+Colima's default VM has **zero swap**. Under pila's parallel-implementer
+workload — concurrent `claude -p` workers (~300 MB each) plus toolchain
+processes (Vitest workers can spike to 2 GB RSS, `tsc`/`pnpm install`
+add another GB each) — RAM exhausts faster than the kernel can react.
+With no swap, the OOM killer fires immediately, and it tends to hit the
+host-side `nerdctl` / `lima-guestagent` daemons first. That collapses
+the Mac launcher's connection to the VM and you see `FATA[NNNN] exit
+status 255` with no orchestrator diagnostic — the container's stdout
+just stops mid-stream.
+
+**The fix:** add 4 GB of swap at `/var/swapfile` and tune
+`vm.swappiness=10` so the kernel uses swap only under genuine memory
+pressure (default 60 reaches for swap eagerly). Colima's `provision:`
+hook runs on every VM boot with root privileges; we drop an idempotent
+script in there.
+
+**On a fresh install**, the pila installer writes this for you — the
+`scripts/install.sh` path detects an absent `~/.colima/default/colima.yaml`
+and writes the canonical block before the first `colima start`, so
+swap is live on day 1. If a `colima.yaml` already exists, the installer
+deliberately does NOT mutate it (it might contain your custom mounts /
+CPU type / disk size). Instead, the next `bash scripts/install.sh`
+invocation logs a one-line hint with the YAML block to paste in.
+
+**On an existing setup**, paste this into `~/.colima/default/colima.yaml`
+(replace any existing `provision: null` / `provision: []` line with the
+whole block) and run `colima stop && colima start` to apply:
+
+```yaml
+# pila:swap-provision-v1 BEGIN
+# Auto-managed by pila's installer (scripts/runtime-install.sh).
+# Adds 4 GB of swap at /var/swapfile and tunes vm.swappiness to 10
+# so the kernel uses swap only under real memory pressure (default
+# 60 is too eager for our safety-net use). Provision scripts run
+# every VM boot; the script is idempotent.
+provision:
+  - mode: system
+    script: |
+      set -eu
+      SWAPFILE=/var/swapfile
+      SWAPSIZE_GB=4
+      if [ ! -f "$SWAPFILE" ]; then
+        fallocate -l "${SWAPSIZE_GB}G" "$SWAPFILE"
+        chmod 600 "$SWAPFILE"
+        mkswap "$SWAPFILE"
+      fi
+      if ! swapon --show=NAME --noheadings | grep -qx "$SWAPFILE"; then
+        swapon "$SWAPFILE"
+      fi
+      sysctl -w vm.swappiness=10
+# pila:swap-provision-v1 END
+```
+
+The block above must match what the installer writes byte-for-byte —
+authoritative copy lives in `_runtime_colima_swap_yaml` in
+`scripts/runtime-install.sh`. To verify after restart:
+
+```bash
+colima ssh -- free -h           # Swap: 4.0Gi   0B   4.0Gi
+colima ssh -- sysctl vm.swappiness   # vm.swappiness = 10
+colima ssh -- ls -lh /var/swapfile   # -rw------- 1 root root 4.0G
+```
+
+The 4 GB swapfile lives on Colima's persistent VM disk and survives
+`colima stop`/`colima start`. Only `colima delete` removes it — and
+the next `colima start` would re-create it via the provision script.
 
 ### macOS-specific: bind-mount scope
 
@@ -205,14 +278,26 @@ tracked elsewhere.
 **"Colima VM is not running"** (macOS) — start it:
 `colima start --runtime containerd --mount-type virtiofs --cpu 4 --memory 8`
 (pick `--cpu` / `--memory` matching half your host CPU/RAM; see the
-auto-sizing section at the top of this doc for the bounds).
+auto-sizing section at the top of this doc for the bounds). If this
+is your first start after editing `~/.colima/default/colima.yaml`
+to add the swap-provision block from "Memory pressure: swap
+configuration", the provision script runs automatically on boot.
 
 **"nerdctl cannot reach the container runtime"** — on macOS, you
 probably started Colima with the default `docker` runtime. Restart
 with containerd: `colima stop && colima start --runtime containerd
 --mount-type virtiofs --cpu 4 --memory 8` (carry your half-of-host
 sizing through the restart; the bare command would re-default to
-2/2). On Linux, check `systemctl status containerd`.
+2/2). The swap-provision YAML block in `~/.colima/default/colima.yaml`
+re-applies on every boot, so swap is preserved through this restart.
+On Linux, check `systemctl status containerd`.
+
+**`FATA[NNNN] exit status 255` with no orchestrator diagnostic** — the
+pila run died because Colima's host-side `nerdctl` / `lima-guestagent`
+daemon was OOM-killed inside the VM (not your container's PID 1). Check
+`colima ssh -- sudo dmesg | grep oom-killer` for evidence. The fix is
+to add 4 GB of swap via the YAML block in "Memory pressure: swap
+configuration" above.
 
 **"$HOME/.claude not found"** — you haven't run `claude` yet on this
 machine. Run `claude --version` at least once so the directory is

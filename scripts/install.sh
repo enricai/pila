@@ -215,8 +215,13 @@ case "$(uname -s)" in
         # Same auto-sizing rationale as the install path: suggest the
         # half-of-host sizing so the user doesn't OOM under pila's
         # parallel-worker workload (Colima's 2-cpu / 2-GB default is
-        # not enough).
+        # not enough). Also add the swap-provision YAML block to
+        # ~/.colima/default/colima.yaml — see docs/INSTALL.md "Memory
+        # pressure: swap configuration".
         err "Then start the VM:           colima start --runtime containerd --mount-type virtiofs $(_runtime_colima_size_flags)"
+        err "Also add 4 GB of swap (paste the YAML block from docs/INSTALL.md"
+        err "  'Memory pressure: swap configuration' into ~/.colima/default/colima.yaml,"
+        err "  then colima stop && colima start)."
         err "(Do NOT 'brew install nerdctl' on macOS — the formula requires Linux."
         err " Colima provides nerdctl inside its VM and installs a host-side shim;"
         err " pila auto-runs 'colima nerdctl install' on first launch if needed.)"
@@ -225,16 +230,21 @@ case "$(uname -s)" in
         runtime_install_macos || runtime_ok=false
       fi
     elif [ "$DRY_RUN" = "false" ] && ! colima status >/dev/null 2>&1; then
-      # Already installed but VM not running — start it with auto-sized
-      # resources (see _runtime_colima_size_flags for the rationale).
+      # Already installed but VM not running — install swap config if
+      # no colima.yaml exists yet, then start with auto-sized resources
+      # (see _runtime_colima_size_flags / _runtime_install_colima_swap_yaml
+      # for the rationale).
+      _runtime_install_colima_swap_yaml
       size_flags="$(_runtime_colima_size_flags)"
       log "starting Colima VM (first start may take 30-60s, sizing: ${size_flags:-default})"
       # shellcheck disable=SC2086  # intentional word-split of flag string
       run colima start --runtime containerd --mount-type virtiofs $size_flags
     elif [ "$DRY_RUN" = "false" ]; then
-      # Already installed AND running — leave it alone, but hint if
-      # the existing sizing is below the auto-recommendation.
+      # Already installed AND running — leave it alone, but hint if the
+      # existing sizing is below the auto-recommendation or the config
+      # is missing pila's swap provisioning.
       _runtime_check_colima_sizing
+      _runtime_check_colima_swap
     fi
     ;;
   Linux)

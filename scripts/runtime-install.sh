@@ -146,6 +146,93 @@ _runtime_check_colima_sizing() {
   fi
 }
 
+# Emit the canonical pila swap-provision YAML block. Single source of
+# truth: both the fresh-install path (writes it into colima.yaml before
+# first start) and the already-running hint path (paste this into the
+# user's existing colima.yaml + restart) consume this function.
+# Sentinel markers (`pila:swap-provision-v1`) make the block idempotent
+# across installer re-runs — grep for the marker and skip if present.
+#
+# The 4 GB swap is a safety net for transient memory spikes, not active
+# paging — `vm.swappiness=10` (vs Linux default 60) keeps the kernel
+# from reaching for swap until real RAM is genuinely exhausted. The
+# guards inside the script are required because colima's `provision:`
+# entries run on every boot.
+_runtime_colima_swap_yaml() {
+  cat <<'YAML'
+# pila:swap-provision-v1 BEGIN
+# Auto-managed by pila's installer (scripts/runtime-install.sh).
+# Adds 4 GB of swap at /var/swapfile and tunes vm.swappiness to 10
+# so the kernel uses swap only under real memory pressure (default
+# 60 is too eager for our safety-net use). Provision scripts run
+# every VM boot; the script is idempotent.
+provision:
+  - mode: system
+    script: |
+      set -eu
+      SWAPFILE=/var/swapfile
+      SWAPSIZE_GB=4
+      if [ ! -f "$SWAPFILE" ]; then
+        fallocate -l "${SWAPSIZE_GB}G" "$SWAPFILE"
+        chmod 600 "$SWAPFILE"
+        mkswap "$SWAPFILE"
+      fi
+      if ! swapon --show=NAME --noheadings | grep -qx "$SWAPFILE"; then
+        swapon "$SWAPFILE"
+      fi
+      sysctl -w vm.swappiness=10
+# pila:swap-provision-v1 END
+YAML
+}
+
+# Ensure ~/.colima/default/colima.yaml carries pila's swap-provision
+# block. Called by the macOS install path *before* the first
+# `colima start` so swap is live on the first boot.
+#
+# Decision: write only if the file does NOT exist (fresh user). If the
+# file exists we don't mutate it — modifying a user's colima.yaml
+# without their consent risks clobbering their tuning (custom mounts,
+# CPU type, disk size, etc.). The hint path
+# (_runtime_check_colima_swap) handles the existing-user case by
+# logging the YAML block for them to paste in manually.
+_runtime_install_colima_swap_yaml() {
+  [ "$(uname -s)" = "Darwin" ] || return 0
+  local cfg cfg_dir
+  cfg="$HOME/.colima/default/colima.yaml"
+  cfg_dir="$(dirname "$cfg")"
+  if [ -f "$cfg" ]; then
+    return 0   # existing config — don't mutate
+  fi
+  _runtime_log "writing initial Colima config with swap provisioning (4 GB swap, swappiness 10)"
+  if [ "$DRY_RUN" = "true" ]; then
+    return 0
+  fi
+  mkdir -p "$cfg_dir"
+  _runtime_colima_swap_yaml > "$cfg"
+}
+
+# Check whether the running Colima's config carries pila's swap
+# provisioning. If absent, log a one-line hint with the exact YAML
+# block to paste in and the restart command. No automatic mutation,
+# no automatic restart — running containers would die mid-flight.
+# Called only when colima is already running (mirrors
+# _runtime_check_colima_sizing's call pattern).
+_runtime_check_colima_swap() {
+  [ "$(uname -s)" = "Darwin" ] || return 0
+  local cfg
+  cfg="$HOME/.colima/default/colima.yaml"
+  [ -f "$cfg" ] || return 0
+  if grep -q "pila:swap-provision-v1" "$cfg" 2>/dev/null; then
+    return 0   # already provisioned
+  fi
+  _runtime_log "Colima is running without pila's swap provisioning."
+  _runtime_log "  Pila's parallel-implementer workload can OOM the VM under heavy"
+  _runtime_log "  test/build load. To add 4 GB of swap (recommended), paste the"
+  _runtime_log "  block below into ~/.colima/default/colima.yaml replacing any"
+  _runtime_log "  existing 'provision:' line, then 'colima stop && colima start':"
+  _runtime_colima_swap_yaml | sed 's/^/    /' >&2
+}
+
 # --- public: macOS install (Colima via brew) ----------------------------
 
 # Returns 0 on success, 1 on failure. Caller is responsible for the TTY
@@ -156,13 +243,18 @@ runtime_install_macos() {
   if _runtime_have_runnable colima; then
     # Already installed.
     if [ "$DRY_RUN" = "false" ] && ! colima status >/dev/null 2>&1; then
-      # VM not running — start it with auto-sized resources.
+      # VM not running — install swap config (no-op if a colima.yaml
+      # already exists; we don't mutate user configs) then start with
+      # auto-sized resources. First boot runs the provision block.
+      _runtime_install_colima_swap_yaml
       _runtime_log "starting Colima VM (first start may take 30-60s, sizing: ${size_flags:-default})"
       # shellcheck disable=SC2086  # intentional word-split of flag string
       _runtime_run colima start --runtime containerd --mount-type virtiofs $size_flags || return 1
     elif [ "$DRY_RUN" = "false" ]; then
-      # VM is already running — leave it alone, but hint if undersized.
+      # VM is already running — leave it alone, but hint if undersized
+      # or missing swap provisioning.
       _runtime_check_colima_sizing
+      _runtime_check_colima_swap
     fi
     return 0
   fi
@@ -174,6 +266,10 @@ runtime_install_macos() {
   _runtime_log "installing Colima via Homebrew"
   _runtime_run brew install colima || return 1
   if [ "$DRY_RUN" = "false" ]; then
+    # Fresh install: drop our colima.yaml in place before first start
+    # so the provision block runs on the first boot and swap is live
+    # from day 1 with no follow-up restart.
+    _runtime_install_colima_swap_yaml
     _runtime_log "starting Colima VM (first start may take 30-60s, sizing: ${size_flags:-default})"
     # shellcheck disable=SC2086  # intentional word-split of flag string
     _runtime_run colima start --runtime containerd --mount-type virtiofs $size_flags || return 1

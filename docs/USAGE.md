@@ -17,8 +17,9 @@ runs inside a container, so you also need a container runtime: Colima
 on macOS (`brew install colima && colima start --runtime containerd
 --mount-type virtiofs --cpu N --memory M` where N/M are half your host
 CPU/RAM — see [`docs/INSTALL.md`](INSTALL.md) for the bounds the
-installer uses automatically), or `containerd + nerdctl` natively on
-Linux.
+installer uses automatically; also add the swap-provision YAML block
+documented under "Memory pressure: swap configuration"), or
+`containerd + nerdctl` natively on Linux.
 You do *not* need Python on the host — the image provisions it. For
 the full per-OS setup walkthrough see
 [`docs/INSTALL.md`](INSTALL.md); for the one-command pila install

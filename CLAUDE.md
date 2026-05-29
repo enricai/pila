@@ -149,6 +149,8 @@ tests/                      pytest suite
 # One-time runtime setup (pila runs in a container — see docs/INSTALL.md):
 #   macOS:  brew install colima && colima start --runtime containerd --mount-type virtiofs \
 #             --cpu 4 --memory 8   # ~half-host; docs/INSTALL.md explains the auto-sizing
+#             # Also add the swap-provision YAML block from docs/INSTALL.md
+#             # "Memory pressure: swap configuration" to ~/.colima/default/colima.yaml.
 #   Linux:  install containerd + nerdctl from your distro (apt, dnf, pacman, etc.)
 #
 # Install pila (one command — pick one):

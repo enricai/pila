@@ -123,6 +123,10 @@ brew install colima
 # default OOMs under parallel pila workloads — see docs/INSTALL.md
 # for the auto-sizing the installer applies). On an 8/16 host:
 colima start --runtime containerd --mount-type virtiofs --cpu 4 --memory 8
+# Also add 4 GB of swap (paste the YAML block from docs/INSTALL.md
+# "Memory pressure: swap configuration" into ~/.colima/default/colima.yaml,
+# then colima stop && colima start). This step is optional but strongly
+# recommended — without swap the VM OOMs under heavy parallel load.
 curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash -s -- --no-runtime-install
 ```
 

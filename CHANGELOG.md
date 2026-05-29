@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Installer provisions Colima with 4 GB of swap on fresh installs.**
+  The auto-sizing fix that landed earlier in this release raised the
+  Colima VM's RAM but didn't add swap — with `Swap: 0B` the kernel's
+  OOM killer fires immediately when RAM is exhausted, with no
+  breathing room for transient spikes. Under pila's parallel-
+  implementer workload (concurrent `claude -p` plus Vitest workers
+  spiking to 2 GB RSS each plus `tsc`/`pnpm` toolchain overhead) we
+  observed the OOM killer hitting the host-side `nerdctl` /
+  `lima-guestagent` daemons inside the VM, which collapses the Mac
+  launcher's connection and surfaces as `FATA[NNNN] exit status 255`
+  with no orchestrator diagnostic. The installer now writes an
+  idempotent `provision:` block to `~/.colima/default/colima.yaml`
+  on fresh installs (no existing config) — the block uses sentinel
+  markers (`# pila:swap-provision-v1 BEGIN/END`) so re-runs are
+  no-ops. The provision script `fallocate`s `/var/swapfile`,
+  `mkswap`s it, `swapon`s it, and sets `vm.swappiness=10` so the
+  kernel uses swap only under real pressure (default 60 is too
+  eager for our safety-net use). For users with an existing
+  `colima.yaml`, the installer deliberately does NOT mutate it —
+  too risky to clobber custom mounts / CPU type / disk size —
+  instead it logs a one-line hint with the exact YAML block to
+  paste in plus `colima stop && colima start`. The 4 GB swapfile
+  persists on Colima's VM disk across `colima stop/start`; only
+  `colima delete` removes it (and the next start re-creates it
+  via the provision script). See
+  `_runtime_colima_swap_yaml` in `scripts/runtime-install.sh` for
+  the authoritative YAML and `docs/INSTALL.md` "Memory pressure:
+  swap configuration" for the user-facing docs.
+
 - **Installer auto-sizes the Colima VM to half the host's CPU/RAM
   instead of using Colima's 2-CPU / 2-GB defaults.** The 2/2 defaults
   were not enough for parallel pila runs — concurrent `claude -p`
