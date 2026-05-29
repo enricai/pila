@@ -71,7 +71,7 @@ def test_unresolved_handles_subtask_with_no_provides_field(pila):
               {"id": "test-001", "title": "y", "requires": ["a"]}),
     ]
     out = pila._compute_unresolved_requires(plans)
-    assert out == [{"sid": "test-001", "tag": "a"}]
+    assert out == [{"sid": "test-001", "tag": "a", "domain": "testing"}]
 
 
 def test_unresolved_duplicate_requires_emits_once_per_subtask(pila):

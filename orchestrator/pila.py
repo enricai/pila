@@ -6023,22 +6023,32 @@ async def phase_plan(task: str, st: State, caps: dict,
 
 
 def _compute_unresolved_requires(plans: list[dict]) -> list[dict]:
-    """Pure-Python lookup: every (sid, tag) where a subtask `requires` a
-    capability tag that no subtask in the merged plan `provides`. Mirrors
-    the set logic in validate_plan() but emits the data rather than
-    raising. Used by phase_reconcile to assemble the reconciler worker's
-    input and (after the worker applies its resolutions) to verify the
-    output actually closed every gap."""
+    """Pure-Python lookup: every (sid, tag, domain) where a subtask
+    `requires` a capability tag that no subtask in the merged plan
+    `provides`. Mirrors the set logic in validate_plan() but emits the
+    data rather than raising. Used by phase_reconcile to assemble the
+    reconciler worker's input and (after the worker applies its
+    resolutions) to verify the output actually closed every gap.
+
+    `domain` names the producing planner-domain of `sid` — surfaced in
+    the abort message so the user can see which planner held the
+    dangling dependency. Reconciler input is read-or-ignore on the
+    field; it's there for the orchestrator's own rendering."""
     all_provides: set[str] = set()
+    sid_domain: dict[str, str] = {}
     for plan in plans:
         for s in plan.get("subtasks", []):
             all_provides.update(s.get("provides", []))
+            sid_domain[s["id"]] = plan.get("domain", "<unknown>")
     unresolved: list[dict] = []
     for plan in plans:
         for s in plan.get("subtasks", []):
             for cap in s.get("requires", []):
                 if cap not in all_provides:
-                    unresolved.append({"sid": s["id"], "tag": cap})
+                    unresolved.append({
+                        "sid": s["id"], "tag": cap,
+                        "domain": sid_domain[s["id"]],
+                    })
     return unresolved
 
 
@@ -6226,16 +6236,29 @@ async def phase_reconcile(plans: list[dict], task: str, st: State,
     # gets the worker's diagnosis without phantom mutations on disk.
     unresolvable = output.get("unresolvable", []) or []
     if unresolvable:
+        # Reconciler output is {sid, tag, reason} — no domain field —
+        # so the orchestrator joins the producing planner-domain back
+        # in from the pre-reconcile unresolved list for rendering.
+        sid_domain = {u["sid"]: u["domain"] for u in unresolved}
         bullets = "\n".join(
-            f"  • {u['sid']} requires '{u['tag']}': {u['reason']}"
+            f"  • {sid_domain.get(u['sid'], '<unknown>')}/{u['sid']} "
+            f"requires '{u['tag']}': {u['reason']}"
             for u in unresolvable
         )
         die(
             f"reconciler could not resolve {len(unresolvable)} "
             f"capability-tag dependency/dependencies:\n{bullets}\n"
-            "These represent gaps the planners missed and the reconciler "
-            "could not bridge. Refine the task description or pre-declare "
-            "the missing capabilities, then re-run."
+            "Each dependency is a planner-coverage gap: the consuming "
+            "planner-domain emitted `requires` for a capability no "
+            "other planner's domain produced. A common cause is a "
+            "scope disagreement — two planners reading the task "
+            "differently. To unblock:\n"
+            "  • Refine the task description to make the disputed "
+            "scope explicit (e.g., name the missing capability or the "
+            "surface it lives on), and re-run.\n"
+            "  • Or narrow scope with `--source-of-truth codebase` so "
+            "planners reading repo docs stop treating them as a "
+            "feature checklist."
         )
 
     _apply_reconciler_output(plans, output)
@@ -6247,7 +6270,7 @@ async def phase_reconcile(plans: list[dict], task: str, st: State,
     still_unresolved = _compute_unresolved_requires(plans)
     if still_unresolved:
         bullets = "\n".join(
-            f"  • {u['sid']} requires '{u['tag']}'"
+            f"  • {u['domain']}/{u['sid']} requires '{u['tag']}'"
             for u in still_unresolved
         )
         die(
