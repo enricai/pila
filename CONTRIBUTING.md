@@ -1,10 +1,13 @@
 # Contributing to Pila
 
 Thanks for considering a contribution. Pila is small on purpose — a
-single-file Python orchestrator (~1600 LOC) with no runtime dependencies and
-one dev dependency (`pytest`). A good contribution preserves that shape: a
-focused fix or a clearly-bounded feature that fits inside the documented
-architecture, with tests and docs updated to match.
+single-file Python orchestrator (~1600 LOC), stdlib-only on the Python
+side, with one dev dependency (`pytest`). The orchestrator runs inside a
+container (containerd via Colima on macOS, native on Linux); see
+[`docs/INSTALL.md`](docs/INSTALL.md) for the per-OS runtime setup. A good
+contribution preserves that shape: a focused fix or a clearly-bounded
+feature that fits inside the documented architecture, with tests and docs
+updated to match.
 
 ## Before you change anything: read the three-layer rule
 
@@ -24,9 +27,17 @@ opening a PR that touches more than a single layer.
 ```bash
 git clone https://github.com/enricai/pila.git
 cd pila
-pip install pytest         # the only dev dependency
-./pila --help          # smoke-check the entry point
+pip install pytest         # the only dev (host-side) dependency
+./pila --version           # smoke-check; uses the launcher's fast path —
+                           # does NOT require the container runtime, so
+                           # it works on a fresh clone with no Colima.
 ```
+
+Running pila against a real task (`./pila "..."` rather than `--version`)
+requires the container runtime to be installed and started — see
+[`docs/INSTALL.md`](docs/INSTALL.md). Iterating on
+`orchestrator/pila.py` and running `pytest tests/` is possible without
+it; the test suite runs on the host Python.
 
 There is no `pyproject.toml`; contributors develop out of the checkout.
 End-users get a one-command install via the Claude Code plugin marketplace

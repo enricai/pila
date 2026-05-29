@@ -58,18 +58,33 @@ read [`docs/DESIGN.md`](docs/DESIGN.md).
 - `git`
 - A git repository with `user.email` and `user.name` configured
 - A reasonably clean working tree
+- A container runtime (one-time setup — see *Install* below)
+- `gh` CLI logged in (`gh auth status` succeeds), or pass `--no-push` to skip the finalize PR step
 
-**You don't need to install Python yourself.** Pila is a Python
-3.10+ program (hence the badge), but both install paths below
-provision a hermetic Python 3.12 via [`uv`](https://docs.astral.sh/uv/),
-so your system Python — or its absence — is irrelevant. The orchestrator
-itself remains stdlib-only.
+**Pila runs inside a container** to give cleanup a hard kernel
+guarantee: when you Ctrl-C, the Linux PID namespace is torn down and
+every worker / build / test runner is reaped, even ones that detached
+into their own POSIX sessions. See
+[`docs/DESIGN.md` §6](docs/DESIGN.md) and
+[`docs/IMPLEMENTATION.md` §0.5](docs/IMPLEMENTATION.md) for the
+reasoning and mechanics. Python is provisioned *inside* the container
+by the image; you don't need it on the host.
 
 ## Install
 
-One command. Pick the path that matches how you'll use Pila.
+```bash
+curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash
+```
 
-### Inside Claude Code (recommended)
+The installer auto-installs and starts the container runtime per OS
+(Colima on macOS via `brew`; containerd + pinned `nerdctl` on
+Debian/Ubuntu, Fedora/RHEL, and Arch via the distro package manager)
+and then clones pila into `~/.pila` + symlinks `pila` into
+`~/.local/bin`. Sudo prompts apply on Linux. Full per-OS details and
+the rootless / unsupported-distro paths live in
+[`docs/INSTALL.md`](docs/INSTALL.md).
+
+### Inside Claude Code (recommended for chat-based use)
 
 ```
 /plugin marketplace add enricai/pila
@@ -82,21 +97,7 @@ Then in any Claude Code session:
 /pila Fix the login timeout bug and add a regression test
 ```
 
-### From a terminal
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash
-```
-
-This installs `uv` (if missing), provisions Python 3.12, clones the repo
-into `~/.pila`, and symlinks `pila` into `~/.local/bin`. After
-it finishes:
-
-```bash
-pila "Fix the login timeout bug and add a regression test"
-```
-
-To inspect the installer before piping to bash:
+### Inspect before installing
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh -o install.sh
@@ -107,17 +108,49 @@ bash install.sh                       # then run for real
 Customize with `--prefix DIR` (default `~/.pila`), `--bin-dir DIR`
 (default `~/.local/bin`), or `--ref REF` (default `main`).
 
+### Manual container-runtime setup
+
+If you'd rather install the runtime yourself (CI, dotfiles managers,
+or you want to pin a different `nerdctl` version), do the runtime
+steps manually then pass `--no-runtime-install` (or set
+`PILA_NO_RUNTIME_INSTALL=1`):
+
+**macOS** (Colima manages a Linux VM):
+
+```bash
+brew install colima
+colima start --runtime containerd --mount-type virtiofs
+curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash -s -- --no-runtime-install
+```
+
+(Do not `brew install nerdctl` — the formula requires Linux. Pila
+auto-installs the host-side `nerdctl` shim from Colima on first run.)
+
+**Linux** (Debian/Ubuntu — see [`docs/INSTALL.md`](docs/INSTALL.md)
+for Fedora, Arch, and rootless setups):
+
+```bash
+sudo apt-get install -y containerd
+NERDCTL_VERSION=2.3.1
+ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+curl -L "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-${NERDCTL_VERSION}-linux-${ARCH}.tar.gz" \
+  | sudo tar -C /usr/local/bin -xz nerdctl
+sudo systemctl enable --now containerd
+curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash -s -- --no-runtime-install
+```
+
 ### Manual (clone + run)
 
-If you'd rather not run any installer:
+If you'd rather not run any installer at all:
 
 ```bash
 git clone https://github.com/enricai/pila.git
-pila "your task"
+./pila/pila "your task"   # or symlink onto PATH
 ```
 
-The launcher routes through `uv` when it's on `PATH`, otherwise falls
-back to your system `python3` (requires Python 3.10+).
+The first invocation builds the container image (~60–120s); subsequent
+runs reuse it. The container runtime must already be set up — see
+[`docs/INSTALL.md`](docs/INSTALL.md) for per-OS instructions.
 
 ## Usage
 
@@ -219,9 +252,9 @@ Complete reference for every CLI flag, environment variable, and
 | `--confidence-rounds N` | `8` | Evidence-gate rounds the planner and implementer may run before exiting blocked (DESIGN §8). Overrides `PILA_CONFIDENCE_ROUNDS` and `pila.toml`. |
 | `--skip-smoke` | off | Skip the live `claude -p` preflight smoke test. |
 | `--source-of-truth VALUE` | `both` | `codebase` / `research` / `both`. Overrides `PILA_SOURCE_OF_TRUTH` and `pila.toml`. |
-| `--inspect-dir PATH` | none | Extra directory the inspect-bucket workers (classifier, planner, reconciler) may read; forwarded to `claude -p` as `--add-dir`. Repeatable. Also `PILA_INSPECT_DIRS` (colon-separated) or `inspect_dirs` in `pila.toml` (comma-separated). |
+| `--inspect-dir PATH` | none | Extra directory the inspect-bucket workers (classifier, planner, reconciler, provision) may read; forwarded to `claude -p` as `--add-dir`. Repeatable. Also `PILA_INSPECT_DIRS` (colon-separated) or `inspect_dirs` in `pila.toml` (comma-separated). |
 | `--model ALIAS` | per-worker (judgment: `opus`; acting workers — implementer, conformer: `sonnet`) | `sonnet` / `opus` / `haiku`. Sets every worker this run; without it the per-worker defaults apply. |
-| `--model-<worker> ALIAS` | per-worker default (`implementer`, `conformer` → `sonnet`; everything else → `opus`) | Per-worker override. `<worker>` is one of `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer`. Overrides `--model`, `PILA_MODEL`, and `pila.toml`. |
+| `--model-<worker> ALIAS` | per-worker default (`implementer`, `conformer` → `sonnet`; everything else → `opus`) | Per-worker override. `<worker>` is one of `classifier`, `planner`, `reconciler`, `provision`, `implementer`, `integrator`, `conformer`. Overrides `--model`, `PILA_MODEL`, and `pila.toml`. |
 | `--judge-model ALIAS` | `sonnet` | Model alias for the post-run judge skill. Also `PILA_MODEL_JUDGE` or `model_judge` in `pila.toml`. |
 | `--heal-model ALIAS` | `sonnet` | Model alias for the post-run self-heal skill. Also `PILA_MODEL_HEAL` or `model_heal` in `pila.toml`. |
 | `--heal-max-rounds N` | `10` | Maximum heal-loop iterations per `call_type`. Also `PILA_HEAL_MAX_ROUNDS` or `heal_max_rounds` in `pila.toml`. |
@@ -241,9 +274,9 @@ Complete reference for every CLI flag, environment variable, and
 |---------|---------------------|-------------|
 | `PILA_SOURCE_OF_TRUTH` | `source_of_truth` | Sticky source-of-truth preference (`codebase` / `research` / `both`). Overridden by `--source-of-truth`. Unset → default `both`. |
 | `PILA_MODEL` | `model` | Model alias applied to every worker. Overridden by `--model` and per-worker overrides. Unset → per-worker defaults (judgment workers `opus`, acting workers — implementer, conformer — `sonnet`). |
-| `PILA_MODEL_<WORKER>` | `model_<worker>` | Per-worker override (e.g. `PILA_MODEL_IMPLEMENTER=opus`). Overridden by `--model-<worker>`. `<worker>` ∈ `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer`. Unset → `implementer` and `conformer` → `sonnet`; everything else → `opus`. |
+| `PILA_MODEL_<WORKER>` | `model_<worker>` | Per-worker override (e.g. `PILA_MODEL_IMPLEMENTER=opus`). Overridden by `--model-<worker>`. `<worker>` ∈ `classifier`, `planner`, `reconciler`, `provision`, `implementer`, `integrator`, `conformer`. Unset → `implementer` and `conformer` → `sonnet`; everything else → `opus`. |
 | `PILA_CONFIDENCE_ROUNDS` | `confidence_rounds` | Evidence-gate rounds per worker (positive integer). Overridden by `--confidence-rounds`. Unset → default `8`. |
-| `PILA_INSPECT_DIRS` | `inspect_dirs` | Extra directories the inspect-bucket workers (classifier, planner, reconciler) may read; forwarded as `--add-dir`. Env value is colon-separated; TOML value is comma-separated. Overridden by `--inspect-dir` (repeatable). Unset → none. |
+| `PILA_INSPECT_DIRS` | `inspect_dirs` | Extra directories the inspect-bucket workers (classifier, planner, reconciler, provision) may read; forwarded as `--add-dir`. Env value is colon-separated; TOML value is comma-separated. Overridden by `--inspect-dir` (repeatable). Unset → none. |
 | `PILA_VERBOSITY` | `verbosity` | Inline-output verbosity (`quiet` / `normal` / `stream` / `debug`). Overridden by `--verbosity`. `-v` / `-vv` / `-q` / `-qq` shortcuts override both. Unset → default `stream`. |
 | `PILA_NO_PUSH` | `no_push` | Sticky opt-out from push + PR at finalize (truthy → skip). Overridden by `--no-push`. `--no-verify` has no env/TOML mirror — it is a per-invocation override only. Unset → default `false` (push + PR happen). |
 | `PILA_CLARIFY` | `clarify` | Sticky opt-in to surfacing intent questions to the user (truthy → on). Overridden by `--clarify`. Unset → default `false`. |
@@ -283,7 +316,7 @@ rationale behind these orders and the full validation contract.
 
 ## Worker types
 
-Pila spawns six kinds of `claude -p` worker. Each is a separate
+Pila spawns seven kinds of `claude -p` worker. Each is a separate
 subprocess; there is no in-session agent nesting.
 
 | Worker | Prompt source | Default model | Runs per task | Returns |
@@ -291,12 +324,13 @@ subprocess; there is no in-session agent nesting.
 | `classifier` | `prompts/classifier.md` | opus | 1 | category set + intent questions |
 | `planner` | `prompts/planner.md` | opus | one per category (parallel) | subtask list with deps |
 | `reconciler` | `prompts/reconciler.md` | opus | 0 or 1 (spawned only when planners' capability tags don't align) | renames / added_provides / added_subtasks / unresolvable |
+| `provision` | `prompts/provision.md` | opus | 0 or 1 (spawned only when the deterministic lockfile-detection table abstains — Java/Gradle, bare `pyproject.toml`, polyglot Makefile) | install recipe (argv-allowlisted) executed via `mise exec --`. See DESIGN §6½ |
 | `implementer` | `prompts/implementer.md` | sonnet | one per subtask (per wave, parallel) | commits on a `pila/subtasks/<run-id>/<subtask-id>` branch |
 | `conformer` | `prompts/conformer.md` | sonnet | one per subtask, only on the implementer's success path | advisory `conformance_warnings` on the subtask result; doc/test/rule-fix commits prefixed `conformer:` on the same branch (DESIGN §9 *Post-work conformance*) |
 | `integrator` | `prompts/integrator.md` | opus | on conflict during wave integration | resolved merge commit on `pila/runs/<run-id>` |
 
 **Per-worker model defaults:** judgment workers (classifier, planner,
-reconciler, integrator) default to Opus; the acting workers
+reconciler, provision, integrator) default to Opus; the acting workers
 (implementer, conformer) default to Sonnet — their job is concrete
 subtask execution where throughput matters more than broad-context
 judgment. To revert to the
@@ -354,12 +388,17 @@ live `claude` binary would be needed; out of scope for the current suite).
 ## Safety
 
 Acting workers use `--dangerously-skip-permissions`. That is a real risk
-surface — it is what makes the run unattended. It is bounded by worktree
-isolation (each worker operates in its own isolated checkout, not your main
-working tree) but not eliminated. **Run on repositories you trust, ideally in
-a container, and review the run branch (`pila/runs/<run-id>`) before relying
-on the result.** Push + PR at finalize is the natural review surface; you
-can also pass `--no-push` to keep finalize fully local.
+surface — it is what makes the run unattended. It is bounded by **two
+isolation layers**: (1) worktree isolation — each worker operates in its
+own isolated git checkout, not your main working tree; (2) the container
+the orchestrator runs in — PID-namespace + cgroups bound every worker
+subprocess inside the per-run container (see
+[`docs/DESIGN.md`](docs/DESIGN.md) §6 and [`SECURITY.md`](SECURITY.md)).
+These bound the blast radius; they do not eliminate it. **Run on
+repositories you trust and review the run branch (`pila/runs/<run-id>`)
+before relying on the result.** Push + PR at finalize is the natural
+review surface; you can also pass `--no-push` to keep finalize fully
+local.
 
 The run writes only to `.pila/runs/<run-id>/` (auto-excluded from git
 via `.git/info/exclude`) and to `pila/runs/<run-id>` plus

@@ -5,3 +5,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+
+  # Watches FROM lines in the root Dockerfile (debian:12-slim and any other
+  # base-image tags). Surfaces security patches for the runtime image as PRs.
+  # SECURITY.md treats the container as a load-bearing isolation layer; this
+  # keeps that layer maintained automatically.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

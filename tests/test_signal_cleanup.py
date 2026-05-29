@@ -428,20 +428,20 @@ def test_main_system_exit_not_treated_as_unhandled():
 
 # --- Subprocess-tree termination (DESIGN §6 "Worker subtree termination") -
 #
-# Pin the two-line discipline that satisfies the design contract: every
-# subprocess spawn passes start_new_session=True (so the child is a
-# session/PG leader); every exception-cleanup path routes through
-# _terminate_proc_tree (which os.killpg's the whole group) instead of
-# proc.kill() (which kills the leader only and leaves grandchildren
-# reparented to init).
+# Pin the discipline that satisfies the design contract: every subprocess
+# spawn passes start_new_session=True (isolating the worker into its own
+# POSIX session); every exception-cleanup path routes through
+# _terminate_proc_tree (which combines killpg with a PPID walk to reach
+# detached descendants); and `_invoke` wires a _DescendantTracker that
+# observes the worker's descendants throughout its lifetime so they can
+# be reaped even on a clean exit (Claude Code's run_in_background
+# subprocesses outlive the worker and reparent to PID 1).
 
 def test_every_subprocess_spawn_uses_start_new_session():
     """Static: every `asyncio.create_subprocess_exec` in pila.py must
-    pass `start_new_session=True` so the child becomes a session/PG
-    leader. Without this flag, `os.killpg(proc.pid, ...)` in the
-    cleanup path either no-ops (the child shares pila's PG and we
-    refuse to kill ourselves) or — worse on POSIX — signals the
-    orchestrator's own group."""
+    pass `start_new_session=True` so the worker is isolated into its own
+    POSIX session. This is required so that on cleanup, `os.killpg(proc.pid)`
+    does not accidentally signal the orchestrator's own process group."""
     src = PILA_PY.read_text()
     # Find every create_subprocess_exec(...) call. Match across lines
     # via DOTALL; bound on the closing `)` at the natural call indent.
@@ -454,23 +454,25 @@ def test_every_subprocess_spawn_uses_start_new_session():
     for i, body in enumerate(calls):
         assert "start_new_session=True" in body, (
             f"create_subprocess_exec call #{i + 1} is missing "
-            f"start_new_session=True. Without it the abnormal-exit "
-            f"cleanup path leaks grandchild processes (the bug "
-            f"reported in DESIGN §6 'Worker subtree termination'). "
+            f"start_new_session=True. Without session isolation, "
+            f"`os.killpg(proc.pid, ...)` in the cleanup path could "
+            f"signal the orchestrator's own process group. "
+            f"DESIGN §6 'Worker subtree termination on every exit'. "
             f"Call body:\n{body}"
         )
 
 
 def test_no_bare_proc_kill_outside_terminate_proc_tree(pila):
-    """Static: the only place `proc.kill()` may appear in pila.py is
-    inside `_terminate_proc_tree` itself (and it doesn't — the helper
-    uses os.killpg). All other exception handlers MUST route through
-    the helper so SIGTERM-then-SIGKILL is applied to the whole group,
-    not just the leader.
+    """Static: `proc.kill()` (which kills only the direct child PID)
+    must not appear anywhere in pila.py. Every subprocess-cleanup path
+    must instead route through `_terminate_proc_tree`, which combines
+    `killpg` on the leader's group with a PPID walk to reach detached
+    descendants (Claude Code's Bash tool runs in its own POSIX session,
+    so `killpg(claude_p_pgid)` alone does not reach it).
 
     A regression that puts `proc.kill()` back into `run_proc` or
-    `_invoke`'s exception handlers would silently leak grandchildren
-    again. This test pins that against drift."""
+    `_invoke`'s exception handlers would silently re-leak the
+    detached descendants. This test pins that against drift."""
     src = PILA_PY.read_text()
     # Locate _terminate_proc_tree's body so we can exclude it from
     # the scan (defensive — the current implementation doesn't call
@@ -482,8 +484,10 @@ def test_no_bare_proc_kill_outside_terminate_proc_tree(pila):
     assert not matches, (
         f"found {len(matches)} bare proc.kill() call(s) outside "
         f"_terminate_proc_tree. Every subprocess cleanup path must "
-        f"route through _terminate_proc_tree to avoid leaking "
-        f"grandchildren spawned by `claude -p` tool calls."
+        f"route through _terminate_proc_tree to reach descendants in "
+        f"detached POSIX sessions (Claude Code's Bash tool spawns its "
+        f"command in its own session, so `killpg` on the worker's "
+        f"group does not reach it)."
     )
 
 
@@ -623,3 +627,287 @@ def _pid_alive(pid: int) -> bool:
         # (it's a process we spawned ourselves) this should never
         # happen, but treat it as "alive" to avoid false negatives.
         return True
+
+
+# --- PPID-walk + detached-session reaping ----------------------------------
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="PPID walk + start_new_session semantics are POSIX-only.",
+)
+def test_terminate_proc_tree_reaps_detached_session_grandchildren(pila):
+    """Pila's worker (`claude -p`) spawns the Claude Code Bash tool via
+    `spawn({detached: true})`, which puts the Bash tool subprocess into a
+    NEW POSIX session — its PGID == its own PID, distinct from the
+    worker's PGID. `os.killpg(worker_pgid)` does NOT reach it.
+
+    The helper must instead walk the PPID chain (which stays intact while
+    the parent lives) and signal every descendant by PID.
+
+    This test exercises that exact shape: a "worker" Python process whose
+    immediate child is in a *new session*, and the child has grandchildren.
+    The helper must reach all the way down."""
+    import asyncio
+    import subprocess
+    import time
+
+    # Mimic Claude Code's spawn({detached: true}) by having the worker
+    # spawn its child with start_new_session=True. Pila wouldn't use
+    # this pattern for its own subprocesses, but `claude -p` does, and
+    # `_terminate_proc_tree` must handle it.
+    WORKER_PYTHON = (
+        "import subprocess, time\n"
+        "child = subprocess.Popen(\n"
+        "    ['bash', '-c', 'sleep 47474 & sleep 47474 & wait'],\n"
+        "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
+        "    start_new_session=True,\n"
+        ")\n"
+        "time.sleep(300)\n"
+    )
+
+    async def _run():
+        proc = await asyncio.create_subprocess_exec(
+            "python3", "-c", WORKER_PYTHON,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        # Wait for the detached bash + its sleeps to appear
+        for _ in range(40):
+            await asyncio.sleep(0.1)
+            descs = pila._enumerate_descendants(proc.pid)
+            if len(descs) >= 3:  # bash + 2 sleeps
+                break
+        else:
+            try:
+                proc.kill()
+                await proc.wait()
+            except BaseException:
+                pass
+            pytest.fail("worker never produced expected descendants")
+
+        # Confirm the detached child has its own PGID
+        detached_pids = [d for d in descs
+                         if subprocess.run(
+                             ["ps", "-p", str(d), "-o", "command="],
+                             capture_output=True, text=True
+                         ).stdout.strip().startswith("bash")]
+        assert detached_pids, "no detached bash found among descendants"
+        detached_pid = detached_pids[0]
+        detached_pgid = int(subprocess.run(
+            ["ps", "-p", str(detached_pid), "-o", "pgid="],
+            capture_output=True, text=True
+        ).stdout.strip())
+        worker_pgid = proc.pid  # start_new_session=True ⇒ PGID == PID
+        assert detached_pgid != worker_pgid, (
+            "test setup invalid: detached child is in the same PGID as "
+            "the worker. This test must exercise the detached-session "
+            "case, which requires the child to be in a NEW session."
+        )
+
+        sleep_descs = [d for d in descs if subprocess.run(
+            ["ps", "-p", str(d), "-o", "command="],
+            capture_output=True, text=True
+        ).stdout.strip().startswith("sleep 47474")]
+        assert len(sleep_descs) == 2, f"expected 2 sleeps, got {len(sleep_descs)}"
+
+        # Run the fix. All descendants must die — including the ones in
+        # the detached session that killpg(worker_pgid) cannot reach.
+        try:
+            await pila._terminate_proc_tree(proc)
+        finally:
+            # Safety net so a broken helper doesn't leak a 5-minute sleep
+            for d in descs:
+                try: os.kill(d, _signal.SIGKILL)
+                except ProcessLookupError: pass
+
+        # All sleeps must be gone
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            alive = [d for d in sleep_descs if _pid_alive(d)]
+            if not alive:
+                break
+            await asyncio.sleep(0.05)
+        survivors = [d for d in sleep_descs if _pid_alive(d)]
+        assert not survivors, (
+            f"detached-session sleeps survived _terminate_proc_tree: "
+            f"{survivors}. The PPID-walk did not reach descendants whose "
+            f"PGID differs from the worker's. Claude Code's Bash tool "
+            f"runs in its own session, so `os.killpg(worker_pgid)` "
+            f"alone cannot reach it — the cleanup helper must combine "
+            f"killpg with a PPID-walk."
+        )
+
+    asyncio.run(_run())
+
+
+# --- Success-path cleanup via _DescendantTracker ---------------------------
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX-only test.",
+)
+def test_descendant_tracker_reaps_orphaned_backgrounded_subprocess(pila):
+    """Even on a clean leader exit, Claude Code's `run_in_background:
+    true` Bash tool calls leak — the backgrounded subprocesses are spawned
+    in detached POSIX sessions and reparent to PID 1 the moment their
+    immediate parent exits.
+
+    A naive post-exit PPID-walk finds nothing (the orphans are no longer
+    descendants of the dead leader). `_DescendantTracker` solves this by
+    polling `_enumerate_descendants` THROUGHOUT the leader's life and
+    accumulating every PID it ever sees. At exit, the accumulated set
+    is SIGKILLed — catching the now-orphaned children."""
+    import asyncio
+    import subprocess
+
+    async def _run():
+        # Leader backgrounds a sleep then waits briefly so the tracker has
+        # at least one poll cycle to observe the sleep before the leader
+        # exits.
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c",
+            "sleep 38383 < /dev/null > /dev/null 2>&1 & "
+            "echo $! ; "
+            "sleep 1",  # keep parent alive 1s so tracker's 0.5s poll catches the sleep
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        tracker = pila._DescendantTracker(proc.pid)
+        tracker.start()
+        # Read the sleep PID off stdout
+        line = await proc.stdout.readline()
+        sleep_pid = int(line.strip())
+        # Let the leader exit cleanly
+        await proc.wait()
+        # At this point sleep_pid should be orphaned (PPID=1) but still
+        # alive. The tracker should have observed it during its ~0.5s
+        # poll while the parent was alive.
+        await asyncio.sleep(0.1)  # let kernel reparent
+        # stop_and_reap must kill the orphaned sleep
+        leaked = await tracker.stop_and_reap()
+        assert leaked >= 1, (
+            f"tracker reaped {leaked} descendants — expected at least 1 "
+            f"(the backgrounded sleep that became an orphan when its "
+            f"parent exited). The tracker did not observe the sleep "
+            f"during its polling window."
+        )
+        # Verify the sleep actually died
+        await asyncio.sleep(0.2)
+        assert not _pid_alive(sleep_pid), (
+            f"sleep PID {sleep_pid} survived tracker.stop_and_reap. The "
+            f"tracker recorded the PID but SIGKILL didn't deliver — "
+            f"likely a permission or signal-delivery bug."
+        )
+
+    try:
+        asyncio.run(_run())
+    finally:
+        # Safety net
+        subprocess.run(["pkill", "-9", "-f", "sleep 38383"], capture_output=True)
+
+
+# --- Module-level helper unit tests ----------------------------------------
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX-only test.",
+)
+def test_enumerate_descendants_returns_indirect_children(pila):
+    """`_enumerate_descendants(root_pid)` must walk transitively, not just
+    list direct children. Spawn a 3-deep chain and assert all 3 are
+    found."""
+    import subprocess
+    # outer bash → (sub-bash backgrounded with &) → sleep
+    # The outer bash MUST keep running (its trailing `wait` is what holds it
+    # alive) so the PPID chain stays intact while we measure. Without the
+    # `& wait` shape, outer bash would exec into the sub-bash via tail-call
+    # optimization and the chain would only be 2-deep.
+    leader = subprocess.Popen(
+        ["bash", "-c", "bash -c 'sleep 28282 & wait' & wait"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    import time
+    time.sleep(1.5)
+    try:
+        descs = pila._enumerate_descendants(leader.pid)
+        # Should find: inner bash (level 1), sleep (level 2)
+        assert len(descs) >= 2, (
+            f"_enumerate_descendants found only {len(descs)} descendants "
+            f"(expected at least 2 — inner bash + sleep). Walk is not "
+            f"transitive."
+        )
+    finally:
+        leader.kill()
+        subprocess.run(["pkill", "-9", "-f", "sleep 28282"], capture_output=True)
+        leader.wait()
+
+
+def test_enumerate_descendants_returns_empty_for_nonexistent_pid(pila):
+    """Sanity: a sentinel PID with no children returns empty set."""
+    assert pila._enumerate_descendants(999_999_999) == set()
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX-only test.",
+)
+def test_descendant_tracker_is_safe_on_nonexistent_pid(pila):
+    """`_DescendantTracker(sentinel_pid).stop_and_reap()` must not raise —
+    used in `_invoke`'s success path and must be idempotent even when the
+    leader has no descendants at all."""
+    import asyncio
+
+    async def _run():
+        tracker = pila._DescendantTracker(999_999_999)
+        tracker.start()
+        await asyncio.sleep(0.1)  # one poll cycle
+        leaked = await tracker.stop_and_reap()
+        assert leaked == 0
+        # Idempotent
+        leaked2 = await tracker.stop_and_reap()
+        assert leaked2 == 0
+
+    asyncio.run(_run())
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX-only test.",
+)
+def test_descendant_tracker_records_descendants_during_lifetime(pila):
+    """Verify the tracker actually accumulates PIDs across multiple poll
+    cycles, not just at start or stop. This guards against a regression
+    where the poll loop is broken (e.g. caught CancelledError too eagerly)
+    and only sees the descendant set at one moment."""
+    import asyncio
+    import subprocess
+
+    async def _run():
+        leader = await asyncio.create_subprocess_exec(
+            "bash", "-c", "sleep 18181 & wait",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        tracker = pila._DescendantTracker(leader.pid)
+        tracker.start()
+        # Wait for at least 2 poll cycles to catch the sleep
+        await asyncio.sleep(1.5)
+        # Snapshot what tracker has accumulated
+        accumulated = set(tracker._seen)
+        # Clean up
+        leader.kill()
+        await leader.wait()
+        leaked = await tracker.stop_and_reap()
+        subprocess.run(["pkill", "-9", "-f", "sleep 18181"], capture_output=True)
+
+        assert len(accumulated) >= 1, (
+            f"tracker accumulated 0 descendants during its polling lifetime "
+            f"(expected at least 1 — the sleep was alive for 1.5s and the "
+            f"poll interval is 0.5s)"
+        )
+
+    asyncio.run(_run())

@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-repo dependency provisioning — Phase 1½** (DESIGN §6½). The
+  orchestrator now installs each target repo's dependencies (and
+  selects the right runtime versions) inside the container before any
+  worker runs. Five layered steps: (1) optional `.pila-setup.sh` hook
+  for user-space tooling install (additional `mise install
+  <lang>@<version>` for languages beyond the LTS bake, CLI tools into
+  `~/.local/bin`, pre-populated fixtures) — runs as the non-root
+  `pila` user, so root-level system packages need a forked Dockerfile;
+  (2) **`mise`** resolves runtime versions
+  from `.nvmrc` / `.python-version` / `.tool-versions` /
+  `rust-toolchain.toml` (image-set
+  `MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS` flips the opt-in), with
+  `.go-version` synthesized from `go.mod` via
+  `MISE_OVERRIDE_CONFIG_FILENAMES` — and because that env var REPLACES
+  rather than merges discovery, pila copies any idiomatic-file pins
+  forward into the synthesized override so polyglot repos (e.g. Go +
+  `.nvmrc`) don't silently drop their non-Go pins; (3) a deterministic
+  **lockfile-detection table** emits install commands (pnpm > yarn >
+  npm precedence; uv > poetry > pipenv; Go modules, Cargo, Bundler);
+  polyglot repos like Rails-with-frontend emit **all** matching
+  commands, not just the first match; (4) a `provision` LLM worker
+  fires only when the table abstains (Java/Gradle, bare
+  `pyproject.toml`, polyglot Makefile) and is structurally bounded by
+  a schema + argv allowlist (the one documented §12 carve-out, see
+  DESIGN §6½); (5) **per-worktree replay** via `mise exec --` so each
+  fresh worktree's implementer sees the same toolchain.
+- **Image-baked LTS fallbacks via `mise install --system`.** Node LTS
+  and Python 3.12 land at `/usr/local/share/mise/installs/` so repos
+  that declare no version still get a predictable runtime. The
+  resolver checks the per-run user dir first then falls through to
+  the system layer (verified against
+  https://mise.jdx.dev/mise-cookbook/docker.html). A repo with zero
+  version pins (no `mise.toml`, no idiomatic file, no synthesized
+  override) skips `mise install` entirely and runs directly on the
+  image-baked LTS — avoids depending on mise's implementation-defined
+  behavior when no tools are declared.
+- **Five host-side caches** mounted into the container — `mise-data`
+  (so a Node 20.11.0 install survives across runs), `pnpm-store`,
+  `pip` cache, `GOMODCACHE`, and the whole `CARGO_HOME`. Concurrency
+  safety verdicts and the pip warm-once-then-replay pattern that
+  sidesteps pypa/pip#9034 are documented in IMPLEMENTATION §6½.
+- **`.pila-setup.sh`** at the repo root is the user-space escape
+  hatch the language layer can't install — `mise install
+  <lang>@<version>` for additional runtimes, CLI tools under
+  `~/.local/bin`, fixture pre-population. Runs as the non-root `pila`
+  user once per fresh run before mise; idempotent via state. Root-
+  level system packages (anything needing `apt-get install` or
+  writes to `/usr/*`) are out of scope: the container intentionally
+  ships no sudo. Workaround: maintain a fork of the pila Dockerfile
+  and override `IMAGE_TAG`.
+- **New `provision` worker type** (defaults to Opus). Independently
+  overridable via `--model-provision` / `PILA_MODEL_PROVISION` /
+  `model_provision` in `pila.toml` like every other worker.
+
 ### Fixed
 
 - **Worker timeout no longer dumps a 50-KB traceback.** When a worker
@@ -47,6 +103,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an auto-pick; user still passes `--run-id`.
 
 ### Changed
+
+- **Pila now runs inside a container per run.** Cleanup of `claude -p`
+  workers + every test runner / build / dev server they spawned is now
+  a Linux PID-namespace teardown rather than a heuristic PPID-walk in
+  Python. Ctrl-C reliably reaps everything; SIGKILL or hard crashes do
+  too (cgroup release is a kernel guarantee, not a Python signal
+  handler). New host requirement: a container runtime — Colima on
+  macOS, containerd + nerdctl natively on Linux. Setup per OS:
+  `docs/INSTALL.md`. The orchestrator code (`orchestrator/pila.py`)
+  is unchanged; the container/process-isolation work lives in the new
+  `pila` launcher, `Dockerfile`, and `scripts/container-entry.sh`.
+  See DESIGN.md §6 *Worker subtree termination* and IMPLEMENTATION.md
+  §0.5 *Container shape* for the architecture and code surface.
+
+- **`scripts/install.sh` now auto-installs the container runtime.** On
+  macOS the installer runs `brew install colima` and `colima start
+  --runtime containerd --mount-type virtiofs`. On Linux it dispatches
+  to the matching package manager (Debian/Ubuntu via `apt-get`,
+  Fedora/RHEL via `dnf`, Arch via `pacman`) for `containerd`, then
+  downloads the pinned `nerdctl` v2.3.1 binary from upstream (arch-aware
+  amd64/arm64), then `sudo systemctl enable --now containerd`. Pass
+  `--no-runtime-install` (or `PILA_NO_RUNTIME_INSTALL=1`) to keep the
+  pre-rollout behavior: detect the runtime, print the manual install
+  hint, and exit 1. Unknown distros fall back to the hint regardless.
+  Existing Docker Desktop / podman installs coexist with Colima/nerdctl
+  — no conflict detection is attempted.
+
+- **Default-mode runs now require the `gh` CLI on the host.** The
+  container image installs `gh`, but auth state at `~/.config/gh/` is
+  bind-mounted from the host. Run `gh auth login` on the host once
+  before running pila, or pass `--no-push` to skip the finalize PR
+  step. `git push` for HTTPS remotes uses bind-mounted
+  `~/.git-credentials`; for SSH remotes it uses bind-mounted `~/.ssh`.
+  *macOS caveat*: SSH agent forwarding is not available on Colima —
+  AF_UNIX sockets don't traverse the Lima VM boundary, and
+  `$SSH_AUTH_SOCK` typically sits under `/private/tmp/` (outside
+  Colima's auto-share scope). Passphrase-protected SSH keys won't work
+  inside the container on macOS; switch the remote to HTTPS (via
+  `gh auth setup-git`) or pass `--no-push`. Linux native users get the
+  agent socket mounted normally. The launcher detects `Darwin` and
+  skips the mount with a one-line note pointing at this workaround.
+
+- **Plugin mode (`/pila` from inside Claude Code) and terminal mode
+  share one container model.** The launcher detects `[ -t 0 ]` and
+  passes `-it` (terminal) or `-i` only (plugin/no-TTY). Plugin mode
+  reuses the existing `EXIT_NEEDS_ANSWERS=10` clarification dance
+  (write `.pila/pending-questions.json`, exit 10; the plugin agent
+  reads the file through the `/work` bind mount, asks the user in
+  chat, re-runs with `--answers`). No new mechanism — the container
+  is transparent.
 
 - **Ctrl-C is now resumable.** Earlier versions treated SIGINT as an
   explicit "throw this away" gesture and ran a full purge — worktrees,
@@ -161,6 +267,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape shared with `--no-push` to keep them from drifting.
 
 ### Removed
+
+- **The `uv`-based Python provisioning install path is gone.** The host
+  no longer needs Python. The `pila` launcher is now a portable bash
+  script that shells out to `nerdctl run`. The `scripts/install.sh`
+  runtime preflight on macOS checks for `colima` and on Linux checks
+  for `nerdctl`; it no longer installs `uv` or provisions Python 3.12.
+  Existing users upgrading: there is no migration — install the
+  container runtime per `docs/INSTALL.md` and re-run the installer.
 
 - **All legacy / backwards-compat code paths.** Pila now has **no
   migration path from prior versions** — start fresh. Specifically:

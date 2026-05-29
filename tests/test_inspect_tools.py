@@ -1,5 +1,5 @@
 """Coupling tests for INSPECT_TOOLS — the tool bucket for classifier,
-planner, and reconciler.
+planner, reconciler, and provision.
 
 These workers run in the real repo cwd (no worktree isolation), so they
 cannot use --dangerously-skip-permissions. INSPECT_TOOLS preserves the
@@ -48,7 +48,7 @@ def _entries(bucket: str) -> list[str]:
 
 def test_inspect_tools_has_bash_patterns(pila):
     """At least one Bash(<verb>:*) pattern must be present — that's the
-    whole point of the bucket. Without it, classifier/planner/reconciler
+    whole point of the bucket. Without it, classifier/planner/reconciler/provision
     can't run ls/find/cat without per-call permission prompts (which are
     never granted in -p mode)."""
     entries = _entries(pila.INSPECT_TOOLS)

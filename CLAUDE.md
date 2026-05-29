@@ -6,18 +6,31 @@ code surface; read this file first.
 
 ## Tech stack
 
-Python 3.10+, stdlib-only orchestrator. Both install paths route the
-`pila` launcher through [`uv`](https://docs.astral.sh/uv/), which
-provisions a hermetic Python 3.12 — the user is never asked to install
-Python themselves. The launcher falls back to system `python3` for
-direct-git-clone users on Python 3.10+. The orchestrator shells out to
-`claude -p` (Claude Code CLI, on the user's subscription — no API key),
-and uses git worktrees for parallel implementer isolation. `pytest` is
-the only dev dependency. See `docs/IMPLEMENTATION.md` §0 for the install
-surface.
+Python 3.10+, stdlib-only orchestrator. The orchestrator shells out
+to `claude -p` (Claude Code CLI, on the user's subscription — no API
+key) and uses git worktrees for parallel implementer isolation.
+`pytest` is the only dev dependency.
 
-Pila is small (~1600 LOC) and stays small. All control flow lives in
-one file: `orchestrator/pila.py`.
+**Pila runs inside a container.** The `pila` launcher shells out to
+`nerdctl run` to start a container per run (DESIGN §6 *Worker subtree
+termination*). The orchestrator runs as PID 1 inside; every worker
+(and every Bash tool call those workers make) lives in the same PID
+namespace. On Ctrl-C / SIGTERM / SIGKILL / crash, the kernel reaps
+the namespace — the abnormal-exit cleanup guarantee is the container
+boundary, not Python signal handling.
+
+Runtime: containerd + nerdctl. On Linux, native. On macOS, via
+[Colima](https://colima.run) (a Lima-managed Linux VM). See
+`docs/INSTALL.md` for per-OS install steps.
+
+Python is provisioned *inside the container* by the image (Python 3
+from Debian 12). The launcher itself is a portable bash script; it
+no longer needs `uv` or a host Python. See `docs/IMPLEMENTATION.md`
+§0 (install surface) and §0.5 (container shape).
+
+Pila is small (~1600 LOC of Python) and stays small. All control
+flow lives in one file: `orchestrator/pila.py`. The launcher and
+Dockerfile are the only other moving parts.
 
 ## The three-layer rule (load-bearing — read first)
 
@@ -133,11 +146,15 @@ tests/                      pytest suite
 ## Quick start
 
 ```bash
-# Install (one command — pick one):
+# One-time runtime setup (pila runs in a container — see docs/INSTALL.md):
+#   macOS:  brew install colima && colima start --runtime containerd --mount-type virtiofs
+#   Linux:  install containerd + nerdctl from your distro (apt, dnf, pacman, etc.)
+#
+# Install pila (one command — pick one):
 #   Inside Claude Code:  /plugin marketplace add enricai/pila
 #                        /plugin install pila@enricai-pila
 #   From a terminal:     curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.sh | bash
-# See README "Install" for details.
+# See docs/INSTALL.md for details.
 
 # Run on a task in the current git repo:
 ./pila "Fix the login timeout bug and add a regression test"
@@ -152,9 +169,9 @@ export PILA_SOURCE_OF_TRUTH=codebase   # or: research, both
 # …or commit a pila.toml at the repo root with: source_of_truth = codebase
 
 # Choose the model. Without overrides: judgment workers (classifier,
-# planner, reconciler, integrator) default to opus; acting workers
-# (implementer, conformer) default to sonnet. Per-worker overrides
-# exist via --model-<worker> / PILA_MODEL_<WORKER>. See
+# planner, reconciler, provision, integrator) default to opus; acting
+# workers (implementer, conformer) default to sonnet. Per-worker
+# overrides exist via --model-<worker> / PILA_MODEL_<WORKER>. See
 # docs/IMPLEMENTATION.md §2 "Model selection" for the full table.
 export PILA_MODEL=sonnet               # or: opus, haiku
 ./pila "task" --model opus

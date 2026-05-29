@@ -12,11 +12,15 @@ document never restates either.
 ## Prerequisites recap
 
 You need the `claude` CLI on `PATH` (logged in), `git`, and a git repo
-with `user.email` and `user.name` set and a clean working tree. Python
-is *not* a prerequisite — the install paths provision Python 3.12
-hermetically via `uv`. See
-[README "Install"](../README.md#install) for the one-command install
-(Claude Code marketplace or `curl | bash`), and
+with `user.email` and `user.name` set and a clean working tree. Pila
+runs inside a container, so you also need a container runtime: Colima
+on macOS (`brew install colima && colima start --runtime containerd
+--mount-type virtiofs`), or `containerd + nerdctl` natively on Linux.
+You do *not* need Python on the host — the image provisions it. For
+the full per-OS setup walkthrough see
+[`docs/INSTALL.md`](INSTALL.md); for the one-command pila install
+(Claude Code marketplace or `curl | bash`) see
+[README "Install"](../README.md#install), and
 [README "Requirements"](../README.md#requirements) for the full list.
 
 ## The example task
@@ -216,11 +220,11 @@ schema is documented in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) §8.
   committed per-repo default; outranked by env and CLI.
 - `--model sonnet|opus|haiku` — model for every worker this run.
   Without any override the per-worker defaults apply: judgment workers
-  (classifier, planner, reconciler, integrator) run on `opus`; the
+  (classifier, planner, reconciler, provision, integrator) run on `opus`; the
   acting workers (implementer, conformer) run on `sonnet`. Per-worker
   `--model-classifier`, `--model-planner`, `--model-reconciler`,
-  `--model-implementer`, `--model-integrator`, `--model-conformer`
-  flags override the global default. Env-var equivalents are
+  `--model-provision`, `--model-implementer`, `--model-integrator`,
+  `--model-conformer` flags override the global default. Env-var equivalents are
   `PILA_MODEL` (and `PILA_MODEL_<WORKER>` for the per-worker
   overrides); TOML keys are `model` / `model_<worker>` in
   `pila.toml`. Full precedence table in

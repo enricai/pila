@@ -4,17 +4,23 @@
 # Direct git-clone: `/path/to/pila/pila "your task description"`,
 # or symlink this file onto your PATH manually.
 #
-# Python is provisioned by `uv` (https://docs.astral.sh/uv/) when available —
-# the installer puts `uv` on your PATH, and `uv` manages a hermetic Python 3.12
-# under ~/.local/share/uv/python/. If `uv` is not installed, we fall back to
-# the system `python3` so direct git-clone users on Python 3.10+ still work.
+# pila runs inside a container — see docs/IMPLEMENTATION.md §0.5
+# "Container shape" and docs/DESIGN.md §6. This launcher:
+#   1. Resolves its own location (walking symlinks).
+#   2. Fast path: `--version` answers without a container so the installer's
+#      smoke test runs the moment the symlink is in place.
+#   3. Per-OS preflight: verifies a working container runtime.
+#   4. Builds the pila image once per version, reuses thereafter.
+#   5. Translates --inspect-dir paths into bind-mounts.
+#   6. Execs nerdctl run with the full mount table, adapting TTY flags
+#      ([-it] vs [-i]) to whether the launcher itself has a TTY.
 set -euo pipefail
 
-# Resolve symlinks (the curl|bash installer symlinks this script into
-# ~/.local/bin, but the orchestrator + prompts + scripts live alongside
-# the real launcher under $PILA_HOME). Loop until we hit the real
-# file; readlink -f isn't portable to BSD/macOS, so do it by hand. The
-# iteration cap prevents an unbounded spin on a pathological symlink loop.
+# --- resolve symlinks ----------------------------------------------------
+# The curl|bash installer symlinks this script into ~/.local/bin/pila, but
+# the Dockerfile + orchestrator source live alongside the real launcher under
+# $PILA_HOME (default ~/.pila). readlink -f isn't portable to BSD/macOS, so
+# walk by hand. (Same loop as the pre-container launcher — contract preserved.)
 SRC="${BASH_SOURCE[0]}"
 hops=0
 while [ -L "$SRC" ]; do
@@ -29,12 +35,396 @@ while [ -L "$SRC" ]; do
     *)  SRC="$(cd -P "$(dirname "$SRC")" && pwd)/$TARGET" ;;
   esac
 done
-HERE="$(cd -P "$(dirname "$SRC")" && pwd)"
-SCRIPT="$HERE/orchestrator/pila.py"
+PILA_REPO="$(cd -P "$(dirname "$SRC")" && pwd)"
+USER_REPO="$(pwd -P)"
 
-# Run `uv --version` (not just `command -v uv`) so a broken pyenv shim
-# or stale wrapper doesn't trap us in the uv branch.
-if uv --version >/dev/null 2>&1; then
-  exec uv run --quiet --python 3.12 --no-project python "$SCRIPT" "$@"
+# Image tag = pila:<version>. Version comes from plugin.json (single source of
+# truth — same one `pila --version` reads). The launcher only needs the value
+# for tagging, so a minimal extractor avoids needing python/jq at this stage.
+PILA_VERSION="$(awk -F'"' '/"version"/ {print $4; exit}' \
+                  "$PILA_REPO/.claude-plugin/plugin.json" 2>/dev/null || echo dev)"
+IMAGE_TAG="pila:$PILA_VERSION"
+
+# --- fast paths that don't need the container ----------------------------
+# `pila --version` should answer immediately without spinning up a container
+# — used by the installer's end-to-end smoke test and by anyone who just
+# wants to check what's installed.
+#
+# `--help` is NOT short-circuited: forwarding it through the container makes
+# the orchestrator's argparse render the full flag list (worker model
+# overrides, telemetry knobs, etc.), which a launcher-side summary would
+# silently truncate. The first --help pays a one-time image-build cost; every
+# subsequent invocation reuses the cached image and starts in ~2s.
+case "${1:-}" in
+  --version)
+    echo "pila $PILA_VERSION"
+    exit 0
+    ;;
+esac
+
+# --- platform preflight --------------------------------------------------
+OS="$(uname -s)"
+
+print_install_hint() {
+  case "$OS" in
+    Darwin)
+      cat >&2 <<'EOF'
+
+Install on macOS:
+  brew install colima
+  colima start --runtime containerd --mount-type virtiofs
+  # nerdctl shim is auto-installed by pila on first run; or manually:
+  #   colima nerdctl install
+
+(brew install nerdctl does NOT work on macOS — the nerdctl binary requires
+a Linux kernel. Colima ships nerdctl inside its VM and installs a host-side
+shim that proxies to it.)
+
+See docs/INSTALL.md for details.
+EOF
+      ;;
+    Linux)
+      cat >&2 <<'EOF'
+
+Install on Linux:
+  # Debian/Ubuntu:
+  sudo apt-get install -y containerd
+  # then install nerdctl from upstream:
+  #   https://github.com/containerd/nerdctl/releases
+  # Or distro packages where available (Arch: pacman -S nerdctl).
+  sudo systemctl enable --now containerd
+
+See docs/INSTALL.md for rootless mode and other distros.
+EOF
+      ;;
+    *)
+      echo "pila: unsupported OS: $OS (need macOS or Linux)" >&2
+      ;;
+  esac
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "pila: missing required command: $1" >&2
+    print_install_hint
+    exit 1
+  }
+}
+
+case "$OS" in
+  Darwin)
+    require colima
+    # Don't auto-start Colima — if the user has an existing setup with
+    # dockerd we'd clobber their preference. Give a clear hint instead.
+    if ! colima status >/dev/null 2>&1; then
+      echo "pila: Colima VM is not running." >&2
+      echo "  Start it with:  colima start --runtime containerd --mount-type virtiofs" >&2
+      exit 1
+    fi
+    # nerdctl reaches containerd via Colima's host-side shim
+    # (`colima nerdctl install`). The install writes to /usr/local/bin
+    # (root-owned on macOS) via `sudo`, which prompts interactively. In
+    # plugin mode (no TTY) the sudo prompt blocks forever; detect and bail
+    # with a clear hint instead of hanging.
+    if ! command -v nerdctl >/dev/null 2>&1; then
+      if [ -t 0 ]; then
+        echo "[pila] installing host-side nerdctl shim (one-time; may prompt for sudo)..." >&2
+        if ! colima nerdctl install >&2; then
+          echo "pila: failed to install nerdctl shim — run 'colima nerdctl install' manually" >&2
+          exit 1
+        fi
+      else
+        echo "pila: nerdctl shim is not installed and we have no terminal to run sudo." >&2
+        echo "  Run this once from a terminal, then re-invoke /pila:" >&2
+        echo "    colima nerdctl install" >&2
+        exit 1
+      fi
+    fi
+    if ! nerdctl info >/dev/null 2>&1; then
+      echo "pila: nerdctl cannot reach the container runtime." >&2
+      echo "  Ensure Colima was started with --runtime containerd:" >&2
+      echo "    colima stop && colima start --runtime containerd --mount-type virtiofs" >&2
+      exit 1
+    fi
+    # Colima auto-shares only paths under /Users/$USER by default. If any
+    # bind mount we're about to make falls outside, the mount silently
+    # appears empty inside the container. Warn early.
+    USER_HOME_PREFIX="/Users/$(id -un)"
+    check_under_home() {
+      case "$1" in
+        "$USER_HOME_PREFIX"|"$USER_HOME_PREFIX"/*) return 0 ;;
+        *)
+          echo "pila: warning — '$1' is outside $USER_HOME_PREFIX" >&2
+          echo "  and may appear empty in the container. Add it to Colima's" >&2
+          echo "  mount list: edit ~/.colima/default/colima.yaml's 'mounts:'" >&2
+          echo "  section, then 'colima restart'." >&2
+          return 1
+          ;;
+      esac
+    }
+    check_under_home "$USER_REPO" || true
+    check_under_home "$PILA_REPO" || true
+    ;;
+  Linux)
+    require nerdctl
+    if ! nerdctl info >/dev/null 2>&1; then
+      echo "pila: nerdctl cannot reach containerd." >&2
+      echo "  Ensure containerd is running:  systemctl status containerd" >&2
+      echo "  For rootless mode see docs/INSTALL.md." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "pila: unsupported OS: $OS" >&2
+    print_install_hint
+    exit 1
+    ;;
+esac
+
+# --- build image if not present (one-time, ~60-120s) --------------------
+if ! nerdctl image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+  echo "[pila] building container image (one-time; ~60-120s)..." >&2
+  nerdctl build \
+    --build-arg HOST_UID="$(id -u)" \
+    --build-arg HOST_GID="$(id -g)" \
+    -t "$IMAGE_TAG" \
+    "$PILA_REPO"
 fi
-exec python3 "$SCRIPT" "$@"
+
+# --- translate --inspect-dir paths into bind-mounts ---------------------
+# Each --inspect-dir path points at a host-absolute directory the
+# inspect-bucket workers need read access to (--add-dir under the hood).
+# Bind-mount each one read-only at /inspect/<basename> and rewrite the arg
+# so the in-container view matches. Paths from PILA_INSPECT_DIRS (colon-sep)
+# and pila.toml's inspect_dirs (comma-sep) need the same treatment — we
+# resolve them on the host and emit --inspect-dir CLI flags. PILA_INSPECT_DIRS
+# is cleared inside the container so resolve_inspect_dirs() picks up only
+# our rewritten CLI flags.
+INSPECT_MOUNTS=()
+REWRITTEN_ARGS=()
+INSPECT_NAMES=()
+
+collect_inspect_path() {
+  local host_path expanded resolved base mount_target user_repo_resolved
+  host_path="$1"
+  # Expand leading ~ — `cd` won't on its own.
+  case "$host_path" in
+    "~")   expanded="$HOME" ;;
+    "~/"*) expanded="$HOME/${host_path#~/}" ;;
+    *)     expanded="$host_path" ;;
+  esac
+  resolved="$(cd -P "$expanded" 2>/dev/null && pwd)" || {
+    echo "pila: --inspect-dir path not found: $host_path" >&2
+    exit 1
+  }
+  # If the path is inside $USER_REPO it's already visible at /work/<sub>,
+  # so a second mount under /inspect/ would be redundant. Warn and skip.
+  user_repo_resolved="$(cd -P "$USER_REPO" && pwd)"
+  case "$resolved" in
+    "$user_repo_resolved"|"$user_repo_resolved"/*)
+      # Quote $user_repo_resolved inside ${...#...} so bash strips a literal
+      # prefix instead of treating the value as a glob pattern (shellcheck
+      # SC2295). Paths typically lack glob metachars, but the cost of
+      # defensiveness is one quote-pair.
+      local rel="${resolved#"$user_repo_resolved"}"
+      echo "pila: --inspect-dir '$host_path' is inside the repo; skipping redundant mount" >&2
+      REWRITTEN_ARGS+=(--inspect-dir "/work${rel}")
+      return 0
+      ;;
+  esac
+  base="$(basename "$resolved")"
+  # Disambiguate basename collisions (e.g. two paths both named "src") by
+  # appending a numeric suffix. Use [[ ]] for glob-style membership test;
+  # surround with spaces so adjacent words don't match a substring.
+  local existing=" ${INSPECT_NAMES[*]:-} "
+  local candidate="$base"
+  local i=2
+  while [[ "$existing" == *" $candidate "* ]]; do
+    candidate="$base-$i"
+    i=$((i + 1))
+  done
+  base="$candidate"
+  mount_target="/inspect/$base"
+  INSPECT_NAMES+=("$base")
+  INSPECT_MOUNTS+=(-v "$resolved:$mount_target:ro")
+  REWRITTEN_ARGS+=(--inspect-dir "$mount_target")
+}
+
+# Pre-pass: PILA_INSPECT_DIRS env (colon-separated).
+if [ -n "${PILA_INSPECT_DIRS:-}" ]; then
+  OIFS="$IFS"; IFS=":"
+  for p in $PILA_INSPECT_DIRS; do
+    [ -z "$p" ] || collect_inspect_path "$p"
+  done
+  IFS="$OIFS"
+fi
+# Pre-pass: pila.toml inspect_dirs key (comma-separated).
+# The orchestrator's resolve_inspect_dirs() precedence is CLI > env > TOML,
+# so once we emit --inspect-dir CLI flags here, the in-container TOML pass
+# is bypassed. Best-effort parse: awk-grep the simple key=value form.
+if [ -f "$USER_REPO/pila.toml" ]; then
+  toml_dirs="$(awk -F= '/^[[:space:]]*inspect_dirs[[:space:]]*=/ {
+                          gsub(/^[[:space:]]*inspect_dirs[[:space:]]*=[[:space:]]*/, "", $0);
+                          gsub(/^"|"$/, "", $0);
+                          print; exit
+                        }' "$USER_REPO/pila.toml" 2>/dev/null || true)"
+  if [ -n "$toml_dirs" ]; then
+    OIFS="$IFS"; IFS=","
+    for p in $toml_dirs; do
+      # Trim whitespace.
+      p="$(printf '%s' "$p" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      [ -z "$p" ] || collect_inspect_path "$p"
+    done
+    IFS="$OIFS"
+  fi
+fi
+# Main pass: rewrite --inspect-dir in $@. The orchestrator's argparse
+# declares only --inspect-dir (no -i alias — see pila.py:6079), so we
+# intercept exactly that one form and let everything else flow through.
+prev_was_inspect=false
+for arg in "$@"; do
+  if $prev_was_inspect; then
+    collect_inspect_path "$arg"
+    prev_was_inspect=false
+    continue
+  fi
+  case "$arg" in
+    --inspect-dir)
+      prev_was_inspect=true
+      ;;
+    --inspect-dir=*)
+      collect_inspect_path "${arg#--inspect-dir=}"
+      ;;
+    *)
+      REWRITTEN_ARGS+=("$arg")
+      ;;
+  esac
+done
+
+# --- assemble auth/config mounts ----------------------------------------
+# ~/.claude/ should always exist by the time pila runs (the user already
+# uses Claude Code), but ~/.claude.json and ~/.gitconfig are files: nerdctl
+# silently creates a directory at the target if the source file is missing,
+# which would break claude / git. Skip with a warning instead.
+AUTH_MOUNTS=()
+if [ -d "$HOME/.claude" ]; then
+  AUTH_MOUNTS+=(-v "$HOME/.claude:/home/pila/.claude")
+else
+  echo "pila: $HOME/.claude not found — run \`claude\` at least once first" >&2
+  exit 1
+fi
+if [ -f "$HOME/.claude.json" ]; then
+  AUTH_MOUNTS+=(-v "$HOME/.claude.json:/home/pila/.claude.json")
+else
+  echo "pila: warning — $HOME/.claude.json not found; some Claude Code state may not persist" >&2
+fi
+if [ -f "$HOME/.gitconfig" ]; then
+  AUTH_MOUNTS+=(-v "$HOME/.gitconfig:/home/pila/.gitconfig:ro")
+else
+  echo "pila: warning — $HOME/.gitconfig not found; in-worktree commits will use defaults" >&2
+fi
+
+# --- finalize-phase auth: gh, git credentials, ssh agent -----------------
+# The orchestrator's default behavior at finalize is `git push` + `gh pr
+# create` (pila.py:5797, :5828). These need credentials the host has and the
+# container otherwise wouldn't. Each mount is conditional on the host source
+# existing — `--no-push` runs without any of these.
+if [ -d "$HOME/.config/gh" ]; then
+  # rw so `gh auth refresh` (if it fires) writes back to the host token store
+  AUTH_MOUNTS+=(-v "$HOME/.config/gh:/home/pila/.config/gh")
+fi
+if [ -f "$HOME/.git-credentials" ]; then
+  # HTTPS push via git's credential helper
+  AUTH_MOUNTS+=(-v "$HOME/.git-credentials:/home/pila/.git-credentials")
+fi
+if [ -d "$HOME/.ssh" ]; then
+  # SSH push: keys + known_hosts. Read-only — the agent socket below carries
+  # actual key material when keys are passphrase-protected.
+  AUTH_MOUNTS+=(-v "$HOME/.ssh:/home/pila/.ssh:ro")
+fi
+if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "$SSH_AUTH_SOCK" ]; then
+  # macOS: SSH_AUTH_SOCK is set by launchd to a /private/tmp/com.apple.launchd.*
+  # path, outside Colima's /Users/$USER auto-share. Even if the user manually
+  # added that path to colima.yaml's `mounts:`, AF_UNIX socket forwarding
+  # across the Lima VM boundary doesn't work reliably — the agent inside the
+  # container can't reach the host's launchd agent. Skip the mount and tell
+  # the user to use HTTPS push (gh + ~/.git-credentials / ~/.config/gh) or
+  # pass --no-push. On Linux native there's no VM, so the socket mount works.
+  if [ "$OS" = "Darwin" ]; then
+    echo "pila: note — SSH agent forwarding is not available on macOS Colima." >&2
+    echo "  If your origin uses SSH and your keys are passphrase-protected," >&2
+    echo "  switch the remote to HTTPS (gh auth setup-git) or pass --no-push." >&2
+  else
+    # Forward the SSH agent so passphrase-protected keys work inside the
+    # container. The container sees the agent at a stable path /ssh-agent.
+    AUTH_MOUNTS+=(-v "$SSH_AUTH_SOCK:/ssh-agent" -e "SSH_AUTH_SOCK=/ssh-agent")
+  fi
+fi
+
+# --- per-repo dependency caches (DESIGN §6½, IMPLEMENTATION §0.5) -------
+# Five host-side cache dirs survive across runs so:
+#   - mise doesn't re-install Node 20.11.0 every time the user runs pila
+#     against a repo with .nvmrc: 20.11.0,
+#   - pnpm / pip / Go / Cargo installs hit warm caches.
+# Created lazily (mkdir -p) on every pila invocation — cheap on existing
+# dirs, free of failure modes on first run.
+# Concurrency-safety per cache is documented in IMPLEMENTATION §0.5;
+# pip's pattern (warm once serially in phase_provision, hit cached
+# wheels in parallel from worktree replays) is documented in DESIGN §6½.
+mkdir -p "$HOME/.cache/pila/mise-data" \
+         "$HOME/.cache/pila/pnpm-store" \
+         "$HOME/.cache/pila/pip" \
+         "$HOME/.cache/pila/go-mod" \
+         "$HOME/.cache/pila/cargo"
+
+CACHE_MOUNTS=(
+  -v "$HOME/.cache/pila/mise-data:/home/pila/.local/share/mise"
+  -v "$HOME/.cache/pila/pnpm-store:/home/pila/.cache/pila/pnpm-store"
+  -v "$HOME/.cache/pila/pip:/home/pila/.cache/pila/pip"
+  -v "$HOME/.cache/pila/go-mod:/home/pila/.cache/pila/go-mod"
+  -v "$HOME/.cache/pila/cargo:/home/pila/.cache/pila/cargo"
+  -e "PNPM_STORE_PATH=/home/pila/.cache/pila/pnpm-store"
+  -e "PIP_CACHE_DIR=/home/pila/.cache/pila/pip"
+  -e "GOMODCACHE=/home/pila/.cache/pila/go-mod"
+  -e "CARGO_HOME=/home/pila/.cache/pila/cargo"
+)
+# MISE_DATA_DIR / MISE_SYSTEM_DATA_DIR are baked into the image as ENV
+# (Dockerfile) so the resolver and mount target are stable across
+# launcher invocations. Not user-tunable here.
+
+# --- run -----------------------------------------------------------------
+# --rm: container is removed on exit. Worktrees + .pila/ state persist on
+#       the host filesystem via the /work bind mount, so --resume still works.
+# Mount-table rationale lives in docs/IMPLEMENTATION.md §0.5.
+#
+# TTY flags adapt to whether the launcher itself has a controlling terminal:
+#   Terminal mode (real pty on stdin) → -it. The container gets a
+#     controlling TTY; pila's log() lines stream live and the user can
+#     answer `--clarify` prompts interactively via input().
+#   Plugin mode (Claude Code's Bash tool: no TTY) → -i only.
+#     Inside the container, sys.stdin.isatty() returns False, so pila's
+#     gather_answers and mid-execution clarification paths trigger the
+#     existing EXIT_NEEDS_ANSWERS=10 flow: write .pila/pending-questions.json
+#     (visible on the host via the /work bind mount), exit 10. The plugin
+#     agent reads the file, asks the user in chat, writes .pila/answers.json,
+#     re-runs the container with --answers.
+# Ctrl-C (terminal) or harness cancellation (plugin) → SIGINT to container
+# PID 1 → orchestrator exits → kernel reaps the PID namespace (DESIGN §6
+# *Worker subtree termination*). The cleanup guarantee is identical in
+# both modes.
+TTY_FLAGS="-i"
+[ -t 0 ] && TTY_FLAGS="-it"
+
+# Use ${arr[@]+"${arr[@]}"} so empty arrays expand to nothing under
+# `set -u` (bash 3.2, the macOS system default, otherwise errors).
+exec nerdctl run \
+  --rm $TTY_FLAGS \
+  --name "pila-$(date +%s)-$$" \
+  -e PILA_INSPECT_DIRS= \
+  -v "$USER_REPO:/work" \
+  -v "$PILA_REPO:/work/.pila-image:ro" \
+  ${AUTH_MOUNTS[@]+"${AUTH_MOUNTS[@]}"} \
+  ${CACHE_MOUNTS[@]+"${CACHE_MOUNTS[@]}"} \
+  ${INSPECT_MOUNTS[@]+"${INSPECT_MOUNTS[@]}"} \
+  -w /work \
+  "$IMAGE_TAG" ${REWRITTEN_ARGS[@]+"${REWRITTEN_ARGS[@]}"}

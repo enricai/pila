@@ -455,22 +455,77 @@ SIGTERM, SIGHUP, WorkerError, or any other exception:
   checkpoints under `.pila/runs/<run-id>/checkpoints/` survive too,
   so in-flight subtasks resume from where they left off.
 
-**Worker subtree termination on abnormal exit.** Cleanup must reach
-not just the direct `claude -p` child but every process *it*
-spawned (test runners, build tools, dev servers — whatever a
-`claude -p` worker invoked as a tool call). Signaling only the
-leader leaves grandchildren reparented to PID 1, where they survive
-the orchestrator's exit and continue consuming CPU until the user
-reaps them manually.
+**Worker subtree termination — kernel-enforced via the container
+boundary.** Cleanup must reach not just the direct `claude -p`
+child but every process *it* spawned (test runners, build tools,
+dev servers — whatever a `claude -p` worker invoked as a tool
+call). Signaling only the leader leaves descendants alive:
+Claude Code's Bash tool runs every command via `bash -c "…"` in
+its own POSIX session, and `run_in_background: true` deliberately
+detaches long-running commands further. PPID chains break by
+design, sessions break process-group kill, and reparenting hides
+survivors as orphans of init. POSIX gives no in-OS guarantee that
+ad-hoc lineage tracking can be made airtight against a tree that
+intentionally detaches.
 
-The contract: every abnormal-exit path terminates the worker's
-*entire* subprocess subtree before the orchestrator returns control
-to the shell, with a brief grace window for graceful shutdown
-followed by a forceful kill for anything still alive. This is a code
-guarantee (§12 *prompts are advisory, code enforces*), not a polite
-ask of `claude -p`. See IMPLEMENTATION.md "Concurrency model" for
-the POSIX mechanism (process-group isolation + group-wide signal
-delivery) that satisfies it.
+Pila therefore makes cleanup a **property of the runtime boundary,
+not a property of the orchestrator's signal handling**. The
+orchestrator and every worker it spawns run inside a single
+container (containerd-managed: on Linux native, on macOS via a
+Colima-managed Linux VM). When the orchestrator process exits —
+for *any* reason, including SIGKILL, segfault, OOM-kill, or power
+loss — the container's PID 1 dies and the Linux kernel reaps every
+process in the PID namespace via cgroup release. This is the same
+guarantee runc, containerd, Kubernetes, and every production
+container runtime rely on. There is no possible survivor: a process
+that detached into its own session, a daemon that double-forked,
+a vitest pool worker that reparented to init — all of them are
+inside the namespace and all of them get reaped by the kernel,
+not by any code pila wrote.
+
+The contract reads identically to before — every exit path
+(Ctrl-C, SIGTERM, SIGHUP, WorkerError, RateLimitedExit, any
+unhandled exception, plus the cases Python can't catch:
+SIGKILL and hard crashes) terminates the worker's *entire*
+subprocess subtree before resources are returned — but the
+mechanism is now load-bearing in a way prompt-level or
+heuristic-level cleanup never could be.
+
+The per-worker async cleanup that lives in `claude_p` (the PPID
+walk in `_terminate_proc_tree`, the `_DescendantTracker` polling
+loop) is *kept* — it is the fast happy path that reaps a single
+worker's subtree promptly on clean exit, so the next wave sees a
+quiet process table. But it is no longer the abnormal-exit
+guarantee. If it half-finishes under Ctrl-C, or fails to escalate
+SIGTERM→SIGKILL before asyncio shutdown closes the event loop,
+that is no longer a leak — the container boundary catches every
+survivor when the orchestrator exits.
+
+The container boundary holds across both invocation modes:
+
+- **Terminal mode** — the user runs `pila "task"` from a shell.
+  The launcher gives the container a controlling TTY (`-it`). The
+  orchestrator's `log()` lines stream live; clarification questions
+  use `input()`. Ctrl-C in the user's terminal delivers SIGINT to
+  container PID 1.
+- **Plugin mode** — Claude Code's Bash tool invokes the launcher
+  from inside another Claude Code session (no host TTY). The
+  launcher passes `-i` only. Inside the container,
+  `sys.stdin.isatty()` returns False, so the orchestrator's existing
+  no-TTY clarification path activates: it writes
+  `.pila/pending-questions.json` (visible on the host via the
+  `/work` bind mount) and exits with `EXIT_NEEDS_ANSWERS=10`. The
+  plugin agent reads the file, asks the user in chat, writes
+  `.pila/answers.json`, and re-runs the container with `--answers`.
+  Same exit codes, same file passing, same kernel teardown
+  guarantee. The container is transparent to the plugin's existing
+  exit-10 dance.
+
+See IMPLEMENTATION.md "Container shape" for the launcher's mount
+table, image build, per-OS preflight, and the one-line `[ -t 0 ]`
+TTY adaptation that selects between the two modes; and
+"Concurrency model" for the unchanged in-container worker cleanup
+that runs as the happy path.
 
 Earlier versions of pila gave Ctrl-C an explicit "throw this away"
 semantic with a full purge of state + branches + run dir. That made
@@ -489,10 +544,13 @@ hit (delivered as assistant-text content in the verbatim format
 `RateLimitedExit(reset_at, raw)`.
 The exception propagates through the existing asyncio cancellation
 chain — `_invoke`'s `BaseException` guard terminates the in-flight
-`claude -p` worker's entire process group and reaps it, sibling
-wave-tasks cancel through the same path — so no orphan subprocesses
-remain (see "Worker subtree termination on abnormal exit" above).
-Then:
+`claude -p` worker's full subprocess subtree (including detached
+backgrounded tool subprocesses) and reaps it, sibling wave-tasks
+cancel through the same path — so no orphan subprocesses remain (the
+per-worker async cleanup is the fast happy path; the container
+PID-namespace teardown is the abnormal-exit guarantee — see "Worker
+subtree termination — kernel-enforced via the container boundary"
+above). Then:
 
 - If `reset_at` was parsed cleanly from the literal Claude Code
   message format, pila runs the worktree-only cleanup, sleeps until
@@ -528,6 +586,131 @@ mid-flight) but it is silent unless there were worktrees to clean.
 
 ---
 
+## 6½. Per-repo dependency provisioning
+
+The container image ships a fixed base toolchain. Every target repo
+ships its own — different language versions, different package
+managers, different lockfiles. Two distinct things go wrong if the
+orchestrator just runs workers against a fresh checkout:
+
+- **Dependencies are missing.** A Next.js repo needs `pnpm install`
+  before any worker can `pnpm lint` or `pnpm test`. A Django repo
+  needs `uv sync`. A Go repo needs `go mod download`. The container
+  has none of these installed for the specific repo.
+- **Runtime versions are wrong.** A Next.js repo with `.nvmrc:
+  20.11.0` does not behave correctly under the image's baked Node
+  LTS. A Django repo with `.python-version: 3.11.7` should not run
+  on Python 3.12. Mismatched runtimes manifest as opaque failures
+  far from the cause — a worker reports a passing test under the
+  wrong Python, the integration step finds the version mismatch
+  later, the user sees a confusing failure.
+
+A third compounding factor: `git worktree add` checks out tracked
+files only. Untracked artifacts — `node_modules`, `.venv`, build
+outputs — are *not* copied from the main checkout. Even if the host
+repo were fully installed, every per-subtask worktree would start
+empty. So provisioning has to land *in* the container, *before* a
+worker reaches a worktree.
+
+The orchestrator addresses both with a dedicated phase between
+classification and planning, layered top-to-bottom by determinism:
+
+1. **`.pila-setup.sh` hook.** Optional, repo-owned. If the repo
+   needs user-space tooling the language layer can't install — a
+   language version mise supports beyond the LTS bake (Ruby, Java,
+   Rust), an additional CLI tool installed under `~/.local/bin`,
+   pre-populated fixtures the workers need — the repo commits a
+   script that handles it. The orchestrator execs it inside the
+   container as the non-root `pila` user (the image deliberately
+   does not ship `sudo`). Repo author controls trust; the script
+   runs in the same container that runs the workers.
+
+   System packages requiring root (apt-get-installable libraries,
+   anything writing to `/usr/*` or `/etc/*`) are out of scope for
+   the hook — the container's unprivileged user model can't satisfy
+   them. A repo with that need maintains a fork of the pila
+   Dockerfile that installs the package at image-build time and
+   overrides `IMAGE_TAG`.
+2. **Runtime version resolution.** The orchestrator delegates to
+   a polyglot version manager that reads the repo's existing
+   version declarations (the same files repo authors have already
+   been committing for years — `.nvmrc`, `.python-version`,
+   `.tool-versions`, `rust-toolchain.toml`, `.go-version`).
+   Matching toolchain versions install into a cache that
+   survives across runs. If a repo declares nothing, the
+   image-baked LTS for Node and Python is the floor — the
+   resolver checks the per-run cache first, falls through to the
+   image-baked layer. This means the runtime selection has no
+   model in the loop; the version manager's parser is the
+   enforcement.
+3. **Deterministic install-command detection.** A lockfile-keyed
+   table maps observable file presence to the install command(s):
+   a pnpm lockfile means `pnpm install`, a `uv.lock` means
+   `uv sync`, a `Gemfile.lock` means `bundle install`. Polyglot
+   repos (Rails with both a Ruby lockfile and a JS one) emit
+   *all* matching commands, not the first match — silently
+   dropping a frontend install would leave half the workers
+   broken. When the table returns a non-empty result the
+   orchestrator uses it; there is no model in this path either.
+4. **LLM provision worker — fallback.** When the table returns
+   empty (Java with Gradle, a bare `pyproject.toml` without
+   lockfile, a polyglot Makefile-driven setup), the orchestrator
+   invokes a `claude -p` worker whose only job is reading the
+   repo's README and configuration files and emitting a JSON
+   recipe. The recipe is schema-validated, the commands inside
+   it are restricted by an argv-allowlist, and any deviation
+   from the schema rejects the worker. This is a *deliberate*
+   exception to §12 — see below.
+5. **Per-worktree replay.** Each fresh worktree is dependency-
+   less by design. After `git worktree add`, the orchestrator
+   replays the install commands against the new worktree under
+   the same version-manager activation. The package-manager
+   caches are shared across worktrees of the same run, so the
+   second worktree's install is fast even though it's a fresh
+   command.
+
+### The §12 carve-out
+
+Step 4 is the only place in pila where a worker's output drives a
+binding decision instead of advising one. The central principle of
+§12 is that prompts are advisory and code enforces; an LLM recipe
+that the orchestrator then *runs* inverts that. The carve-out is
+justified by three constraints that contain it:
+
+1. **It only fires when the table returns empty.** The 80% of
+   repos with conventional lockfiles never reach the worker. The
+   model sees the genuinely ambiguous tail, which is where
+   human judgment would be doing the work anyway.
+2. **The recipe is mechanically bounded.** Every command's
+   `argv[0]` must come from a fixed allowlist of package managers.
+   Shell metacharacters and traversing working directories are
+   rejected. The worker cannot emit `sudo`, cannot pipe into
+   `sh`, cannot reach outside the repo. The §12 principle ("any
+   guarantee that matters and can be checked mechanically lives
+   in code") still holds — the *guarantee* is in the validator.
+3. **It is the only documented exception.** Any future feature
+   that wants to lean on a worker's structured output for binding
+   decisions has to add its own §-level justification, not point
+   at this one. Documenting the carve-out explicitly is what
+   prevents it from becoming precedent.
+
+The alternative — refusing the run when the table doesn't match —
+would be strictly more §12-compliant but worse for the user. The
+carve-out is a deliberate trade.
+
+### Resume
+
+Provisioning runs inside the same fresh-run branch of `orchestrate()`
+that runs classify, plan, and schedule — none of which re-execute on
+`--resume`. The resume path loads state and jumps to execution; the
+recipe lives in state, the version-manager cache survives across
+runs on disk, and workers see the right toolchain without anyone
+re-running provisioning. There is no top-of-function idempotency
+check because the structure of `orchestrate()` already provides
+it. (See *§12*.)
+
+---
+
 ## 7. The worker contract
 
 Every worker is a separate process with its own context. The orchestrator and a
@@ -544,7 +727,7 @@ worker communicate through a strict contract:
 What happens after a hard worker error depends on whether partial progress can
 be salvaged. An **implementer** has a worktree branch and possibly a checkpoint,
 so its failure is converted into a handoff: a fresh implementer can continue.
-The **classifier, planner, reconciler, and integrator** have no partial-progress
+The **classifier, planner, reconciler, provision, and integrator** have no partial-progress
 artifact to hand off — there is nothing for a successor to continue from — so
 their hard failure aborts the run with state saved for `--resume`. The
 **conformer** has commits but its phase is advisory, so a hard failure surfaces
@@ -1039,9 +1222,9 @@ the *principle* — correctable-mistake versus broken-worker — is the design.
 
 ## 14. Telemetry, judging, and self-healing
 
-Every LLM call in Pila passes through one of the six worker types in
-`WORKER_TYPES`: `classifier`, `planner`, `reconciler`, `implementer`,
-`integrator`, or `conformer`. Each worker type is a distinct **call type** — a
+Every LLM call in Pila passes through one of the seven worker types in
+`WORKER_TYPES`: `classifier`, `planner`, `reconciler`, `provision`,
+`implementer`, `integrator`, or `conformer`. Each worker type is a distinct **call type** — a
 first-class identifier that partitions every captured call into its role in the
 system. The call_type partition is exactly `WORKER_TYPES`: one call_type per
 worker role, no overlap, no gap.
