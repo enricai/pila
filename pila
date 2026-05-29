@@ -361,6 +361,33 @@ if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "$SSH_AUTH_SOCK" ]; then
   fi
 fi
 
+# --- forward Claude Code OAuth token ------------------------------------
+# On macOS, Claude Code stores its OAuth token in Keychain (an IPC
+# service the container can't reach) rather than in the bind-mounted
+# ~/.claude/ files. Without forwarding, `claude -p` inside the container
+# fails preflight with "Not logged in" even though the host is logged in.
+#
+# The user extracts the token once and exports CLAUDE_CODE_OAUTH_TOKEN
+# in the shell they run pila from. We forward it pass-through (no
+# =value form), which has nerdctl read the value from the launcher's
+# own env at exec time. The token never appears on the host's argv-
+# visible command line — `ps -ef` shows only "-e CLAUDE_CODE_OAUTH_TOKEN".
+#
+# On Linux native, Claude Code stores credentials at
+# ~/.claude/credentials.json — the existing -v $HOME/.claude bind mount
+# carries that file through. The env var is typically unset there and
+# this block is a no-op; the container falls back to file-based creds.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  AUTH_MOUNTS+=(-e "CLAUDE_CODE_OAUTH_TOKEN")
+elif [ "$OS" = "Darwin" ]; then
+  echo "pila: note — CLAUDE_CODE_OAUTH_TOKEN is not set." >&2
+  echo "  macOS keeps the Claude Code OAuth token in Keychain, which the" >&2
+  echo "  container can't read. Export it in the shell you run pila from:" >&2
+  echo "    export CLAUDE_CODE_OAUTH_TOKEN=\"\$(security find-generic-password \\" >&2
+  echo "      -s 'Claude Code-credentials' -w | python3 -c \\" >&2
+  echo "      'import sys,json; print(json.load(sys.stdin)[\"claudeAiOauth\"][\"accessToken\"])')\"" >&2
+fi
+
 # --- per-repo dependency caches (DESIGN §6½, IMPLEMENTATION §0.5) -------
 # Five host-side cache dirs survive across runs so:
 #   - mise doesn't re-install Node 20.11.0 every time the user runs pila

@@ -65,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Claude Code auth now works inside the container on macOS.** Claude
+  Code stores its OAuth token in macOS Keychain (an IPC service the
+  container can't reach), not in the bind-mounted `~/.claude/` files —
+  so `claude -p` inside the container failed preflight with "Not logged
+  in" even when the host was logged in. The launcher now forwards
+  `CLAUDE_CODE_OAUTH_TOKEN` pass-through when set in the invoking
+  shell (no `=value`, so the token never appears in `ps -ef`). On
+  macOS, if the var is unset, the launcher prints a one-line note
+  with the `security find-generic-password` extraction command. On
+  Linux native the file-based `~/.claude/credentials.json` continues
+  to ride the existing bind mount; no behavior change.
+
 - **Worker timeout no longer dumps a 50-KB traceback.** When a worker
   hit `worker_timeout_sec` (default 5400s / 90 min), `_invoke` raised
   `subprocess.TimeoutExpired` which escaped `run_implementer`'s
