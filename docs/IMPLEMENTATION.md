@@ -667,9 +667,9 @@ config is caught before any worker spawns. Valid values are
 > var are one-off overrides, while `pila.toml` is the per-repo default.
 
 Maps to: `resolve_source_of_truth` resolution pattern in `pila.py`
-(`_read_toml_key` + env + CLI precedence). The code counterpart
-(`resolve_runtime`) and the `PILA_RUNTIME` / `--runtime` argparse wiring
-are specified here and implemented by downstream subtasks.
+(`_read_toml_key` + env + CLI precedence). The code counterpart is
+`resolve_runtime()` in `pila.py`; constants are `RUNTIME_VALUES`,
+`RUNTIME_ENV`, `RUNTIME_FILE`; argparse flag is `--runtime {local,fly}`.
 
 ### Prompt loading and the shared filter fragment
 
@@ -1046,6 +1046,7 @@ All in `pila.py`, in execution order. This is the concrete catalogue behind
 | Check | Catches |
 |-------|---------|
 | `resolve_source_of_truth()` at startup | invalid value in `pila.toml`, `PILA_SOURCE_OF_TRUTH`, or `--source-of-truth` — caught before any worker spawns, not mid-planner |
+| `resolve_runtime()` at startup | invalid value in `pila.toml`, `PILA_RUNTIME`, or `--runtime` — caught before any worker spawns |
 | `resolve_models()` at startup | invalid model alias in `pila.toml`, any `PILA_MODEL[_*]` env var, or any `--model[-*]` CLI flag — caught before any worker spawns |
 | `git user.email` / `user.name` set | commits would fail silently without identity |
 | working tree clean | dirty tree → ambiguous diffs, corrupt merge history |
@@ -2133,6 +2134,7 @@ enforcement functions:
 | Test file | Function under test |
 |-----------|----------------------|
 | `test_resolve_source_of_truth.py` | `resolve_source_of_truth()` |
+| `test_resolve_runtime.py` | `resolve_runtime()` — CLI > env > TOML > default `local` precedence, both valid values, invalid-value die() paths, empty/whitespace env handling |
 | `test_resolve_models.py` | `resolve_models()` — per-worker precedence (CLI > env > TOML), defaults, validation, empty/whitespace handling |
 | `test__read_toml_key.py` | `_read_toml_key()` — the shared `pila.toml` line parser used by both resolvers |
 | `test_gather_answers_validation.py` | the source-of-truth validation gate in `gather_answers()` |
