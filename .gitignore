@@ -26,6 +26,13 @@ pila.log
 # Working notes — kept locally as a reference, not a deliverable.
 foo.txt
 
+# Environment files — never tracked. May hold secrets (API keys,
+# tokens, DB credentials). The `.env.example` template form is
+# allowed through explicitly so projects can commit a documented stub.
+.env
+.env.*
+!.env.example
+
 # Test artifacts
 .pytest_cache/
 .coverage

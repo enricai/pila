@@ -16,7 +16,9 @@
 
 Pila ships two install paths. Both ultimately invoke the on-disk
 `pila` launcher; the difference is who put it there and how the
-user reaches it.
+user reaches it. The launcher itself is a portable bash script —
+the host needs neither Python nor `uv`. Everything Python lives
+inside the container (DESIGN §6 / §0.5 below).
 
 ### Files
 
@@ -24,21 +26,23 @@ user reaches it.
 |------|---------|
 | `.claude-plugin/marketplace.json` | Single-plugin marketplace manifest. Makes the repo itself discoverable via `/plugin marketplace add enricai/pila` from inside Claude Code. Points at `.` so Claude Code reads the sibling `.claude-plugin/plugin.json`. |
 | `.claude-plugin/plugin.json` | Existing plugin manifest (commands, skills, metadata). The `version` field is the single source of truth for `pila --version`. |
-| `scripts/install.sh` | The `curl \| bash` shell installer. Preflight → bootstrap `uv` → provision Python 3.12 → clone → symlink → verify. Self-contained bash; deps: `bash`, `curl`, `git`. |
-| `pila` (launcher) | Routes through `uv run --python 3.12 --no-project python orchestrator/pila.py "$@"` when `uv` is on `PATH`; falls back to `python3` when not. The fallback preserves backward compatibility for direct git-clone users. |
+| `scripts/install.sh` | The `curl \| bash` shell installer. Preflight (git/claude/curl) → runtime preflight (colima on macOS, nerdctl+containerd on Linux) → clone → symlink → verify. Self-contained bash; deps: `bash`, `curl`, `git`. |
+| `pila` (launcher) | Portable bash. Symlink-walks to its own location, runs the per-OS runtime preflight, builds the pila image once per version, and execs `nerdctl run` with TTY flags adapted via `[ -t 0 ]` (see §0.5). Fast paths for `--version` skip container startup. |
+| `Dockerfile` | Image recipe (Debian 12 + Node + pnpm + claude CLI). Built locally on first run, tagged `pila:<VERSION>`. |
+| `scripts/container-entry.sh` | Container PID 1. `cd /work && exec python3 /work/.pila-image/orchestrator/pila.py "$@"`. |
 
-### Python runtime — provisioned by `uv`
+### Python runtime — provisioned inside the container
 
-Pila requires Python 3.10+. Both install paths satisfy that requirement
-*for the user* by routing the launcher through [`uv`](https://docs.astral.sh/uv/),
-Astral's Rust-written Python toolchain. `uv` downloads and pins a managed
-3.12 interpreter under `~/.local/share/uv/python/`. The user's system
-Python (or its absence) is irrelevant.
+Pila requires Python 3.10+. The container image installs Debian 12's
+`python3` (currently 3.11), which satisfies the requirement. The host
+needs no Python at all. The orchestrator's source is bind-mounted from
+`$PILA_HOME` into `/work/.pila-image/` at runtime, *not* baked into the
+image — so iterating on `orchestrator/pila.py` does not require an image
+rebuild.
 
 The orchestrator itself remains stdlib-only — no `pip install`, no
-`pyproject.toml`, no PyPI release. `uv` is purely a *launcher* concern
-that solves "is the right Python available." `pytest` is still the only
-dev dependency.
+`pyproject.toml`, no PyPI release. `pytest` is still the only dev
+dependency, run on the host against the bind-mounted source.
 
 ### Path A — Claude Code plugin marketplace (primary)
 
@@ -54,7 +58,8 @@ Claude Code clones the repo into its plugin directory and registers the
 `commands/` and `skills/` entries. `/pila` then runs the plugin
 skill at `commands/pila.md`, which shells out to the on-disk
 `pila` launcher in the cloned plugin directory — and through it,
-to `uv` and the managed Python.
+to `nerdctl run`. See §0.5 for the launcher's per-mode (terminal vs
+plugin) TTY adaptation.
 
 ### Path B — `curl | bash` installer (secondary)
 
@@ -64,24 +69,23 @@ curl -fsSL https://raw.githubusercontent.com/enricai/pila/main/scripts/install.s
 
 The script:
 
-1. **Preflight**: verifies `git` and `claude` are on `PATH`. Does *not*
-   check Python — `uv` handles that. Missing deps print a
-   platform-specific remediation hint and the script exits non-zero.
-2. **Installs `uv` if missing**, via Astral's official installer
-   (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Statically
-   linked binary; no Python required to bootstrap. Prints what it is
-   about to do first.
-3. **Provisions Python 3.12** via `uv python install 3.12` so the
-   first `pila` invocation does not pay the download cost.
-4. **Clones** `enricai/pila` to `$PILA_HOME` (default
-   `~/.pila`). `git clone --depth 1` for fresh installs; `git pull
-   --ff-only` for upgrades.
-5. **Symlinks** `$PILA_HOME/pila` → `~/.local/bin/pila`.
-   Creates `~/.local/bin` if missing. Does not touch system directories.
-6. **PATH check**: if `~/.local/bin` is not in `$PATH`, prints (does
+1. **Preflight**: verifies `git`, `claude`, and `curl` are on `PATH`.
+   Missing deps print a platform-specific remediation hint and the
+   script exits non-zero.
+2. **Runtime preflight**: per `uname -s`. On macOS: verifies `colima`
+   is installed and the VM is running. On Linux: verifies `nerdctl`
+   is installed and reaches containerd. Prints copy-pasteable install
+   hints on failure (`brew install colima` / distro package commands).
+   Does NOT auto-install brew/apt packages — that's the user's choice.
+3. **Clones** `enricai/pila` to `$PILA_HOME` (default `~/.pila`).
+   `git clone --depth 1` for fresh installs; `git pull --ff-only` for
+   upgrades.
+4. **Symlinks** `$PILA_HOME/pila` → `~/.local/bin/pila`. Creates
+   `~/.local/bin` if missing. Does not touch system directories.
+5. **PATH check**: if `~/.local/bin` is not in `$PATH`, prints (does
    not silently edit) the exact shell-rc line to add, based on `$SHELL`.
-7. **Verifies** by invoking `pila --version`. A green exit proves
-   the full chain works: launcher → uv → managed Python → orchestrator.
+6. **Verifies** by invoking `pila --version` (the launcher's fast path
+   answers without spinning up a container — see below).
 
 Supports `--dry-run` (prints actions without executing) and
 `--prefix DIR` (overrides `PILA_HOME`).
@@ -89,19 +93,252 @@ Supports `--dry-run` (prints actions without executing) and
 ### `--version`
 
 `pila --version` reads `.claude-plugin/plugin.json`'s `version`
-field via stdlib `json` and prints it to stdout. Single source of truth —
-no `__version__` constant in the orchestrator. Used by `install.sh` as
-its end-to-end smoke test.
+field — single source of truth. Two parallel readers:
 
-### Backward compatibility
+- **Orchestrator** (`_read_version()` in `pila.py`): stdlib `json` load.
+  Exercised by `tests/test_version_flag.py`.
+- **Launcher** (bash `awk` extraction): used by the fast path that
+  short-circuits container startup. Both readers return the same value
+  on the same `plugin.json`, and `tests/test_version_flag.py` guards
+  the canonical surface.
 
-The launcher's `python3` fallback means existing direct-git-clone users
-who already have Python 3.10+ on `PATH` and never run `install.sh`
-continue to work unchanged. The `uv` path is the new default for users
-on either of the two install paths; the fallback is the escape hatch.
+`install.sh` uses `pila --version` as its end-to-end smoke test — and
+because the fast path doesn't require a running container, the smoke
+test runs the moment the symlink is in place.
 
 Maps to `DESIGN.md`: §2 (no plugin-spawned subagents — the launcher is
-plain process exec, not in-session orchestration).
+plain process exec, not in-session orchestration). §6 *Worker subtree
+termination* and §0.5 of this document describe what runs inside the
+container the launcher starts.
+
+---
+
+## 0.5. Container shape
+
+Pila runs entirely inside a single container per run (DESIGN §6 *Worker
+subtree termination*). The orchestrator is PID 1 in the container;
+every `claude -p` worker it spawns is a child process in the same PID
+namespace; every Bash tool call those workers make lands in the same
+namespace too. When PID 1 exits, the kernel reaps the namespace —
+which is the abnormal-exit cleanup guarantee.
+
+### Runtime requirements per OS
+
+| OS | Container engine | CLI | VM? |
+|----|------------------|-----|-----|
+| macOS (arm64 or x86_64) | containerd inside a Colima-managed Linux VM | `nerdctl` host-side shim (`colima nerdctl install`) | Yes — managed by Colima |
+| Linux (any distro with containerd) | containerd native | `nerdctl` from distro or upstream | No |
+
+The launcher detects `uname -s` and runs the right preflight. On macOS:
+require `colima` on `PATH`, check `colima status`, auto-install the
+`nerdctl` shim if missing (via `colima nerdctl install`), then check
+`nerdctl info` reaches the runtime. On Linux: require `nerdctl` on
+`PATH` and `nerdctl info` succeeds. Both paths print a copy-pasteable
+install hint on failure and exit non-zero — pila does not invoke
+`brew`, `apt`, `dnf`, or `pacman` itself.
+
+`brew install nerdctl` does NOT work on macOS — the Homebrew formula
+has `Requires: Linux` because the nerdctl binary talks directly to a
+containerd Unix socket. Colima's `colima nerdctl install` is the
+supported macOS path; it drops a host-side shim on `$PATH` that
+proxies every invocation to nerdctl inside the VM.
+
+### Image build
+
+`Dockerfile` at the repo root. Built locally on first run
+(`nerdctl image inspect "$IMAGE_TAG"` miss → `nerdctl build`).
+`IMAGE_TAG=pila:<VERSION>` so a pila upgrade triggers a fresh build
+once and reuses the layer cache thereafter. ~60–120s first build,
+subsequent runs < 3s.
+
+Base layers (top-down):
+
+- `debian:12-slim` — minimal, predictable, glibc-based.
+- `apt-get install`: `ca-certificates`, `curl`, `git`, `openssh-client`,
+  `python3`, `python3-pip`, `build-essential`. The build tools cover
+  native-module compilation in `npm install` (sharp, bcrypt, esbuild
+  fallback, etc.) so `node-gyp` doesn't fail on first run.
+- Node.js LTS, arch-aware via `TARGETARCH` / `dpkg --print-architecture`
+  → `arm64` → `linux-arm64` tarball, `amd64` → `linux-x64`. Pinned via
+  `ARG NODE_VERSION` so the version is reproducible across builds.
+- `pnpm` (pinned), `npm install -g @anthropic-ai/claude-code` (the
+  `claude` CLI workers invoke; pila enforces ≥ 2.1.22 at runtime).
+- Non-root `pila` user created with `--build-arg HOST_UID/HOST_GID`
+  matching the host user. This is what makes files the container
+  writes into `/work/.pila/` and the worktrees keep the host user's
+  ownership.
+- `WORKDIR /work`, `ENTRYPOINT ["/work/.pila-image/scripts/container-entry.sh"]`.
+
+Note the two `.pila*` paths inside the container:
+
+- **`/work/.pila/`** is the run-state directory inside the user's
+  repo (state.json, logs, worktrees, telemetry). It lives on the
+  host filesystem via the `/work` bind mount and persists across
+  container runs.
+- **`/work/.pila-image/`** is the read-only bind mount of `$PILA_HOME`
+  on the host — pila's own source tree. The ENTRYPOINT script and
+  `orchestrator/pila.py` are read from there, never written to.
+
+The container's PID 1 (the entry script) reads from `.pila-image/`
+and writes to `.pila/`. Confusing the two would either break runs
+(writing to the read-only mount) or corrupt the install (writing to
+the source tree).
+
+### Entrypoint and source mounting
+
+`scripts/container-entry.sh` is exec'd as PID 1:
+
+```sh
+#!/bin/sh
+set -e
+cd /work
+exec python3 /work/.pila-image/orchestrator/pila.py "$@"
+```
+
+The orchestrator's source lives at `/work/.pila-image/` (read-only
+bind mount from `$PILA_HOME` on the host), *not* baked into the
+image. Iterating on `orchestrator/pila.py` therefore does not need
+an image rebuild — edit the file on the host, next `pila` invocation
+picks it up.
+
+### Bind-mount table
+
+The launcher passes the following mounts to `nerdctl run`:
+
+| Host path | Container path | Mode | Purpose |
+|---|---|---|---|
+| `$(pwd -P)` (user repo) | `/work` | rw | The repo pila operates on. Worktrees and `.pila/` state live here. Writes flow back to the host so `--resume` works across container runs. |
+| `$PILA_HOME` (pila install dir) | `/work/.pila-image` | ro | Orchestrator source + Dockerfile + prompts. Read-only because the container has no business mutating the install. |
+| `~/.claude` | `/home/pila/.claude` | **rw** | Claude Code session state (history, sessions, projects, stats-cache, caches). `claude` actively writes here during runs — read-only would break workers. |
+| `~/.claude.json` | `/home/pila/.claude.json` | rw | Same — `claude` updates it during sessions. |
+| `~/.gitconfig` | `/home/pila/.gitconfig` | ro | User/email for in-worktree commits. Pila has no business modifying it. |
+| `$CLAUDE_CODE_OAUTH_TOKEN` (env var) | `CLAUDE_CODE_OAUTH_TOKEN` env var | — | Pass-through env forwarding (`-e CLAUDE_CODE_OAUTH_TOKEN` with no `=value`, so the token never appears in `ps -ef` on the host). Bridges the macOS-only gap where Claude Code keeps its OAuth token in Keychain (an IPC service the container can't reach) rather than in the bind-mounted `~/.claude/` files. On Linux native the token lives in `~/.claude/credentials.json` and rides the existing `~/.claude` bind mount, so this forwarding is typically unset and a no-op. If unset on macOS the launcher prints a one-line note with the Keychain-extraction command. |
+
+The four host-auth mounts (`~/.config/gh`, `~/.git-credentials`, `~/.ssh`,
+`$SSH_AUTH_SOCK`) that earlier versions of pila bind-mounted **no longer
+exist** — finalize moved to the host (DESIGN §6 *Finalization*), so
+`git push` and `gh pr create` run with the host's working auth state and
+don't need to be forwarded into the container. The macOS-only "SSH agent
+forwarding is not available" note is gone for the same reason.
+| `~/.cache/pila/mise-data` | `/home/pila/.local/share/mise` | rw | Mise's `MISE_DATA_DIR` (per-repo runtime installs, plugins, cache). Lives in the user dir so the resolver checks it first then falls through to the image-baked `MISE_SYSTEM_DATA_DIR=/usr/local/share/mise` for the LTS fallback (DESIGN §6½). |
+| `~/.cache/pila/pnpm-store` | `/home/pila/.cache/pila/pnpm-store` | rw | pnpm content-addressable store. Safe for concurrent installs across worktrees (pnpm/discussions#10702). |
+| `~/.cache/pila/pip` | `/home/pila/.cache/pila/pip` | rw | pip HTTP + wheels cache. Wheel-build race pypa/pip#9034 is bypassed by pila's warm-once-then-replay pattern: phase_provision pre-builds wheels serially, worktree replays hit cache (DESIGN §6½). |
+| `~/.cache/pila/go-mod` | `/home/pila/.cache/pila/go-mod` | rw | `GOMODCACHE`. Concurrent-safe via per-module-version `flock` in `cmd/go/internal/modfetch`. |
+| `~/.cache/pila/cargo` | `/home/pila/.cache/pila/cargo` | rw | Whole `CARGO_HOME` (registry + bin + config.lock). Mounting only `registry/` breaks `config.lock` (cargo#11376). Concurrent-safe via cargo's documented flock semantics. |
+| Each `--inspect-dir` path (translated) | `/inspect/<basename>` | ro | See below. |
+
+### `--inspect-dir` path translation
+
+Inspect dirs (`--add-dir` forwarded to `claude -p` for cross-repo
+context) come from CLI flags, the `PILA_INSPECT_DIRS` env var, or
+`pila.toml`'s `inspect_dirs` key. They are *host* paths. The launcher:
+
+1. Collects all three sources before any container is started.
+2. For each host path: resolves it on the host (`cd -P "$path" && pwd`,
+   so symlinks and `~` are expanded), bind-mounts it read-only at
+   `/inspect/<basename>` inside the container, and rewrites the
+   corresponding CLI flag to point at the in-container path.
+3. Passes only the rewritten flags into the container, and clears
+   `PILA_INSPECT_DIRS` in the container env so the in-container
+   resolver doesn't see any host paths.
+
+This honors the orchestrator's precedence rules in `resolve_inspect_dirs`
+(CLI > env > TOML) by emitting only CLI args — the env and TOML pre-passes
+in the launcher synthesize CLI flags.
+
+A host path *inside* `$USER_REPO` (already visible at `/work/<subpath>`)
+collides with the launcher's `/inspect/<basename>` target. The launcher
+warns and skips the redundant mount.
+
+### macOS-specific: Colima auto-share scope
+
+Colima auto-shares only paths under `/Users/$USER` into the VM by
+default. A bind mount of a path outside that range will silently
+appear empty inside the container. The launcher warns at preflight
+when `$USER_REPO` or any `--inspect-dir` falls outside, and points
+the user at `~/.colima/default/colima.yaml`'s `mounts:` section as
+the workaround.
+
+VirtioFS is the mount type pila documents (`colima start
+--runtime containerd --mount-type virtiofs`) — it's the fastest
+option and gives correct UID semantics for bind mounts.
+
+### Logging, signal flow, and TTY adaptation
+
+The launcher invokes `nerdctl run --rm $TTY_FLAGS …` where `TTY_FLAGS`
+is chosen by a one-line `[ -t 0 ]` test:
+
+```sh
+TTY_FLAGS="-i"
+[ -t 0 ] && TTY_FLAGS="-it"
+```
+
+That single test is **the entire branch** between terminal mode and
+plugin mode. Everything else (mounts, image, env, entrypoint, signal
+handling) is identical.
+
+**Terminal mode (`-it`)**:
+
+- `-i` + `-t` give the orchestrator a controlling TTY → its existing
+  `log(...)` and stream-event summarizers write directly to the user's
+  terminal with no aggregation layer. No changes to `log()` or the
+  per-worker summary code.
+- `--clarify` prompts use `input()` interactively — the user types
+  answers at the host terminal, characters flow through the pty to
+  Python inside the container.
+- Ctrl-C in the host terminal sends SIGINT to the container's PID 1
+  (the orchestrator). Python's `KeyboardInterrupt` fires, the
+  existing `except KeyboardInterrupt` handler runs the worktree-only
+  cleanup, the orchestrator exits — and the kernel reaps everything
+  else in the PID namespace.
+
+**Plugin mode (`-i` only)**:
+
+- Claude Code's Bash tool spawns the launcher without a TTY on stdin.
+  `[ -t 0 ]` returns false; the launcher passes only `-i`, no pty
+  allocated inside the container.
+- Inside the container, `sys.stdin.isatty()` returns False. The
+  orchestrator's `gather_answers` (`pila.py:4416`) and mid-execution
+  clarification path (`pila.py:4522`) both detect this and trigger
+  the canonical no-TTY signal: write `.pila/pending-questions.json`
+  to disk and `sys.exit(EXIT_NEEDS_ANSWERS)` (= 10).
+- `.pila/pending-questions.json` is visible on the host because
+  `/work` is bind-mounted from the user's repo. The plugin agent at
+  `commands/pila.md` reads it directly, asks the user via the chat
+  UI, writes the matching `.pila/answers.json`, and re-runs the
+  container with `--answers .pila/answers.json` and `--resume`.
+- Stdout/stderr stream back through the Bash tool to the agent's
+  chat session — possibly in 30s-ish chunks per the harness's
+  buffering, which is acceptable for the streaming UX.
+- The kernel teardown guarantee applies the same way as in terminal
+  mode: when the orchestrator exits (clean exit, exit 10, or any
+  signal the harness sends), PID 1 dies and the namespace is reaped.
+
+Common to both modes:
+
+- `--rm` removes the stopped container automatically so they don't
+  accumulate. Worktrees and state on the bind-mounted host
+  filesystem survive for `--resume`.
+- `--name pila-<ts>-<pid>` makes `nerdctl ps` legible and
+  `nerdctl logs <name>` targetable for the rare diagnostic case.
+
+The plugin mode flow above is exactly what `commands/pila.md` already
+documents — it works through the container with zero new mechanism
+because `.pila/` lives on the bind-mounted host filesystem.
+
+### What does NOT change in the orchestrator
+
+`orchestrator/pila.py` is unmodified by this design. It runs as PID 1
+inside the container; everything it currently does — the asyncio
+event loop, the signal handlers, `claude -p` spawn via
+`asyncio.create_subprocess_exec`, the per-worker `_terminate_proc_tree`
+and `_DescendantTracker` (kept as the fast happy path for clean exits
+— see DESIGN §6), worktree management, telemetry — works unchanged.
+Container/process isolation is the launcher's concern, not the
+orchestrator's.
+
+Maps to `DESIGN.md`: §6 *Cleanup on abnormal exit / Worker subtree
+termination*.
 
 ---
 
@@ -112,7 +349,10 @@ pila/
 ├── .claude-plugin/plugin.json     plugin manifest
 ├── .claude-plugin/marketplace.json single-plugin marketplace manifest (Claude Code `/plugin marketplace add` entry point)
 ├── pila                        executable entry-point wrapper (chmod +x);
-│                                   routes through `uv` with python3 fallback
+│                                   portable bash; runtime preflight + nerdctl run
+│                                   (DESIGN §6 / §0.5)
+├── Dockerfile                  container image recipe; built locally on first
+│                                   run, tagged `pila:<VERSION>` (§0.5)
 ├── orchestrator/pila.py        the orchestrator — all control flow (chmod +x)
 ├── prompts/
 │   ├── classifier.md              Phase 1 worker system prompt
@@ -130,7 +370,9 @@ pila/
 │   ├── integrate.sh               merge a subtask branch into the per-run branch
 │   ├── finalize.sh                verify the run branch exists and is non-empty; ready for push
 │   ├── cleanup.sh                 remove worktrees / branches (default: scoped to one run)
-│   └── install.sh                 one-command installer (curl | bash); bootstraps uv + clones + symlinks
+│   ├── container-entry.sh         container PID 1: `cd /work && exec python3 orchestrator/pila.py`
+│   └── install.sh                 one-command installer (curl | bash); preflight git/claude/curl +
+│                                   runtime preflight (colima / nerdctl) + clones + symlinks
 ├── commands/pila.md            thin plugin skill — launches the orchestrator
 ├── skills/
 │   ├── judge-llm-batch/SKILL.md  post-run judge skill — scores a batch of captured
@@ -216,8 +458,8 @@ export PILA_SOURCE_OF_TRUTH=codebase    # or: research, both
 pila "task" --source-of-truth codebase
 
 # Choose the model. Without overrides: judgment workers (classifier,
-# planner, reconciler, integrator) default to opus; acting workers
-# (implementer, conformer) default to sonnet. Use the env var
+# planner, reconciler, provision, integrator) default to opus; acting
+# workers (implementer, conformer) default to sonnet. Use the env var
 # for a sticky preference, the CLI flag for a one-off, or pila.toml
 # for the committed repo default. Per-worker overrides also exist —
 # see §2.
@@ -264,9 +506,11 @@ export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70
 
 Requirements: the `claude` CLI on `PATH` and logged in interactively (no API
 key — subscription auth); `git`; a git repository with `user.email` and
-`user.name` configured. Python is provisioned by `uv` from either install
-path (see §0); the launcher falls back to system `python3` (Python 3.10+)
-for direct-git-clone users.
+`user.name` configured; a container runtime (colima on macOS, nerdctl +
+containerd on Linux — see `docs/INSTALL.md`). Python is provisioned inside
+the container by the image (Debian 12's `python3` 3.11); the host does not
+need Python. The launcher's `--version` fast path returns without starting
+a container.
 
 Via the plugin skill, from inside Claude Code (after
 `/plugin marketplace add enricai/pila` and
@@ -402,7 +646,7 @@ can dial up or down at resume time without editing state.
 ### Inspect directories
 
 Extra directories the inspect-bucket workers (classifier, planner,
-reconciler) may read. Forwarded to each `claude -p` invocation as
+reconciler, provision) may read. Forwarded to each `claude -p` invocation as
 one `--add-dir` flag per entry. Use this when a task references a
 sibling repo outside the current repo cwd — for example, "compare
 how beacon and pila handle X, beacon is at `~/src/enric/beacon`":
@@ -548,6 +792,7 @@ heal workers — which execute concrete tasks with high throughput requirements
 | classifier   | opus    | global judgment over the task description |
 | planner      | opus    | decomposition is the load-bearing judgment step |
 | reconciler   | opus    | cross-domain tag equivalence is judgment |
+| provision    | opus    | fallback when the deterministic lockfile-detection table returns empty (DESIGN §6½); reads README + configs to emit an install recipe — judgment over arbitrary repo shapes |
 | integrator   | opus    | behavioral conflict resolution; a wrong merge silently corrupts integrated state |
 | implementer  | sonnet  | concrete subtask execution; Sonnet's throughput is the right tradeoff |
 | conformer    | sonnet  | reads a diff and runs commands; same throughput-first profile as implementer; the phase is advisory so a borderline judgment call costs at most a warning |
@@ -569,7 +814,7 @@ Resolution order for each worker type `W` (highest priority first):
 7. **Per-worker default** from `MODEL_DEFAULT_PER_WORKER`
 8. **Global default `MODEL_DEFAULT`** (`opus`)
 
-Nine worker types, each independently overridable:
+Ten worker types, each independently overridable:
 
 | Worker       | env var                       | CLI flag                | TOML key            |
 |--------------|-------------------------------|-------------------------|---------------------|
@@ -577,6 +822,7 @@ Nine worker types, each independently overridable:
 | classifier   | `PILA_MODEL_CLASSIFIER`   | `--model-classifier`    | `model_classifier`  |
 | planner      | `PILA_MODEL_PLANNER`      | `--model-planner`       | `model_planner`     |
 | reconciler   | `PILA_MODEL_RECONCILER`   | `--model-reconciler`    | `model_reconciler`  |
+| provision    | `PILA_MODEL_PROVISION`    | `--model-provision`     | `model_provision`   |
 | implementer  | `PILA_MODEL_IMPLEMENTER`  | `--model-implementer`   | `model_implementer` |
 | integrator   | `PILA_MODEL_INTEGRATOR`   | `--model-integrator`    | `model_integrator`  |
 | conformer    | `PILA_MODEL_CONFORMER`    | `--model-conformer`     | `model_conformer`   |
@@ -624,11 +870,11 @@ Each worker is one `claude -p` headless process. Flags used:
 | `-p` | non-interactive single-shot |
 | `--output-format stream-json --verbose` | streams one JSON event per stdout line as the worker runs; the final `result` event is the envelope (same shape as `--output-format json`'s single output — `cost`, `usage`, `terminal_reason`, `structured_output`). `_invoke` writes raw events to `.pila/logs/<sid>.log` and emits per-event inline summaries gated by `state.json["verbosity"]` |
 | `--json-schema <inline>` | the payload schema; serialized inline as a JSON string — a file path is silently ignored (verified against Claude Code 2.1.143) |
-| `--append-system-prompt` | injects the worker's role prompt — read from `prompts/*.md` for classifier/planner/reconciler/implementer/integrator/conformer |
-| `--allowedTools` | tool allowlist; two buckets — **inspect** (`INSPECT_TOOLS`: read set + allowlisted `Bash(ls:*)` / `Bash(find:*)` / `Bash(cat:*)` / … for cross-cwd read-only inspection, **no Write/Edit**) for classifier, planner, and reconciler; **acting** (`ACT_TOOLS`: read set + Bash/Write/Edit) for implementer, integrator, and conformer. The acting bucket keeps Bash unrestricted because its workers run with `--dangerously-skip-permissions`; the inspect bucket uses `Bash(<verb>:*)` prefix patterns to pre-approve specific read-only verbs at the CLI level — no Write/Edit so the prompt's "you do not modify code" rule is enforced mechanically per DESIGN §12 |
+| `--append-system-prompt` | injects the worker's role prompt — read from `prompts/*.md` for classifier/planner/reconciler/provision/implementer/integrator/conformer |
+| `--allowedTools` | tool allowlist; two buckets — **inspect** (`INSPECT_TOOLS`: read set + allowlisted `Bash(ls:*)` / `Bash(find:*)` / `Bash(cat:*)` / … for cross-cwd read-only inspection, **no Write/Edit**) for classifier, planner, reconciler, and provision; **acting** (`ACT_TOOLS`: read set + Bash/Write/Edit) for implementer, integrator, and conformer. The acting bucket keeps Bash unrestricted because its workers run with `--dangerously-skip-permissions`; the inspect bucket uses `Bash(<verb>:*)` prefix patterns to pre-approve specific read-only verbs at the CLI level — no Write/Edit so the prompt's "you do not modify code" rule is enforced mechanically per DESIGN §12 |
 | `--max-turns` | per-worker turn cap (values in §6) |
 | `--model` | model alias for this worker — `sonnet` / `opus` / `haiku`. Value comes from per-worker resolution (see §2 *Model selection*) |
-| `--add-dir` | repeated per entry in `state.json["inspect_dirs"]` (forwarded by `claude_p`'s `add_dirs` param). Used only by inspect-bucket workers (classifier, planner, reconciler) so their sandboxed Read/Grep/Glob and allowlisted Bash verbs can reach sibling repos referenced in the task. See §2 *Inspect directories* |
+| `--add-dir` | repeated per entry in `state.json["inspect_dirs"]` (forwarded by `claude_p`'s `add_dirs` param). Used only by inspect-bucket workers (classifier, planner, reconciler, provision) so their sandboxed Read/Grep/Glob and allowlisted Bash verbs can reach sibling repos referenced in the task. See §2 *Inspect directories* |
 | `--dangerously-skip-permissions` | acting workers (implementer, integrator, conformer) — suppresses all permission prompts for unattended Bash and file writes. **Not** applied to inspect workers — they run in the real repo cwd (no worktree isolation), so the blast-radius assumption that justifies skip-permissions doesn't hold. The `Bash(<verb>:*)` patterns in `INSPECT_TOOLS` pre-approve listed verbs at the CLI level; anything else (e.g. `rm`, redirect-to-file) falls through and is rejected in non-interactive mode |
 
 `claude_p()` is `async`; every caller awaits it. Internally it awaits
@@ -649,7 +895,7 @@ quoted into the prompt; a second failure raises `WorkerError`.
   `settle_subtask` records a `conformer crashed` entry in
   `conformance_warnings` and the subtask still returns `complete` (DESIGN §9
   *Post-work conformance*: the phase is advisory and never fails the subtask).
-- **classifier, planner, reconciler, integrator** — not caught
+- **classifier, planner, reconciler, provision, integrator** — not caught
   locally; propagates to `main()`, which aborts with state saved for
   `--resume`.
 
@@ -666,13 +912,14 @@ Maps to `DESIGN.md`: §7 (worker contract), §2 (CLI subprocess form).
 |-------|-------------|--------------|
 | Preflight | `preflight` | git identity, clean working tree, `claude` CLI version, live `claude -p` smoke test. Run-id collisions are detected later in the flow (filesystem side in `State.rename_to()` post-classify; git side in `setup-run.sh`'s branch-creation step) — they cannot be checked in preflight because the final `run_id` isn't known until phase_classify completes. Smoke test bypassed by `--skip-smoke`; preflight skipped entirely on `--resume` |
 | 1 Classify | `phase_classify` | one classifier worker → categories + questions. Returned categories are filtered against the 8-name whitelist in `CATEGORIES` (mirrors DESIGN §4); `die()` if none survive |
+| 1½ Provision | `phase_provision` | per-repo dep provisioning (DESIGN §6½). Runs after classify so a docs-only run can short-circuit to `kind: none`. Five steps: `.pila-setup.sh` hook if present → `synth_mise_go_override()` if `go.mod` lacks a `.go-version` / mise.toml go pin → `mise install` at the repo root (reads `.tool-versions` natively; `.nvmrc` / `.python-version` / `.ruby-version` / `rust-toolchain.toml` via image-set `MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS`) → version capture via `mise ls --current --json` → `detect_recipe_from_lockfiles()` table-first, falls back to a `provision` worker on table miss; recipe executed via `mise exec --` and persisted to `st.data["provision"]`. Skipped on `--resume` (whole fresh-run else-branch is). |
 | 0 Clarify | `gather_answers` | source-of-truth is satisfied non-interactively from the resolved preference (default `both`). Intent questions from the classifier are dropped by default; pass `--clarify` to surface them. With `--clarify` + interactive: collect; with `--clarify` + non-interactive: write `pending-questions.json`, exit code 10 (DESIGN §11) |
 | 2 Plan | `phase_plan` | one planner worker per category, awaited concurrently via `gather_or_cancel` (a small wrapper around `asyncio.gather` defined in `pila.py`) under an `asyncio.Semaphore(max_parallel)`; the first worker exception cancels its siblings and propagates to `main()` |
 | 2½ Reconcile | `phase_reconcile` | compute set of `requires` capability tags with no matching `provides` across merged planner output. If empty: short-circuit (no worker spawn, plan unchanged). Else: spawn one reconciler worker that emits renames / added_provides / added_subtasks / unresolvable. Orchestrator applies the first three mechanically; if `unresolvable` is non-empty, `die()` with the reconciler's diagnosis (DESIGN §5, §14). |
 | 3 Schedule | `schedule`, `validate_plan` | merge plans, build the global DAG, Kahn topological sort into waves; cycle → `die()` |
 | 4 Setup | `phase_execute` head → `setup-run.sh` | create the run branch `pila/runs/<run-id>` and its worktree (per-run, isolated from any other run) |
 | 5 Execute | `phase_execute`, `settle_subtask`, `integrate_wave` | per wave: implementers awaited concurrently via `gather_or_cancel` under a fresh `asyncio.Semaphore(max_parallel)` (separate instance from Phase 2's), then integrate, then run a deterministic conflict-marker scan on the integrated worktree. `settle_subtask` runs the **post-work conformance phase** (DESIGN §9 *Post-work conformance*) on the success path before returning — `discover_rules_files` → `run_conformer` loop (≤ `conformance_rounds`) → re-run the per-subtask mechanical-precondition gates (`check_branch_has_commits`, dirty-worktree, `check_diff_scope`) against the conformer's commits → attach `conformance_warnings` to the result. The phase is advisory: residuals, build/lint/test failures, gate violations on conformer commits, and `WorkerError` all surface as warnings, never as `failed`/`blocked`. If any subtask in the wave ends `blocked` or `failed`, `phase_execute` aborts the run *before* `integrate_wave` is called — the blocker is recorded in `state.json` and the run resumes with `--resume`. There is no LLM wave-level re-validation; the §8 confidence gate is the load-bearing per-subtask signal, and `scan_conflict_markers` is the deterministic post-integration safety net |
-| 6 Finalize | `phase_finalize` → `finalize.sh`, `cleanup.sh` | verify the run branch is non-empty; push the run branch and open a PR (unless `--no-push`); record push / PR outcome in `run.json`; delete the per-subtask branches `pila/subtasks/<run-id>/*` (the run branch is **kept** as the PR head; state dir is kept as audit). The working branch is **not** modified locally — the PR is the proposed integration. |
+| 6 Finalize | `phase_finalize` → `finalize.sh`, `cleanup.sh`; launcher then pushes on host | verify the run branch is non-empty; record `finished_at` in `run.json`; delete the per-subtask branches `pila/subtasks/<run-id>/*` (the run branch is **kept** as the PR head; state dir is kept as audit). **The push + PR step has moved to the host launcher** (DESIGN §6 *Finalization*) — `phase_finalize` writes the sentinel and exits; the launcher polls `run.json`, then runs `git push pila/runs/<run-id>` + `gh pr create` on the host using the host's own auth (no in-container forwarding of gh tokens, SSH keys, or agent sockets). The working branch is **not** modified locally — the PR is the proposed integration. |
 | Post-run Judge | `phase_judge`, `judge_capture` | standalone post-run phase (not part of main orchestrate flow): reads `calls.ndjson`, runs one `judge_capture()` per record in parallel under `asyncio.Semaphore(max_parallel)`, writes per-record verdicts to `<judge-dir>/<call_id>.json` and a summary `INDEX.json`; uses `prompts/judge.md` rubric |
 | Post-run Heal | `HealState`, `heal_baseline`, `heal_apply_patch`, `heal_replay_patched`, `request_patch`, `phase_heal` | heal-loop phases: `HealState` persists failing_samples / baseline / history / best_so_far at `<heal-dir>/<call_type>/state.json`; `heal_baseline(call_type, failing_records, n, heal_dir, caps, st, models)` runs n unpatched replays per record + judge, writes baseline verdicts + state; `heal_apply_patch(call_type, iter_n, patch_text, anchor_match, heal_dir, failing_records)` materialises patched prompts under `iter-<N>/patched-prompts/`; `heal_replay_patched(call_type, iter_n, n, heal_dir, caps, st, models)` runs n patched replays per record + judge, appends iteration record to state.history; `request_patch(state, iter_n, st, caps, models)` invokes the `patch_generator` worker (schema `SCHEMAS["patch_generator"]`, SID `heal-patch-<call_type>-iter<N>`, prompt from `prompts/patch_generator.md`) and returns `(anchor, replacement)` — raises `ValueError` if the returned anchor is not a literal substring of the resolved prompt body (code-enforced per the prompts-are-advisory principle); `phase_heal(call_type, failing_records, heal_dir, caps, st, models, request_patch_fn=None, n, config)` drives the full baseline→loop→report cycle; `request_patch_fn` defaults to the real `request_patch` when `None`, or accepts a sync/async 2-arg stub for testing |
 
@@ -853,24 +1100,53 @@ The orchestrator runs on a single `asyncio` event loop. Each `claude -p`
 worker is spawned via `asyncio.create_subprocess_exec` (wrapped by the
 `run_proc` helper) and awaited; both spawn sites pass
 `start_new_session=True` so each worker becomes its own POSIX session and
-process-group leader (PGID == PID). This is what makes group-wide
-termination on abnormal exit possible — `claude -p` itself spawns tool-call
-subprocesses (test runners, dev servers) that inherit the new group by
-default, so signaling the group reaches the whole subtree. Parallel
-workers within a wave run concurrently via `gather_or_cancel` — a small
-`asyncio.gather` wrapper that, on the first exception, cancels every
-other in-flight task and awaits its finalization before re-raising —
-under an `asyncio.Semaphore` bounded by `max_parallel`. Because every
-mutator runs on the single loop, `State` carries no lock — coroutines
-only interleave at `await` points, which never fall inside a
-`st.data[k] = v; st.save()` pair. `State.save()` still writes to a temp
-file then `os.replace()` for atomicity against process crash. On
-`KeyboardInterrupt`, `SIGTERM`, or `RateLimitedExit`, `asyncio.run`
-cancels pending tasks; `run_proc`'s and `_invoke`'s catch-all
-`BaseException` handlers call `_terminate_proc_tree(proc)`
-(`os.killpg(pgid, SIGTERM)` → ~2s grace → `os.killpg(pgid, SIGKILL)` →
-reap) before re-raising, so neither the direct `claude`/`git` child nor
-any tool-call grandchild is orphaned.
+process-group leader (PGID == PID), isolating it from the orchestrator's
+own group. Parallel workers within a wave run concurrently via
+`gather_or_cancel` — a small `asyncio.gather` wrapper that, on the first
+exception, cancels every other in-flight task and awaits its finalization
+before re-raising — under an `asyncio.Semaphore` bounded by
+`max_parallel`. Because every mutator runs on the single loop, `State`
+carries no lock — coroutines only interleave at `await` points, which
+never fall inside a `st.data[k] = v; st.save()` pair. `State.save()`
+still writes to a temp file then `os.replace()` for atomicity against
+process crash.
+
+Subprocess cleanup is two-layered, addressing two distinct leak classes:
+
+1. **Lifetime descendant tracking (`_DescendantTracker`).** A per-worker
+   asyncio task started at spawn polls `_enumerate_descendants(proc.pid)`
+   every ~0.5s and accumulates every PID ever observed as a descendant
+   of the worker. On every exit path — success AND failure — the
+   tracker's `stop_and_reap()` SIGKILLs the accumulated set. This is
+   the load-bearing fix for Claude Code's Bash tool with
+   `run_in_background: true`: the tool wrapper spawns its user command
+   in a detached POSIX session, then the wrapper itself can exit while
+   the user command keeps running. By the time `claude -p` exits, the
+   backgrounded command has been reparented to PID 1 and is no longer
+   reachable via post-hoc PPID walk from the worker — but the tracker
+   observed it mid-flight and has its PID. Without lifetime tracking,
+   the descendant is invisible to cleanup.
+
+2. **Abnormal-exit subtree termination (`_terminate_proc_tree`).** On
+   `KeyboardInterrupt`, `SIGTERM`, `RateLimitedExit`, or any other
+   `BaseException`, `run_proc`'s and `_invoke`'s catch-all handlers
+   call `_terminate_proc_tree(proc)`. The helper sends SIGTERM to the
+   worker's process group (`os.killpg`) AND to every descendant
+   currently reachable via PPID walk (`_enumerate_descendants`), waits
+   `_PROC_TREE_GRACE_SEC = 2.0` for graceful shutdown, then SIGKILLs
+   the survivors via the same two mechanisms. The PPID walk is needed
+   because Claude Code's Bash tool subprocesses are in a *different*
+   POSIX session than `claude -p` — `killpg(claude_p_pgid)` does not
+   reach them, so the walk is the only way to enumerate them while
+   the parent chain is still intact. Exception paths run the tracker
+   reap *after* `_terminate_proc_tree`, catching any backgrounded
+   subprocess that was orphaned during the run.
+
+The two layers compose: `_terminate_proc_tree` is broad and
+synchronous (one call, kills attached subtree), the tracker is narrow
+and historical (kills only what it observed, including processes
+that have since reparented away). Neither alone is sufficient; both
+together close the leak.
 
 ### Abnormal exit and rate-limit contract (DESIGN §6 *Cleanup on abnormal exit*)
 
@@ -1024,6 +1300,224 @@ first occurrence.
 
 ---
 
+## 6½. Per-repo dependency provisioning
+
+Implements DESIGN §6½. The provision phase fires once per fresh run,
+between classify and plan; on `--resume` the whole fresh-run else-branch
+of `orchestrate()` is skipped, so no re-fire check is needed.
+
+### Worker registration
+
+`WORKER_TYPES` (`pila.py:285`) gains `"provision"`. `SCHEMAS["provision"]`
+(`pila.py:~76`) is the JSON schema for the LLM-fallback recipe:
+
+```python
+{
+    "type": "object",
+    "required": ["recipe"],
+    "properties": {
+        "recipe": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["kind", "command", "working_dir"],
+                "properties": {
+                    "kind": {"enum": ["install", "build", "none"]},
+                    "command": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                    },
+                    "working_dir": {"type": "string"},
+                    "timeout_s": {"type": "integer", "minimum": 1},
+                },
+            },
+        },
+        "confidence": {"type": "string"},
+        "notes": {"type": "string"},
+    },
+}
+```
+
+`detect_recipe_from_lockfiles(repo_root) -> list[dict]` is the
+deterministic table. It returns a list of `{kind, command, working_dir,
+timeout_s}` dicts — possibly empty (table miss → LLM fallback), possibly
+multi-entry (polyglot repos like Rails-with-frontend emit *all* matches,
+not first-wins).
+
+| Detected file | Emitted command | Notes |
+|---|---|---|
+| `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` | takes precedence over yarn.lock and package-lock.json |
+| `yarn.lock` (no pnpm-lock.yaml) | `yarn install --frozen-lockfile` | |
+| `package-lock.json` (neither above) | `npm ci` | |
+| `uv.lock` | `uv sync` | |
+| `poetry.lock` | `poetry install` | |
+| `Pipfile.lock` | `pipenv install` | |
+| `go.mod` + `go.sum` | `go mod download` | |
+| `Cargo.lock` | `cargo fetch` | |
+| `Gemfile.lock` | `bundle install` | |
+| anything else | (no entry — caller falls back to LLM worker) | bare `requirements.txt`, bare `pyproject.toml`, Maven (`pom.xml`), Gradle, polyglot Makefile |
+
+`validate_provision_recipe(recipe) -> None` enforces (raises `ValueError`
+on violation):
+- `command[0]` is in the argv allowlist `{pnpm, npm, yarn, pip, pip3,
+  uv, poetry, go, cargo, bundle, gem, mvn, gradle, gradlew, make}`.
+- No `sudo` anywhere in the argv.
+- No shell metacharacters (`|`, `&`, `;`, `$`, backticks, `>`, `<`, `\n`)
+  in any argv element.
+- `working_dir` is either `"."` or a relative path with no `..` segments
+  and no leading `/`.
+
+### Phase implementation (`phase_provision`)
+
+Insertion point in `orchestrate()`: inside the `else:` (fresh-run)
+branch, after the `_write_run_json(...)` block (currently
+pila.py:5984) and before `gather_answers(st, supplied)` (currently
+pila.py:5989). Step order:
+
+1. **Docs-only short-circuit.** If the categories from classify
+   contain no code-touching category (only `documentation`, etc.),
+   record `kind: none` and return.
+2. **Setup hook.** `run_setup_hook(repo_root, log_dir, st)` execs
+   `<repo>/.pila-setup.sh` if present (10-min timeout, streams to
+   `.pila/runs/<id>/logs/setup-hook.log`). Idempotent via
+   `st.data["provision"]["sh_hook_ran"]`. Nonzero exit → `die()`.
+   **Runs as the non-root `pila` container user; no sudo.** The hook
+   can install user-space tooling (`mise install <lang>@<version>`,
+   anything writing to `~/.local/bin`) and pre-populate fixtures, but
+   cannot `apt-get install` or write to system directories. Repos
+   that need root-level system packages maintain a fork of the pila
+   Dockerfile and override `IMAGE_TAG`; out of scope for the hook.
+3. **Mise go-override synthesis.** `synth_mise_go_override(
+   repo_root, run_dir) -> Path | None`: if `go.mod` exists but the
+   repo has no `.go-version`, no `.tool-versions` go entry, and no
+   `mise.toml`/`.mise.toml` go pin, parse `go.mod`'s `go 1.X[.Y]`
+   directive and write `<run_dir>/mise-overrides.toml` containing
+   `[tools]\ngo = "<version>"`. **Both `mise.toml` AND `.mise.toml`
+   (dotted form, also a valid mise config name) are recognized**;
+   non-dotted form wins if both exist (matches mise's discovery
+   precedence). If the repo has an existing mise config, its
+   `[tools]` content is preserved in the override file
+   (`MISE_OVERRIDE_CONFIG_FILENAMES` replaces rather than merges; the
+   override is the only file mise reads, so it must carry the repo's
+   existing pins plus pila's addition). Idiomatic version files
+   (`.nvmrc`, `.node-version`, `.python-version`, `.ruby-version`)
+   and `.tool-versions` entries are ALSO copied into the override
+   when the same tool isn't already pinned in the existing mise
+   config — otherwise the override would silently drop them too
+   (mise discussions #6598 / #7058). Returns the absolute path to
+   the override file.
+
+   **Precedence between idiomatic files** (pila's choice, not
+   mise's documented behavior): when the synth fires and both
+   `.nvmrc` and `.tool-versions` pin the same tool with different
+   versions, `.nvmrc` wins. The iteration order in
+   `_read_idiomatic_pins` runs the dedicated single-tool files
+   (`.nvmrc`, `.python-version`, etc.) BEFORE `.tool-versions`,
+   so the first-seen pin sticks. A repo with conflicting pins is
+   a misconfiguration, but pila picks `.nvmrc` over
+   `.tool-versions` for determinism. asdf-compatible names like
+   `nodejs` and `python3` in `.tool-versions` are normalized to
+   mise's `node` / `python` via `_ASDF_TOOL_ALIASES` so a
+   `.nvmrc` + `.tool-versions: nodejs ...` repo doesn't end up
+   with both `node` and `nodejs` pins in the override.
+4. **Mise install.** `run_mise_install(repo_root, log_dir, st)`:
+   exports `MISE_OVERRIDE_CONFIG_FILENAMES=<path>` if step 3
+   produced one, then runs `mise install` at the repo root. mise
+   reads `.tool-versions` natively, and reads `.nvmrc` /
+   `.python-version` / `.ruby-version` / `rust-toolchain.toml` /
+   `.go-version` because the image sets
+   `MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS=node,python,ruby,rust`.
+   Streams to `.pila/runs/<id>/logs/provision.log`. Nonzero exit
+   surfaces the failing tool+version to `die()`.
+5. **Version capture.** Runs `mise ls --current --json` (the
+   subcommand `mise current --json` does not exist; verified
+   against mise.usage.kdl). Output is object-keyed-by-tool, each
+   value an array of `{version, install_path, source}` objects.
+   Raw blob stored at `st.data["provision"]["mise_versions"]`;
+   `tools[name][0].version` is the value rendered in `pila --list`
+   and one-line log summaries.
+6. **Table-first detection.** `detect_recipe_from_lockfiles(
+   repo_root)`. Non-empty result is the recipe (marked
+   `source: "table"` in state).
+7. **LLM fallback.** Empty table result → `gather_provision_fixtures(
+   repo_root)` assembles inputs (see below), `claude_p("provision",
+   prompt, fixtures, SCHEMAS["provision"], model)` returns a
+   recipe (marked `source: "llm"` in state).
+8. **Validate.** `validate_provision_recipe(recipe)`. Reject →
+   `die()`.
+9. **Execute.** Each command runs through `mise exec --` via
+   `wrap_with_mise_exec()` so the resolved toolchain is active.
+   Per-command timeout from the recipe (default 600s if absent).
+   Output streams to `.pila/runs/<id>/logs/provision.log`.
+   Per-command status persisted to
+   `st.data["provision"]["commands"] = [{cmd, status, log_tail}]`.
+   Failure → `die()` with last 40 lines of the failing command's
+   output.
+10. **Persist.** Full recipe + `source` + resolved versions saved
+    to `st.data["provision"]`.
+
+### Helper functions
+
+| Function | Purpose |
+|---|---|
+| `gather_provision_fixtures(repo_root) -> dict` | Assembles the LLM-worker input set under a 24KB total ceiling. README extracted by `extract_readme_sections()`; root manifests (`package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `Gemfile`, `Makefile`, `pom.xml`, `build.gradle*`) included if present; workspace child manifests capped at 3 (1KB each) for monorepos; up to 2 `.github/workflows/*.yml` files matching `(?i)ci\|test\|build\|release` (skip `codeql\|stale\|dependabot`); optional `CONTRIBUTING.md` / `docs/DEVELOPMENT.md` capped at 4KB. |
+| `extract_readme_sections(text) -> str` | Header-aware extractor. Strips leading emoji/punctuation before keyword match. Three header styles: ATX (`## ...`), setext (`...\n===` / `...\n---`), asciidoc (`== ...`). Keeps ≤1KB intro + matched sections (8KB post-extract budget). Section-match regex: `(?i)install\|getting[\s-]?started\|quick[\s-]?start\|setup\|usage\|\brun\b\|develop\|build(ing)?( from source\| instructions)?\|compil(e\|ing)( from source)?\|download\|from source\|requirements\|prerequisites\|dependenc(y\|ies)`. Fallback chain on no header match: code-fence detector (`pip install`, `npm install`, `cargo`, `brew`, `go install`, `apt-get`, `make` patterns, ±10 lines) → final top-6KB fallback. |
+| `run_setup_hook(repo_root, log_dir, st)` | Execs `<repo>/.pila-setup.sh` if present with a 10-min timeout; streams output to `<log_dir>/setup-hook.log`; sets `st.data["provision"]["sh_hook_ran"] = True` on success. |
+| `synth_mise_go_override(repo_root, run_dir) -> Path \| None` | See step 3 above. Returns the absolute path to the override file or `None` if no synthesis was needed. |
+| `run_mise_install(repo_root, log_dir, st)` | See steps 4–5. |
+| `wrap_with_mise_exec(cmd: list[str]) -> list[str]` | Prepends `["mise", "exec", "--"]`; idempotent. |
+| `phase_provision(repo_root, st, models)` | Orchestrates all of the above. |
+
+### Caches
+
+Five host caches mounted into the container, all `rw`. Listed in §0.5
+"Bind-mount table." Concurrency-safety verdicts:
+
+- **mise installs** — Safe. Version dirs are immutable once installed;
+  mise renames atomically on install.
+- **pnpm store** — Safe (CAS, atomic ops; pnpm/discussions#10702).
+- **Go modules** — Safe (`flock` per module-version in
+  `cmd/go/internal/modfetch`).
+- **Cargo** — Safe (flock on index + per-crate locks). Whole
+  `CARGO_HOME` is mounted; mounting only `registry/` breaks
+  `config.lock` (cargo#11376).
+- **pip** — Mixed. Most races fixed (pypa/pip#9470, #12361, #13540
+  closed). The wheel-build race #9034 (concurrent `pip install` of
+  the same sdist into the same wheel-cache slot) is still open;
+  pila's pattern bypasses it: `phase_provision` runs the install
+  once serially (wheels land in the shared cache), per-worktree
+  replays hit cached wheels in parallel — no build, no race.
+
+Bundler is **not** mounted as a shared cache (open `unlink` races,
+rubygems/bundler#4519). Ruby repos route through `.pila-setup.sh`.
+
+### Worktree replay
+
+`scripts/new-worktree.sh` is unchanged — it still does just the
+`git worktree add` and prints the worktree path. The replay is
+handled in Python (`replay_provision_in_worktree(worktree, st)`,
+called from `run_implementer` immediately after the script returns)
+so it can use the same `mise exec --` wrapper, `provision.log` sink,
+and per-command timeout already in use by `phase_provision`. Keeping
+the bash script single-purpose also keeps its stdout clean (the
+orchestrator parses the worktree path from the script's last line).
+
+1. `git worktree add` checks out the worktree (tracked files only).
+2. The orchestrator parses the worktree path from the script's stdout.
+3. `replay_provision_in_worktree` reads `st.data["provision"]["recipe"]`
+   and replays each `kind: install` or `kind: build` command via
+   `mise exec --` against the new worktree's path. The version files
+   (`.nvmrc` etc.) are tracked so mise picks them up automatically;
+   the shared caches make the install fast.
+4. If the recipe is missing or empty (docs-only run), the replay is
+   a no-op.
+5. Replay failures are logged but do NOT block the worker — the
+   per-subtask post-work conformance phase (DESIGN §9) is the
+   load-bearing check that the worktree is actually usable.
+
+---
+
 ## 7. Git worktree mechanics (`scripts/*.sh`)
 
 Every script takes a `RUN_ID` as its first positional argument (after any flags) so the per-run namespacing is explicit at the shell boundary, not implicit through `cwd`.
@@ -1033,23 +1527,55 @@ Every script takes a `RUN_ID` as its first positional argument (after any flags)
 | `setup-run.sh <run-id>` | Creates `pila/runs/<run-id>` **only if absent** — never force-resets it (an existing branch carries completed waves; resetting it would destroy resume state). Records the working branch (HEAD-at-run-start) to `.pila/runs/<run-id>/working-branch` on first run only. Adds the run-branch worktree at `.pila/runs/<run-id>/worktrees/staging` if missing. Appends `.pila/` to the repo's `.git/info/exclude` (idempotent). Safe on `--resume`. |
 | `new-worktree.sh <id> <run-id>` | Creates `pila/subtasks/<run-id>/<id>` worktree at `.pila/runs/<run-id>/worktrees/<id>` branched off the current `pila/runs/<run-id>` tip; reuses an existing worktree/branch if present (resume after handoff). Prints the absolute worktree path. The run-branch (`pila/runs/…`) and subtask-branch (`pila/subtasks/…`) prefixes are deliberately disjoint so neither is an ancestor ref of the other — git's loose ref store cannot hold a ref AT a path and another ref UNDER that same path simultaneously. |
 | `integrate.sh <id> <run-id>` | From repo root, inside the run-branch worktree (`.pila/runs/<run-id>/worktrees/staging`): `git merge --no-ff pila/subtasks/<run-id>/<id>`. Exit 0 clean; exit 1 on conflict, leaving the worktree mid-merge for an integrator; exit 2 on precondition failure (run-branch worktree or subtask branch missing) — `integrate_wave` treats exit 2 as fatal via `die()` and does *not* spawn an integrator, since the worktree-less case would fail in confusing ways. |
-| `finalize.sh <run-id>` | Run-branch verifier. Exits 0 if `refs/heads/pila/runs/<run-id>` exists and contains at least one commit beyond the working branch; exits non-zero with a diagnosis otherwise. The working branch is **never** modified — pila does not merge into it locally; the PR (opened by `push_and_open_pr()`) is the proposed integration. The push and PR step lives in `push_and_open_pr()` in `pila.py` (see below) so it can compose the PR body with `compose_pr_body()`, write `run.json`, and emit Python-style multi-line failure messages. |
+| `finalize.sh <run-id>` | Run-branch verifier. Exits 0 if `refs/heads/pila/runs/<run-id>` exists and contains at least one commit beyond the working branch; exits non-zero with a diagnosis otherwise. The working branch is **never** modified — pila does not merge into it locally; the PR is the proposed integration. The push and PR step lives in the **host launcher** (`pila` bash script), not in the container — it runs after `nerdctl run` exits cleanly, using the host's own `git push` + `gh pr create` against the host's auth state. See "Host-side finalize" below. |
 | `cleanup.sh [--run-id <id> \| --all-runs \| --bootstrap] [--branches \| --subtask-branches]` | Default (no flag): scans `.pila/runs/*/state.json` for the most-recently-failed run (most recent without `finished_at`), confirms y/N, then removes only that run's worktrees + prunes git metadata. State dir stays as audit. `--run-id <id>` is an explicit single-run cleanup (worktrees only). `--all-runs` runs the same per-run cleanup across every run dir under `.pila/runs/` (excluding `_bootstrap-*`). `--bootstrap` removes orphaned `_bootstrap-*` directories (runs that died before classify completed; not enumerable by `discover_runs`). `--branches` (combinable with `--run-id` or `--all-runs`) additionally deletes the matching run branches *and* subtask branches (`pila/runs/<id>` and `pila/subtasks/<id>/*`). `--subtask-branches` deletes only the subtask branches and keeps `pila/runs/<id>` (the post-finalize default — the run branch is the PR head and must outlive the orchestrator). Without either flag, all branches are kept as an audit trail. State dirs are always preserved by `cleanup.sh`. Ctrl-C and every other abnormal exit in the orchestrator also preserve state — they call `_cleanup_on_abnormal_exit(full_purge=False)`. There is no `full_purge=True` call site today; the flag is retained as a future hook for an explicit-purge gesture, but no current code path uses it. |
 
 A run branch `pila/runs/<run-id>` is never reset once created — this is the invariant `--resume` depends on. See `DESIGN.md` §6 ("the run branch is the resume contract").
 
-### Push and PR (Python; called from `phase_finalize`)
+### Host-side finalize (bash + jq in the `pila` launcher)
 
-The push + PR step is implemented in Python rather than in `finalize.sh`. It runs after `finalize.sh`'s verifier check succeeds, unless `--no-push` is in effect.
+The push + PR step runs on the **host** in the launcher, after `nerdctl
+run` exits cleanly. The container's `phase_finalize` writes
+`finished_at` to `run.json` and exits 0; the launcher polls that
+sentinel and proceeds. See DESIGN.md §6 *Finalization* for the
+architecture (auth state lives in host processes the container can't
+reach; the boundary is structural).
 
-| Function (pila.py) | Behavior |
-|--------|----------|
-| `push_and_open_pr(st, no_verify)` | Pushes `pila/runs/<run-id>` to `origin` (with `--no-verify` appended if the CLI flag was set), then opens a PR via `gh pr create --base <working-branch> --head pila/runs/<run-id> --title pila: <run-id> --body-file -` piping `compose_pr_body(st.data, st.run_id)`. Push failure dies non-zero with a multi-line message naming the run branch (where the work lives) and the working branch (unchanged from run start; the intended PR base), the captured stderr, and the exact retry command; updates `.pila/runs/<run-id>/run.json` with `push_error`. PR-creation failure is **non-fatal**: logs a warning with the pushed-branch URL and the retry command; updates `run.json` with `pr_error` and returns 0 (the run is complete; only the PR is missing). |
-| `_check_gh_cli(no_push)` | Preflight gate. Short-circuits silently when `--no-push` is set. Else verifies `shutil.which("gh")`, `gh auth status` exits 0, and `git remote get-url origin` succeeds. Each failure dies with an actionable message + the `--no-push` escape hatch. |
+The launcher's finalize block in `pila` (bash) does, in order:
 
-`--no-push` skips the entire push + PR step (the run completes with the run branch local-only; the working branch is unchanged). CLI flag, `PILA_NO_PUSH` env, `no_push = true` in `pila.toml` — same precedence pattern as `--source-of-truth`. `--no-verify` is CLI-only and only affects the push step (worker `git commit`s inside worktrees still run all hooks).
+1. **Skip if `--no-push`.** Same opt-out as before.
+2. **Read run state** via `jq` from `.pila/runs/<run-id>/run.json` and
+   `state.json` (run branch, working branch, finished_at).
+3. **Push the run branch.** `git push -u origin pila/runs/<run-id>`
+   (with `--no-verify` if the flag was set). On failure: print the
+   same multi-line message as the old Python path (names run branch +
+   working branch, captured stderr, exact retry command), update
+   `run.json` with `push_error`, exit non-zero.
+4. **Compose PR body** via a bash heredoc that reads `state.json`
+   fields with `jq` — same deterministic body shape as the previous
+   Python `compose_pr_body` (task, category, source-of-truth, run
+   timestamps, wave + subtask + worker counts).
+5. **Open PR.** `gh pr create --base <working-branch> --head
+   pila/runs/<run-id> --title pila: <run-id> --body-file -` with the
+   composed body piped on stdin. On failure: log a warning with the
+   pushed-branch URL and the retry command; update `run.json` with
+   `pr_error`. **Non-fatal** — exit 0 (the run is complete; only the
+   PR is missing).
 
-Maps to `DESIGN.md`: §6 (Finalization — Push and PR).
+**Preflight (`pila` bash, before `nerdctl run`):** the launcher
+checks `git rev-parse --is-inside-work-tree`, `shutil.which gh`,
+`gh auth status`, and `git remote get-url origin` BEFORE spinning up
+the container. Each failure dies with the same actionable message
+the orchestrator's `_check_gh_cli` used to print, plus the `--no-push`
+escape hatch. The orchestrator no longer runs these checks; they
+moved to the host where the auth state actually lives.
+
+`--no-push` skips the entire push + PR step. CLI flag, `PILA_NO_PUSH`
+env, `no_push = true` in `pila.toml`. `--no-verify` is CLI-only and
+only affects the push step (worker `git commit`s inside worktrees
+still run all hooks).
+
+Maps to `DESIGN.md`: §6 (Finalization).
 
 ---
 
@@ -1171,12 +1697,13 @@ written somewhere in `orchestrator/pila.py`. The coupling test in
 | `source_of_truth_pref` | str | resolved preference (`codebase` / `research` / `both`) |
 | `clarify` | bool | whether asking the user is allowed for this run (resolved from `--clarify` / `PILA_CLARIFY` / `pila.toml` / default `False`) |
 | `verbosity` | str | resolved verbosity level (`quiet` / `normal` / `stream` / `debug`); re-resolved fresh on every run, including `--resume`, so the user can dial up or down without editing state |
-| `inspect_dirs` | list[str] | extra absolute paths granted to inspect-bucket workers (classifier, planner, reconciler) via `--add-dir`. Resolved from `--inspect-dir` / `PILA_INSPECT_DIRS` / `inspect_dirs` in `pila.toml`; re-resolved fresh on every run, including `--resume`, so the user can add or remove paths without editing state. Empty list when nothing is configured |
+| `inspect_dirs` | list[str] | extra absolute paths granted to inspect-bucket workers (classifier, planner, reconciler, provision) via `--add-dir`. Resolved from `--inspect-dir` / `PILA_INSPECT_DIRS` / `inspect_dirs` in `pila.toml`; re-resolved fresh on every run, including `--resume`, so the user can add or remove paths without editing state. Empty list when nothing is configured |
 | `test_runner` | list[str] | detected short-circuit test command |
 | `integrator_failure` | dict | unresolvable conflict from `integrate_wave` (non-fatal signal log) |
 | `integrator_warnings` | dict[str, str] | non-fatal commit warnings from `integrate_wave` (non-fatal signal log) |
 | `scope_warnings` | dict[str, dict] | oversized-diff warnings from `check_diff_scope` (non-fatal signal log) |
 | `conformance` | dict[str, dict] | per-subtask conformer output and `conformance_warnings` (non-fatal signal log) — keys are subtask ids, values are `{result, warnings}` where `result` is the last conformer payload (or null on crash) and `warnings` is the list of advisory strings produced across all conformance rounds. Populated only on subtasks whose implementer reached `status: "complete"`. See DESIGN §9 *Post-work conformance* |
+| `provision` | dict | output of `phase_provision` (DESIGN §6½). Keys: `source` (`table` / `llm` / `skipped-docs-only`), `recipe` (list of validated install entries), `commands` (per-command status log: `[{kind, cmd, status, log_tail}]`), `sh_hook_ran` (bool, set by `run_setup_hook`), `mise_versions` (raw blob from `mise ls --current --json`). Read by `replay_provision_in_worktree` so each worktree replays the same recipe under the same mise-resolved toolchain. |
 
 `pending-questions.json` (written by `gather_answers` on non-TTY exit, read by
 the plugin skill in `commands/pila.md`):
@@ -1348,7 +1875,7 @@ post-run operation performed by the judge and heal skills.
 |-------|------|-------|
 | `call_id` | str (UUID v4) | unique identifier for this invocation; referenced by judge verdicts |
 | `run_id` | str | the run identifier — matches the directory name under `.pila/runs/` |
-| `call_type` | str | one of `WORKER_TYPES`: `classifier`, `planner`, `reconciler`, `implementer`, `integrator`, `conformer` |
+| `call_type` | str | one of `WORKER_TYPES`: `classifier`, `planner`, `reconciler`, `provision`, `implementer`, `integrator`, `conformer` |
 | `model` | str | the model alias passed to `--model` for this invocation (e.g. `opus`, `sonnet`) |
 | `system_prompt` | str | the full system prompt injected via `--append-system-prompt` |
 | `user_content` | str | the user-turn content passed to the worker |
@@ -1449,7 +1976,7 @@ enforcement functions:
 | `test_validate_plan.py` | `validate_plan()` (every rule in §5) |
 | `test_validate_result.py` | `validate_result()` (every status-branch invariant) |
 | `test_check_merge_committed.py` | `check_merge_committed()` (real-git fixtures) |
-| `test_inspect_tools.py` | `INSPECT_TOOLS` composition and the three inspect-callsite wirings (classifier, planner, reconciler) — pins that the inspect bucket grants `Bash(<verb>:*)` patterns but never `Write`/`Edit` or bare `Bash`, the same DESIGN §12 enforcement applied to workers that don't get `--dangerously-skip-permissions` |
+| `test_inspect_tools.py` | `INSPECT_TOOLS` composition and the four inspect-callsite wirings (classifier, planner, reconciler, provision) — pins that the inspect bucket grants `Bash(<verb>:*)` patterns but never `Write`/`Edit` or bare `Bash`, the same DESIGN §12 enforcement applied to workers that don't get `--dangerously-skip-permissions` |
 | `test_resolve_inspect_dirs.py` | `resolve_inspect_dirs()` precedence (CLI → env → TOML → `[]`), `~` expansion, dedup, and `STATE_FIELDS` membership |
 | `test_resolve_prompt.py` | `resolve_prompt()` — every `WORKER_TYPES` member returns a `("file", content, "prompts/<call_type>.md")` triple; parity/coupling test; unknown call_type raises |
 | `test_discover_rules_files.py`, `test_validate_conformance_result.py`, `test_run_conformance_phase.py`, `test_infer_build_lint_test.py` | the post-work conformance phase (DESIGN §9): rule-file discovery against the fixed capped allowlist, schema cross-field invariants including path-traversal rejection, the orchestrator-level loop covering clean / malformed / crashed / rolled-back / cap-exhausted paths, the commit-prefix observability check, the dirty-state warning before rollback, the worker-budget-exhausted advisory path, the outer `settle_subtask` contract (never escalates to `failed`/`blocked` even on `FileNotFoundError`), and `_infer_build_lint_test` across the supported package-manager families |

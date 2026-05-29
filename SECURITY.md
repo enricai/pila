@@ -41,8 +41,10 @@ Pila's threat model is shaped by one load-bearing fact: **acting workers
 run `claude -p --dangerously-skip-permissions`**. That is intentional — it is
 what makes the run unattended. The mitigation is not removing the flag; it
 is the worktree isolation and staging-branch review documented in
-[`docs/DESIGN.md`](docs/DESIGN.md) §6, and the deterministic enforcement
-boundary documented in [`docs/DESIGN.md`](docs/DESIGN.md) §12. See also
+[`docs/DESIGN.md`](docs/DESIGN.md) §6, the container PID-namespace and
+cgroups boundary that contains every worker subprocess inside the per-run
+container (also DESIGN §6), and the deterministic enforcement boundary
+documented in [`docs/DESIGN.md`](docs/DESIGN.md) §12. See also
 the [README "Safety" section](README.md#safety).
 
 ### Vulnerabilities (please report)

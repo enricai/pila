@@ -64,7 +64,7 @@ _MODELS = {
     "judge": "opus",
 }
 
-_CALL_TYPES = ["classifier", "planner"]
+_CALL_TYPES = ["classifier", "planner", "provision"]
 
 
 def _make_failing_records(n: int = 2) -> list[dict]:

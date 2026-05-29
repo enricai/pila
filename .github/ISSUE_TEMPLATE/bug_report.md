@@ -24,8 +24,11 @@ labels: bug
 ## Environment
 
 - OS: <e.g., macOS 14.5, Ubuntu 22.04>
-- Python: `python3 --version`
-- `claude --version`:
+- Container runtime:
+  - macOS: `colima version` (one line)
+  - Linux: `nerdctl --version` and `containerd --version`
+- Image tag: `nerdctl images pila --format '{{.Repository}}:{{.Tag}}'`
+- `claude --version` (on the host — `gh` and `~/.claude/` auth state live there):
 - Pila commit: `git -C ~/.pila rev-parse HEAD` (or wherever you cloned it)
 
 ## Relevant state

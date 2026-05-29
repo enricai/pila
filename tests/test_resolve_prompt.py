@@ -12,8 +12,8 @@ import pytest
 
 
 @pytest.mark.parametrize("call_type", [
-    "classifier", "planner", "reconciler", "implementer", "integrator",
-    "conformer",
+    "classifier", "planner", "reconciler", "provision", "implementer",
+    "integrator", "conformer",
 ])
 def test_resolve_prompt_returns_valid_triple(pila, call_type):
     kind, content, hint = pila.resolve_prompt(call_type)

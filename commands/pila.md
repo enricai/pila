@@ -12,8 +12,15 @@ $ARGUMENTS
 ```
 
 Pila is a deterministic Python orchestrator (it does not run inside this
-session — it spawns its own `claude -p` workers). Launch it and relay the
-clarification step if one occurs.
+session — it spawns its own `claude -p` workers in a container). Launch
+it and relay the clarification step if one occurs.
+
+**Runtime prerequisite**: pila runs inside a container per run for
+guaranteed subprocess cleanup. The launcher itself does the preflight
+and prints `brew install colima` / `apt-get install containerd` hints
+on failure. If launching fails with a runtime-missing message, relay
+the launcher's hint verbatim — do not try to install runtime
+dependencies on the user's behalf.
 
 ## Steps
 
@@ -28,6 +35,20 @@ clarification step if one occurs.
    bash "${CLAUDE_PLUGIN_ROOT}/pila" --clarify "$ARGUMENTS"
    ```
 
+   The launcher spins up a container, mounts the user's repo at
+   `/work`, mounts `~/.claude/` read-write so workers can authenticate
+   and update Claude Code session state (history, sessions, plans),
+   bind-mounts `~/.config/gh`, `~/.git-credentials`, and `~/.ssh` so
+   the finalize-phase push + PR work with the user's existing GitHub
+   auth, and execs the orchestrator inside. Stdout streams back
+   through the Bash tool to this chat session.
+
+   Because the launcher detects this session has no TTY on its
+   stdin, it runs the container with `-i` only (no pty). Inside the
+   container, `sys.stdin.isatty()` returns False, so pila's
+   clarification path will use the file-passing dance below
+   instead of prompting interactively — exactly as it does today.
+
 2. **If it exits with code 10**, the orchestrator needs the user to answer
    classifier intent questions before it can continue. Read
    `.pila/pending-questions.json`, present each question to the user
@@ -40,7 +61,7 @@ clarification step if one occurs.
    `both`). They can pin the model with `--model sonnet|opus|haiku` (env:
    `PILA_MODEL`); per-worker overrides via `--model-<worker>` /
    `PILA_MODEL_<WORKER>`. Per-worker defaults: judgment workers
-   (classifier, planner, reconciler, integrator) default to `opus`;
+   (classifier, planner, reconciler, provision, integrator) default to `opus`;
    acting workers (implementer, conformer) default to `sonnet`.
    Then resume:
 

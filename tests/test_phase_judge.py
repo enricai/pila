@@ -54,7 +54,7 @@ _MODELS = {
     "judge": "opus",
 }
 
-_CALL_TYPES = ["classifier", "planner", "implementer"]
+_CALL_TYPES = ["classifier", "planner", "provision", "implementer"]
 
 
 def _make_records(n: int = 3) -> list[dict]:

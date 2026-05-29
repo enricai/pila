@@ -120,6 +120,7 @@ STATE_FIELDS = (
     "test_runner",
     "integrator_failure", "integrator_warnings", "scope_warnings",
     "conformance",
+    "provision",
 )
 
 CATEGORIES = [
@@ -192,7 +193,7 @@ INSPECT_TOOLS = (
 ACT_TOOLS = f"{_READ_BASE},Bash,Write,Edit"
 
 # --inspect-dir preference: extra directories to grant the inspect-bucket
-# workers (classifier, planner, reconciler) read access to via the
+# workers (classifier, planner, reconciler, provision) read access to via the
 # Claude Code CLI's --add-dir flag. Without this, Read/Grep/Glob and the
 # allowlisted Bash verbs in INSPECT_TOOLS are sandboxed to the repo cwd,
 # so cross-repo references like "~/src/enric/beacon" fail with "blocked,
@@ -282,8 +283,8 @@ MODEL_DEFAULT_PER_WORKER = {
 }
 MODEL_ENV = "PILA_MODEL"
 MODEL_FILE = "pila.toml"
-WORKER_TYPES = ("classifier", "planner", "reconciler", "implementer",
-                "integrator", "conformer")
+WORKER_TYPES = ("classifier", "planner", "reconciler", "provision",
+                "implementer", "integrator", "conformer")
 # Post-run skill workers — not in WORKER_TYPES because they don't run inside
 # the main orchestrate loop, but they do get dedicated model resolution via
 # --judge-model / --heal-model (and their env / TOML mirrors).
@@ -767,6 +768,49 @@ SCHEMAS: dict[str, dict] = {
             "pivot_reason": {"type": ["string", "null"]},
         },
     },
+    "provision": {
+        # LLM fallback for per-repo dependency provisioning (DESIGN §6½).
+        # Fires only when detect_recipe_from_lockfiles() returns an empty
+        # list — Java/Gradle, bare pyproject.toml, polyglot Makefile setups.
+        # The recipe is structurally bounded here, then mechanically
+        # validated by validate_provision_recipe() (§12 carve-out).
+        "type": "object",
+        "required": ["recipe"],
+        "properties": {
+            "recipe": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["kind", "command", "working_dir"],
+                    "properties": {
+                        # `none` means no install step is needed (pure docs
+                        # repo). `install` is the dep-fetch step. `build`
+                        # is a follow-on that prepares the workspace
+                        # (e.g. `pnpm run build` for an app that only
+                        # functions after a build pass). Workers see both
+                        # install and build commands replayed in worktrees.
+                        "kind": {"enum": ["install", "build", "none"]},
+                        # argv list (NOT a shell string). argv[0] must be
+                        # in the allowlist enforced by
+                        # validate_provision_recipe; no shell metacharacters
+                        # anywhere in the argv.
+                        "command": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                        },
+                        # `.` or a relative path inside the repo. No
+                        # absolute paths, no `..` segments — enforced by
+                        # validate_provision_recipe.
+                        "working_dir": {"type": "string"},
+                        "timeout_s": {"type": "integer", "minimum": 1},
+                    },
+                },
+            },
+            "confidence": {"type": "string"},
+            "notes": {"type": "string"},
+        },
+    },
 }
 
 
@@ -907,38 +951,193 @@ def _install_signal_handlers() -> None:
 _PROC_TREE_GRACE_SEC = 2.0
 
 
-async def _terminate_proc_tree(proc: asyncio.subprocess.Process) -> None:
-    """Terminate a subprocess *and its entire process group*, then reap.
+def _enumerate_descendants(root_pid: int) -> set[int]:
+    """Return every PID reachable from `root_pid` via PPID links.
 
-    Pila spawns every subprocess with `start_new_session=True`, so the
-    child becomes a session/PG leader (PGID == PID) and any tool-call
-    subprocesses it spawns inherit the same group. Signaling the
-    leader alone (the old `proc.kill()` path) left those grandchildren
-    reparented to PID 1.
+    A flat list of (pid, ppid) is enough because PPID points to a process's
+    *current* parent — even after one fork-and-detach. POSIX guarantees a
+    `ps -eo pid,ppid` snapshot is consistent enough for this; the snapshot
+    races a process's reparenting to init, but `_terminate_proc_tree`'s
+    SIGTERM-then-SIGKILL-after-grace pattern is robust to that race (any
+    process we miss in pass 1 we catch in pass 2 because PPID-walk re-runs
+    after the grace window, OR — if it was already reaped — it's gone).
 
-    Protocol: `SIGTERM` to the group, grace window
-    (`_PROC_TREE_GRACE_SEC`) for a clean shutdown, then `SIGKILL` if
-    anything is still alive. `proc.wait()` reaps the leader; the
-    kernel delivers the group signal to every PG member and init
-    reaps them once the group drains.
-
-    `ProcessLookupError` covers the race where the leader has already
-    exited before we signal. `PermissionError` covers the rare case
-    where the kernel won't let us signal a group we no longer own.
-    Both are non-fatal — the cleanup callers re-raise the original
-    exception either way.
-
-    `asyncio.CancelledError` (and other `BaseException`s) propagate
-    out of this helper unhandled, *after* the SIGKILL pass has been
-    issued in the `finally` block. Swallowing cancellation here would
-    silently break asyncio teardown — the caller's outer `raise` in
-    `run_proc` / `_invoke` would still fire, but the event loop
-    shutdown path expects `CancelledError` to surface."""
-    pgid = proc.pid  # PGID == PID when spawned with start_new_session=True
+    Returns the set of descendant PIDs *not* including root_pid itself.
+    `ps` failures (e.g. no permission) return an empty set: callers fall
+    back to the leader-only kill path."""
     try:
-        os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
+        out = subprocess.run(
+            ["ps", "-eo", "pid,ppid"],
+            capture_output=True, text=True, check=True, timeout=5,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return set()
+    children_of: dict[int, list[int]] = {}
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children_of.setdefault(ppid, []).append(pid)
+    seen: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        p = stack.pop()
+        for c in children_of.get(p, []):
+            if c not in seen:
+                seen.add(c)
+                stack.append(c)
+    return seen
+
+
+def _signal_pids(pids: set[int], sig: int) -> None:
+    """Best-effort signal delivery to a set of PIDs. Drops ProcessLookupError
+    (already dead) and PermissionError (not ours / already reaped). All other
+    OSError variants are also swallowed — this is a cleanup path; we cannot
+    let signal-delivery failure abort the teardown."""
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+_DESCENDANT_POLL_SEC = 0.5
+
+
+class _DescendantTracker:
+    """Background poller that accumulates every PID ever observed as a
+    descendant of `leader_pid` during the leader's lifetime.
+
+    Why this is needed (DESIGN §6): Claude Code's Bash tool uses
+    `run_in_background: true` to fire-and-forget long-running commands
+    (test runners, builds, dev servers). Each such command is spawned in
+    its own POSIX session (detached). The bash wrapper writes the
+    background task ID to the worker's stream and exits. When that
+    wrapper exits, its children (the actual long-running command) are
+    immediately reparented to PID 1 by the kernel.
+
+    Result: by the time `claude -p` itself exits and pila's `_invoke`
+    can call a post-hoc `_enumerate_descendants(claude_p.pid)`, the
+    backgrounded subprocesses are no longer descendants — they're
+    orphans of init. A snapshot taken at exit-time finds nothing.
+
+    Fix: take snapshots THROUGHOUT the worker's life, while the PPID
+    chain is still intact, and remember every PID we ever saw. At exit
+    time, SIGKILL the accumulated set. Anything that died naturally
+    yields ProcessLookupError (swallowed); anything still alive gets
+    reaped.
+
+    Polling cost is negligible: ~10ms per `ps` call every 500ms ≈ 2%
+    CPU during a worker's run. There is one tracker instance per
+    worker; all of them share pila's single asyncio event loop, so
+    even with `max_parallel` concurrent workers the polling stays on
+    one CPU."""
+
+    def __init__(self, leader_pid: int):
+        self._leader_pid = leader_pid
+        self._seen: set[int] = set()
+        self._task: asyncio.Task | None = None
+        self._stopped = False
+
+    def start(self) -> None:
+        """Spawn the polling task on the current event loop."""
+        if self._task is None:
+            self._task = asyncio.create_task(self._poll_loop())
+
+    async def _poll_loop(self) -> None:
+        try:
+            while not self._stopped:
+                descendants = _enumerate_descendants(self._leader_pid)
+                self._seen.update(descendants)
+                if not descendants and self._seen:
+                    # Worker has been alive long enough to spawn at
+                    # least one descendant AND that descendant is now
+                    # gone (reparented to init, or naturally exited).
+                    # Slow down to save ps calls during the worker's
+                    # winding-down phase — our accumulated `_seen` set
+                    # already holds the orphan PIDs we'll SIGKILL at
+                    # stop_and_reap.
+                    await asyncio.sleep(_DESCENDANT_POLL_SEC * 2)
+                else:
+                    # Either descendants ARE present (keep watching at
+                    # full rate), or we have NEVER seen one yet (the
+                    # leader may not have spawned its first child yet —
+                    # slowing down now would miss the first batch as
+                    # they appear). Stay at the fast poll rate.
+                    await asyncio.sleep(_DESCENDANT_POLL_SEC)
+        except asyncio.CancelledError:
+            return
+
+    async def stop_and_reap(self) -> int:
+        """Stop polling, SIGKILL every accumulated PID, return the
+        count signaled. Safe to call multiple times. Always runs at
+        worker exit, success-path AND failure-path."""
+        self._stopped = True
+        if self._task is not None:
+            # One final snapshot to catch anything spawned since the
+            # last poll cycle (still cheap — one `ps` call).
+            self._seen.update(_enumerate_descendants(self._leader_pid))
+            # Fire-and-forget cancel: the poll loop notices `_stopped`
+            # at its next iteration and exits cleanly. We don't `await`
+            # the cancelled task here because doing so would block at
+            # an `await` point, and a `CancelledError` propagating from
+            # the caller would be silently caught by any local
+            # exception handler — breaking asyncio's cancellation
+            # contract. The orphaned task is harmless; the event loop
+            # reaps it on shutdown.
+            self._task.cancel()
+            self._task = None
+        if self._seen:
+            _signal_pids(self._seen, signal.SIGKILL)
+        return len(self._seen)
+
+
+async def _terminate_proc_tree(proc: asyncio.subprocess.Process) -> None:
+    """Terminate a subprocess AND every descendant process, then reap.
+
+    Why a PPID-walk (not just `killpg`): Claude Code's Bash tool runs each
+    command via `bash -c` started in a *new POSIX session* (own PGID).
+    `os.killpg(claude_p_pgid)` does NOT reach those detached subprocesses
+    because they no longer share `claude -p`'s process group. The PPID chain
+    however stays intact while the parent lives, so a recursive walk through
+    `ps -eo pid,ppid` reaches every descendant regardless of how many session
+    layers separate them.
+
+    Algorithm: SIGTERM the leader's process group AND every descendant we can
+    enumerate; wait the grace window so well-behaved children flush; re-snapshot
+    (catches anything spawned mid-teardown OR not visible in pass 1);
+    SIGKILL the remainder; reap the leader. Init reaps any descendants we
+    cannot, once they exit.
+
+    Idempotent and exception-safe: this runs only from `_invoke`'s and
+    `run_proc`'s `except` blocks (abnormal-exit paths). Success-path
+    cleanup of detached backgrounded subprocesses (Claude Code's Bash
+    tool with `run_in_background: true`) is handled separately by
+    `_DescendantTracker`, because by the time a clean `claude -p` exit
+    is observable to pila those subprocesses have already reparented to
+    PID 1 and are no longer reachable from this helper's PPID walk.
+    All signal-delivery races (process already gone, PGID recycled)
+    are swallowed; the helper never raises.
+
+    `asyncio.CancelledError` propagates out unhandled, AFTER the SIGKILL pass
+    has fired in `finally`. Swallowing cancellation here would silently break
+    asyncio teardown — callers' outer `raise` would still fire, but the
+    event loop shutdown path expects `CancelledError` to surface."""
+    leader_pid = proc.pid
+    leader_pgid = proc.pid  # PGID == PID when spawned with start_new_session=True
+    # Pass 1: enumerate descendants while parent is still alive (PPID chain
+    # intact), then signal everything we found AND the leader's PG.
+    descendants = _enumerate_descendants(leader_pid)
+    try:
+        os.killpg(leader_pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
         pass
+    _signal_pids(descendants, signal.SIGTERM)
+
     exited_cleanly = False
     try:
         await asyncio.wait_for(proc.wait(), timeout=_PROC_TREE_GRACE_SEC)
@@ -946,26 +1145,25 @@ async def _terminate_proc_tree(proc: asyncio.subprocess.Process) -> None:
     except asyncio.TimeoutError:
         pass
     finally:
-        # SIGKILL escalation runs whenever the leader did not exit
-        # within the grace window — that includes the asyncio.TimeoutError
-        # path above AND the case where a CancelledError (or any other
-        # BaseException) is propagating through us. Once SIGTERM has
-        # been issued and we've started reaping, we are committed to
-        # tearing the group down; bailing out with the group still
-        # alive would leak the subtree we just signaled. CancelledError
-        # still propagates from the surrounding finally — we just make
-        # sure the kernel has had the SIGKILL and a chance to reap first.
+        # Re-enumerate. Anything we missed in pass 1 (spawned in the gap,
+        # or reparented before we read /proc), AND anything that ignored
+        # SIGTERM, gets SIGKILLed here. We always run this pass, even on
+        # `exited_cleanly` — the leader may be reaped but its detached
+        # grandchildren are not in its PGID, so its exit doesn't take them
+        # with it.
+        survivors = _enumerate_descendants(leader_pid)
+        try:
+            os.killpg(leader_pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        _signal_pids(survivors, signal.SIGKILL)
         if not exited_cleanly:
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            # `shield` keeps the reap running if the caller's task
-            # gets cancelled mid-wait; the cancellation still surfaces
-            # to the caller, but the OS does not accumulate a zombie.
+            # Reap the leader so the OS doesn't accumulate a zombie.
+            # `shield` keeps the reap running if the caller's task gets
+            # cancelled mid-wait; the cancellation still surfaces.
             try:
                 await asyncio.shield(proc.wait())
-            except (ProcessLookupError, PermissionError):
+            except (ProcessLookupError, PermissionError, OSError):
                 pass
 
 
@@ -1122,33 +1320,10 @@ def _check_claude_cli_version() -> None:
         )
 
 
-def _check_gh_cli(no_push: bool) -> None:
-    """Preflight gate for the push + PR finalize step (DESIGN §6
-    "Finalization"). Short-circuits silently when --no-push is set;
-    otherwise verifies that `gh` is installed, authenticated, and the
-    repo has an `origin` remote — all things `push_and_open_pr` will
-    need. Without this, a 40-worker run could complete successfully and
-    then fail at the very last step, leaving the user with a green run
-    branch but no PR."""
-    if no_push:
-        return
-    if not shutil.which("gh"):
-        die("`gh` CLI not found on PATH. Either install GitHub CLI "
-            "(https://cli.github.com) or pass `--no-push` to skip the "
-            "push and PR step at finalize.")
-    auth = subprocess.run(["gh", "auth", "status"],
-                          capture_output=True, text=True, check=False)
-    if auth.returncode != 0:
-        die("`gh` is installed but not authenticated. Run "
-            "`gh auth login`, or pass `--no-push` to skip the push and "
-            "PR step at finalize.\n"
-            f"gh auth status stderr:\n  {auth.stderr.strip()}")
-    remote = subprocess.run(["git", "remote", "get-url", "origin"],
-                            capture_output=True, text=True, check=False)
-    if remote.returncode != 0:
-        die("this repository has no `origin` remote — finalize cannot "
-            "push the run branch. Either `git remote add origin <url>` "
-            "or pass `--no-push` to skip the push and PR step.")
+# `_check_gh_cli` was removed when finalize moved to the host launcher
+# (DESIGN §6 *Finalization*). The launcher does `gh auth status` + the
+# origin check itself, before spinning up the container — auth state
+# lives on the host, so the check belongs there.
 
 
 # --- run identifier (DESIGN §6 "The run identifier") --------------------
@@ -1755,7 +1930,7 @@ def resolve_max_workers(repo_root: Path,
 def resolve_inspect_dirs(repo_root: Path,
                          cli_values: list[str] | None = None) -> list[str]:
     """Resolve the extra inspection directories for classifier/planner/
-    reconciler. Order: --inspect-dir CLI flags (one or more, repeatable) →
+    reconciler/provision. Order: --inspect-dir CLI flags (one or more, repeatable) →
     PILA_INSPECT_DIRS env var (colon-separated) → inspect_dirs in
     pila.toml (comma-separated string) → []. Paths are expanded
     (~ → $HOME) and resolved to absolute form so a relative path in TOML
@@ -2145,10 +2320,11 @@ async def run_proc(cmd: list[str], *, cwd: str | None = None,
     semantics callers already handle. One helper everywhere keeps the asyncio
     boilerplate out of the call sites.
 
-    `start_new_session=True` makes the child a session/PG leader so the
-    abnormal-exit cleanup path can `os.killpg(pgid, ...)` the entire
-    subtree — see `_terminate_proc_tree`. POSIX-only behavior; the flag
-    is a no-op on Windows."""
+    `start_new_session=True` isolates the child into its own POSIX
+    session/process group, distinct from pila's own. This is what lets
+    `_terminate_proc_tree` send `os.killpg(proc.pid, ...)` on the
+    cleanup path without accidentally signaling the orchestrator's own
+    group. The flag is a no-op on Windows."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=cwd,
@@ -2171,6 +2347,11 @@ async def run_proc(cmd: list[str], *, cwd: str | None = None,
         # orphan subtree. Terminate the process group then re-raise.
         await _terminate_proc_tree(proc)
         raise
+    # Success path needs no descendant sweep: `run_proc` is used for short
+    # synchronous commands (git, smoke tests, cleanup helpers) that do not
+    # background tool calls the way `claude -p` workers do via Claude Code's
+    # Bash tool. The detached-session leak class addressed by
+    # `_DescendantTracker` is specific to `_invoke`, not here.
     return subprocess.CompletedProcess(
         cmd,
         proc.returncode if proc.returncode is not None else 0,
@@ -2252,12 +2433,10 @@ async def preflight(pila_dir: Path, verbosity: str = VERBOSITY_DEFAULT,
     #    'unknown option' that tells the user nothing actionable.
     _check_claude_cli_version()
 
-    # 5. gh CLI installed + authenticated + origin remote present (DESIGN §6
-    #    "Push + PR"). Short-circuited when --no-push is set; otherwise
-    #    catches the case where a 40-worker run completes and then fails at
-    #    the very last step (no PR opened, user has merged work but no
-    #    review surface).
-    _check_gh_cli(no_push)
+    # 5. gh CLI preflight moved to the host launcher (DESIGN §6
+    #    *Finalization*). The launcher checks `gh auth status` + origin
+    #    remote presence before spinning up this container; if they
+    #    fail, the container never starts.
 
     # 6. live smoke-test: auth + --output-format stream-json + --json-schema inline.
     #    Catches auth failures before a 40-worker run starts. Streams so a slow
@@ -2397,6 +2576,584 @@ def detect_test_runner() -> list[str] | None:
             return ["make", "test"]
 
     return None
+
+
+# --- per-repo dependency provisioning ----------------------------------------
+# See DESIGN.md §6½ "Per-repo dependency provisioning" and IMPLEMENTATION.md
+# §6½ for the layered design (.pila-setup.sh → mise install → table → LLM
+# fallback → worktree replay).
+
+# argv[0] allowlist for any provision command — both table-emitted commands
+# and the LLM-fallback recipe. Validated by validate_provision_recipe().
+# Anything outside this set is rejected; the §12 carve-out (the LLM
+# fallback worker) is mechanically contained by this list.
+_PROVISION_ARGV0_ALLOW = frozenset({
+    "pnpm", "npm", "yarn", "pip", "pip3", "uv", "poetry", "pipenv",
+    "go", "cargo", "bundle", "gem", "mvn", "gradle", "gradlew", "make",
+})
+
+# Shell metacharacters that must not appear anywhere in a command argv.
+# A command emitted as a true argv list cannot legitimately need any of
+# these — the executor invokes it directly with no shell, and any
+# metacharacter is a sign the recipe was malformed or smuggling shell
+# semantics through the validator.
+_PROVISION_SHELL_METACHARS = frozenset(set("|&;$`><\n\r"))
+
+
+def _lockfile_table_entries(repo_root: Path) -> list[dict]:
+    """The deterministic lockfile → install-command table. Returns a list of
+    recipe entries (possibly empty) — polyglot repos like Rails-with-frontend
+    emit ALL matching commands, not first-match-wins. See IMPLEMENTATION.md
+    §6½ for the full table.
+
+    Each entry is the minimal recipe shape: {kind, command, working_dir,
+    timeout_s}. Callers compose them into a full recipe and persist to
+    st.data["provision"]["recipe"].
+    """
+    entries: list[dict] = []
+
+    # --- Node.js: pnpm > yarn > npm precedence ---
+    # The precedence is documented at the pnpm and yarn sites: a repo that
+    # commits multiple lockfiles is rare, but when it happens the most-
+    # specific one wins. pnpm-lock.yaml means the team has chosen pnpm even
+    # if package-lock.json was left behind from a prior tool.
+    has_pnpm = (repo_root / "pnpm-lock.yaml").is_file()
+    has_yarn = (repo_root / "yarn.lock").is_file()
+    has_npm = (repo_root / "package-lock.json").is_file()
+    if has_pnpm:
+        entries.append({
+            "kind": "install",
+            "command": ["pnpm", "install", "--frozen-lockfile"],
+            "working_dir": ".",
+            "timeout_s": 1800,
+        })
+    elif has_yarn:
+        entries.append({
+            "kind": "install",
+            "command": ["yarn", "install", "--frozen-lockfile"],
+            "working_dir": ".",
+            "timeout_s": 1800,
+        })
+    elif has_npm:
+        entries.append({
+            "kind": "install",
+            "command": ["npm", "ci"],
+            "working_dir": ".",
+            "timeout_s": 1800,
+        })
+
+    # --- Python: uv > poetry > pipenv. Bare requirements.txt and bare
+    # pyproject.toml (without a lockfile) deliberately do NOT match — they
+    # are the ambiguous tail that goes to the LLM fallback (verified
+    # against Django, which uses `pip install -e .`).
+    if (repo_root / "uv.lock").is_file():
+        entries.append({
+            "kind": "install",
+            "command": ["uv", "sync"],
+            "working_dir": ".",
+            "timeout_s": 1800,
+        })
+    elif (repo_root / "poetry.lock").is_file():
+        entries.append({
+            "kind": "install",
+            "command": ["poetry", "install"],
+            "working_dir": ".",
+            "timeout_s": 1800,
+        })
+    elif (repo_root / "Pipfile.lock").is_file():
+        entries.append({
+            "kind": "install",
+            "command": ["pipenv", "install"],
+            "working_dir": ".",
+            "timeout_s": 1800,
+        })
+
+    # --- Go ---
+    if (repo_root / "go.mod").is_file() and (repo_root / "go.sum").is_file():
+        entries.append({
+            "kind": "install",
+            "command": ["go", "mod", "download"],
+            "working_dir": ".",
+            "timeout_s": 1800,
+        })
+
+    # --- Rust ---
+    if (repo_root / "Cargo.lock").is_file():
+        entries.append({
+            "kind": "install",
+            "command": ["cargo", "fetch"],
+            "working_dir": ".",
+            "timeout_s": 1800,
+        })
+
+    # --- Ruby ---
+    if (repo_root / "Gemfile.lock").is_file():
+        entries.append({
+            "kind": "install",
+            "command": ["bundle", "install"],
+            "working_dir": ".",
+            "timeout_s": 1800,
+        })
+
+    return entries
+
+
+def detect_recipe_from_lockfiles(repo_root: Path) -> list[dict]:
+    """Public entry point for the deterministic detection layer. Returns
+    a list of recipe entries (possibly empty). An empty list means the
+    table abstained and the caller should fall back to the LLM worker.
+    """
+    return _lockfile_table_entries(repo_root)
+
+
+def validate_provision_recipe(recipe: list[dict]) -> None:
+    """Mechanically bound the provision recipe. Raises ValueError on any
+    violation. Called for BOTH the table-emitted recipe and the LLM-
+    fallback recipe — the §12 carve-out for the LLM worker is contained
+    here, not in the prompt.
+
+    Invariants enforced:
+      - command is a non-empty argv list (no shell strings).
+      - command[0] is in _PROVISION_ARGV0_ALLOW (or the entry is kind: none).
+      - No shell metacharacters anywhere in the argv (no piping, no
+        redirection, no command substitution).
+      - No `sudo` anywhere.
+      - working_dir is "." or a relative path with no ".." segments and
+        no leading "/" (worker cannot reach outside the repo).
+      - kind is one of {install, build, none}.
+    """
+    if not isinstance(recipe, list):
+        raise ValueError(f"recipe must be a list, got {type(recipe).__name__}")
+    for i, entry in enumerate(recipe):
+        if not isinstance(entry, dict):
+            raise ValueError(f"recipe[{i}] is not a dict: {entry!r}")
+        kind = entry.get("kind")
+        if kind not in ("install", "build", "none"):
+            raise ValueError(
+                f"recipe[{i}].kind={kind!r} must be one of install|build|none")
+        if kind == "none":
+            # `none` entries are bypass markers; no command required.
+            continue
+        cmd = entry.get("command")
+        if not isinstance(cmd, list) or not cmd:
+            raise ValueError(
+                f"recipe[{i}].command must be a non-empty argv list")
+        if any(not isinstance(a, str) for a in cmd):
+            raise ValueError(
+                f"recipe[{i}].command must be a list of strings")
+        if cmd[0] not in _PROVISION_ARGV0_ALLOW:
+            raise ValueError(
+                f"recipe[{i}].command[0]={cmd[0]!r} is not in the allowed "
+                f"package-manager set {sorted(_PROVISION_ARGV0_ALLOW)}")
+        for j, arg in enumerate(cmd):
+            if arg == "sudo":
+                raise ValueError(
+                    f"recipe[{i}].command contains 'sudo' at position {j}")
+            bad = _PROVISION_SHELL_METACHARS & set(arg)
+            if bad:
+                raise ValueError(
+                    f"recipe[{i}].command[{j}]={arg!r} contains shell "
+                    f"metacharacters {sorted(bad)}")
+        wd = entry.get("working_dir")
+        if not isinstance(wd, str) or not wd:
+            raise ValueError(
+                f"recipe[{i}].working_dir must be a non-empty string")
+        if wd.startswith("/"):
+            raise ValueError(
+                f"recipe[{i}].working_dir={wd!r} must be relative, not absolute")
+        # ".." anywhere in the path — split on both `/` and `\` so a
+        # Windows-style smuggling attempt is also caught.
+        parts = wd.replace("\\", "/").split("/")
+        if ".." in parts:
+            raise ValueError(
+                f"recipe[{i}].working_dir={wd!r} contains '..' "
+                "(must not traverse outside the repo)")
+
+
+# Section-header regex for the README extractor. Matches install/setup-
+# adjacent words. Verified against 15 real OSS READMEs (DESIGN §6½ + the
+# verification corpus in tests/test_readme_extractor.py): catches 13/15.
+# The two known misses (Supabase, esbuild) are marketing-style READMEs
+# that delegate install to external docs — those repos route through
+# .pila-setup.sh.
+_README_SECTION_RE = re.compile(
+    r"(?i)\b("
+    r"install"
+    r"|getting[\s-]?started"
+    r"|quick[\s-]?start"
+    r"|setup"
+    r"|usage"
+    r"|\brun\b"
+    r"|develop"
+    r"|build(ing)?( from source| instructions)?"
+    r"|compil(e|ing)( from source)?"
+    r"|download"
+    r"|from source"
+    r"|requirements"
+    r"|prerequisites"
+    r"|dependenc(y|ies)"
+    r")\b"
+)
+
+# Strip leading markdown-decoration glyphs (emoji, bullets, punctuation)
+# from a header line before keyword matching. Handles `## 🚀 Getting
+# Started` and `## • Install` without losing the keyword. The character
+# class is intentionally permissive — emoji span several Unicode blocks,
+# so we whitelist ASCII word characters / spaces instead and strip
+# everything else from the left.
+_HEADER_DECOR_RE = re.compile(r"^[^\w]+", flags=re.UNICODE)
+
+# Code-fence content heuristics for the fallback layer. Used when no
+# header matches: keep code fences that contain recognizable install
+# commands so the LLM still sees the project's documented invocation.
+_INSTALL_CMD_HINT_RE = re.compile(
+    r"\b(pip|pip3|npm|pnpm|yarn|uv|poetry|cargo|brew|apt|apt-get|dnf|"
+    r"yum|pacman|go install|make|bundle install|gem install|mise install)\b"
+)
+
+
+def _split_readme_headers(text: str) -> list[tuple[int, str, str]]:
+    """Return [(line_index, header_text, body_until_next_header), ...] for
+    text. Supports three header styles:
+      - ATX: lines starting with `#`, `##`, etc.
+      - Setext: a line followed by `===` or `---` of equal length.
+      - Asciidoc: lines starting with `==`, `===`, etc. (no `#`).
+
+    Returns sections in document order. The first section's header text
+    is "" if the file does not start with a header (the "intro").
+    """
+    lines = text.split("\n")
+    n = len(lines)
+    # Find header line indices first.
+    headers: list[tuple[int, str]] = []  # (line_index, header_text)
+    i = 0
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        # ATX (`# Foo`, `## Foo`, etc.). Asciidoc level markers (`==
+        # Foo`) are picked up too — the leading `=` group reads as
+        # header decoration once we strip it for keyword matching.
+        if stripped.startswith("#") or stripped.startswith("=="):
+            headers.append((i, stripped))
+            i += 1
+            continue
+        # Setext: `Foo\n=====` (h1) or `Foo\n-----` (h2). The underline
+        # must be at least 3 chars of `=` or `-` and roughly the length
+        # of the line above (RST conventions are looser than Markdown's
+        # but we accept any underline ≥3 chars).
+        if i + 1 < n and stripped:
+            nxt = lines[i + 1].strip()
+            if len(nxt) >= 3 and (set(nxt) == {"="} or set(nxt) == {"-"}):
+                headers.append((i, stripped))
+                i += 2
+                continue
+        i += 1
+
+    if not headers:
+        return [(0, "", text)]
+
+    sections: list[tuple[int, str, str]] = []
+    # Intro before the first header.
+    if headers[0][0] > 0:
+        intro_body = "\n".join(lines[: headers[0][0]])
+        sections.append((0, "", intro_body))
+    for k, (start, hdr) in enumerate(headers):
+        end = headers[k + 1][0] if k + 1 < len(headers) else n
+        body = "\n".join(lines[start: end])
+        sections.append((start, hdr, body))
+    return sections
+
+
+def _is_install_section(header: str) -> bool:
+    """True if a header (after decoration-strip) matches the section
+    regex. Empty header (the intro) is not an install section by
+    definition."""
+    if not header:
+        return False
+    cleaned = _HEADER_DECOR_RE.sub("", header)
+    return bool(_README_SECTION_RE.search(cleaned))
+
+
+def _slice_code_fences_with_install_hints(text: str, ctx_lines: int = 10) -> str:
+    """Fallback layer: scan for fenced code blocks containing recognized
+    install commands and return them with ±ctx_lines of surrounding
+    context. Used when the header-aware extractor finds no install
+    section."""
+    lines = text.split("\n")
+    n = len(lines)
+    in_fence = False
+    fence_start = -1
+    fence_marker = ""
+    kept_ranges: list[tuple[int, int]] = []  # inclusive [start, end] line indices
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not in_fence:
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = True
+                fence_start = i
+                fence_marker = stripped[:3]
+        else:
+            if stripped.startswith(fence_marker):
+                # Fence closed at line i.
+                fence_text = "\n".join(lines[fence_start: i + 1])
+                if _INSTALL_CMD_HINT_RE.search(fence_text):
+                    lo = max(0, fence_start - ctx_lines)
+                    hi = min(n - 1, i + ctx_lines)
+                    kept_ranges.append((lo, hi))
+                in_fence = False
+                fence_start = -1
+                fence_marker = ""
+    if not kept_ranges:
+        return ""
+    # Merge overlapping ranges in order.
+    merged: list[tuple[int, int]] = []
+    for lo, hi in sorted(kept_ranges):
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    pieces = ["\n".join(lines[lo: hi + 1]) for lo, hi in merged]
+    return "\n\n…\n\n".join(pieces)
+
+
+# Per-extract budgets, in bytes. README ≤1KB intro + matched sections
+# under an 8KB total cap. The fixture set as a whole is capped at 24KB
+# by gather_provision_fixtures().
+_README_INTRO_BUDGET = 1024
+_README_EXTRACT_BUDGET = 8192
+_README_FALLBACK_BUDGET = 6144  # final top-of-file fallback
+_FIXTURE_TOTAL_BUDGET = 24576   # 24KB hard ceiling per repo
+
+
+def extract_readme_sections(text: str) -> str:
+    """Extract the install/setup-relevant slice of a README.
+
+    Fallback chain (DESIGN §6½):
+      1. Header-aware: ≤1KB intro + sections whose header matches
+         _README_SECTION_RE, under an 8KB total cap.
+      2. Code-fence hint: if no section header matches, scan for code
+         fences containing install commands (pip/npm/cargo/etc.) and
+         keep them with ±10 lines of surrounding context.
+      3. Final: top-6KB of the README verbatim.
+
+    Returns the extracted text (≤8KB). Empty input → empty output.
+    """
+    if not text:
+        return ""
+    sections = _split_readme_headers(text)
+    out_parts: list[str] = []
+    used = 0
+
+    # Intro budget: first section body, whether labeled or not. A README
+    # that starts with `# Project\n\nElevator pitch.\n\n## Install` has
+    # its first section named "Project" (not ""), but the elevator pitch
+    # is still the intro from the user's point of view. Including the
+    # first section's body (up to the intro budget) keeps that signal
+    # without making the whole top-level section count as an install
+    # section.
+    if sections:
+        first_body = sections[0][2][:_README_INTRO_BUDGET]
+        if first_body.strip():
+            out_parts.append(first_body)
+            used += len(first_body)
+
+    matched_any = False
+    for _idx, hdr, body in sections:
+        if not _is_install_section(hdr):
+            continue
+        matched_any = True
+        if used >= _README_EXTRACT_BUDGET:
+            break
+        room = _README_EXTRACT_BUDGET - used
+        out_parts.append(body[:room])
+        used += min(len(body), room)
+
+    if matched_any:
+        return "\n\n".join(out_parts)
+
+    # Fallback 2: code-fence install-hint slicer.
+    fence_slice = _slice_code_fences_with_install_hints(text)
+    if fence_slice:
+        intro_part = out_parts[0] if out_parts else ""
+        fence_room = max(0, _README_EXTRACT_BUDGET - len(intro_part))
+        fence_part = fence_slice[:fence_room]
+        if intro_part:
+            return intro_part + "\n\n" + fence_part
+        return fence_part
+
+    # Fallback 3: top-6KB.
+    return text[:_README_FALLBACK_BUDGET]
+
+
+def _read_file_safely(path: Path, budget: int) -> str:
+    """Read a file with a byte ceiling, swallowing missing-file and
+    decode errors. Used by gather_provision_fixtures to assemble the
+    fixture dict from optional repo files."""
+    try:
+        return path.read_text(errors="replace")[:budget]
+    except (OSError, UnicodeError):
+        return ""
+
+
+# Manifest file groups for the fixture gatherer.
+_PROVISION_ROOT_MANIFESTS = (
+    "package.json", "pyproject.toml", "go.mod", "Cargo.toml",
+    "Gemfile", "Makefile", "pom.xml",
+    "build.gradle", "build.gradle.kts",
+)
+_PROVISION_WORKFLOW_PREFERRED_RE = re.compile(r"(?i)\b(ci|test|build|release)\b")
+_PROVISION_WORKFLOW_SKIP_RE = re.compile(r"(?i)\b(codeql|stale|dependabot)\b")
+
+
+def _sample_workspace_manifests(repo_root: Path, pkg_json_text: str,
+                                 per_file_budget: int,
+                                 max_files: int) -> list[tuple[str, str]]:
+    """For a monorepo whose root package.json declares `workspaces`,
+    return up to `max_files` sampled child manifests as (rel_path, text)
+    pairs. Returns [] if no workspaces are declared or no children are
+    found."""
+    try:
+        pkg = json.loads(pkg_json_text)
+    except (ValueError, TypeError):
+        return []
+    workspaces = pkg.get("workspaces")
+    if isinstance(workspaces, dict):
+        # npm/yarn shape: {"packages": [...]}
+        workspaces = workspaces.get("packages")
+    if not isinstance(workspaces, list) or not workspaces:
+        return []
+
+    sampled: list[tuple[str, str]] = []
+    seen: set[Path] = set()
+    for pattern in workspaces:
+        if len(sampled) >= max_files:
+            break
+        if not isinstance(pattern, str):
+            continue
+        # glob via Path.glob (handles `packages/*` style).
+        try:
+            for child in sorted(repo_root.glob(pattern + "/package.json")):
+                if len(sampled) >= max_files:
+                    break
+                if child in seen:
+                    continue
+                seen.add(child)
+                rel = child.relative_to(repo_root).as_posix()
+                sampled.append((rel, _read_file_safely(child, per_file_budget)))
+        except (OSError, ValueError):
+            continue
+    return sampled
+
+
+def gather_provision_fixtures(repo_root: Path) -> dict:
+    """Assemble the LLM-fallback worker's input set. Returns a dict with
+    keys:
+      - readme: header-aware extract (≤8KB)
+      - manifests: dict[rel_path -> text] of root manifest files present
+      - workspace_manifests: list[(rel_path, text)] sampled child
+        manifests for monorepos (≤3 files, 1KB each)
+      - workflows: list[(filename, text)] up to 2 GitHub Actions files
+        preferring ci/test/build/release names
+      - contributing: text of CONTRIBUTING.md or docs/DEVELOPMENT.md
+        (≤4KB) or empty
+      - total_bytes: int — actual size after assembly
+      - hit_ceiling: bool — True if any section was truncated by the
+        24KB total budget
+
+    See DESIGN.md §6½ "Provision-worker input fixtures."
+    """
+    out: dict = {
+        "readme": "",
+        "manifests": {},
+        "workspace_manifests": [],
+        "workflows": [],
+        "contributing": "",
+        "total_bytes": 0,
+        "hit_ceiling": False,
+    }
+
+    def add_bytes(n: int) -> bool:
+        """Return True if we have budget for `n` more bytes; flip
+        hit_ceiling otherwise."""
+        if out["total_bytes"] + n > _FIXTURE_TOTAL_BUDGET:
+            out["hit_ceiling"] = True
+            return False
+        out["total_bytes"] += n
+        return True
+
+    # --- README ---
+    readme_paths = [
+        repo_root / "README.md",
+        repo_root / "README.rst",
+        repo_root / "README",
+        repo_root / "README.txt",
+        repo_root / "README.adoc",
+    ]
+    for rp in readme_paths:
+        if rp.is_file():
+            raw = _read_file_safely(rp, _README_EXTRACT_BUDGET * 4)
+            extract = extract_readme_sections(raw)
+            if add_bytes(len(extract)):
+                out["readme"] = extract
+            break
+
+    # --- Root manifests ---
+    pkg_json_text = ""
+    for name in _PROVISION_ROOT_MANIFESTS:
+        if out["hit_ceiling"]:
+            break
+        p = repo_root / name
+        if not p.is_file():
+            continue
+        text = _read_file_safely(p, 8192)
+        if not add_bytes(len(text)):
+            break
+        out["manifests"][name] = text
+        if name == "package.json":
+            pkg_json_text = text
+
+    # --- Workspace child manifests (monorepo) ---
+    if pkg_json_text and not out["hit_ceiling"]:
+        children = _sample_workspace_manifests(
+            repo_root, pkg_json_text, per_file_budget=1024, max_files=3)
+        for rel, text in children:
+            if not add_bytes(len(text)):
+                break
+            out["workspace_manifests"].append((rel, text))
+
+    # --- Workflows ---
+    if not out["hit_ceiling"]:
+        wf_dir = repo_root / ".github" / "workflows"
+        if wf_dir.is_dir():
+            try:
+                candidates = [p for p in sorted(wf_dir.iterdir())
+                              if p.suffix in (".yml", ".yaml") and p.is_file()
+                              and not _PROVISION_WORKFLOW_SKIP_RE.search(p.name)]
+            except OSError:
+                candidates = []
+            # Prefer files whose names match ci/test/build/release.
+            preferred = [p for p in candidates
+                         if _PROVISION_WORKFLOW_PREFERRED_RE.search(p.name)]
+            others = [p for p in candidates if p not in preferred]
+            ordered = preferred + others
+            for p in ordered[:2]:
+                text = _read_file_safely(p, 4096)
+                if not add_bytes(len(text)):
+                    break
+                out["workflows"].append((p.name, text))
+
+    # --- CONTRIBUTING / DEVELOPMENT ---
+    if not out["hit_ceiling"]:
+        for cand in (repo_root / "CONTRIBUTING.md",
+                     repo_root / "docs" / "DEVELOPMENT.md",
+                     repo_root / "DEVELOPMENT.md"):
+            if cand.is_file():
+                text = _read_file_safely(cand, 4096)
+                if add_bytes(len(text)):
+                    out["contributing"] = text
+                break
+
+    return out
 
 
 # --- checkpoint validation ---------------------------------------------------
@@ -3082,6 +3839,15 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
         # grandchildren `claude -p` spawns (vitest, dev servers, etc.).
         start_new_session=True,
     )
+    # Track every descendant PID that ever appears under this worker. Claude
+    # Code's Bash tool uses `run_in_background: true` to fire-and-forget
+    # long-running commands (test runners, builds, dev servers); those
+    # subprocesses outlive `claude -p`'s exit and are orphaned to init by the
+    # time pila could PPID-walk post-exit. The tracker observes them while
+    # the chain is still intact, then SIGKILLs the accumulated set at the
+    # end. See DESIGN §6 *Cleanup on abnormal exit*.
+    descendant_tracker = _DescendantTracker(proc.pid)
+    descendant_tracker.start()
     envelope: dict | None = None
     stderr_chunks: list[bytes] = []
 
@@ -3159,14 +3925,28 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
             timeout=timeout)
     except asyncio.TimeoutError:
         await _terminate_proc_tree(proc)
+        await descendant_tracker.stop_and_reap()
         raise subprocess.TimeoutExpired(cmd, timeout)
     except BaseException:
-        # Same orphan-subtree guard as run_proc: terminate the whole
-        # process group (claude -p + its tool-call grandchildren) and
-        # reap, then re-raise. Pila's gather_or_cancel relies on this
-        # for clean aborts.
+        # Terminate the worker's whole subtree (claude -p + its tool-call
+        # grandchildren via PPID walk) and reap any backgrounded
+        # subprocesses the tracker observed during the run. Then re-raise.
+        # Pila's gather_or_cancel relies on this for clean aborts.
         await _terminate_proc_tree(proc)
+        await descendant_tracker.stop_and_reap()
         raise
+    # Success path: reap any backgrounded subprocesses the worker left
+    # behind. `claude -p` workers use Claude Code's Bash tool with
+    # `run_in_background: true` for long-running tasks (test runners,
+    # builds, dev servers — DESIGN §6). Those subprocesses
+    # are spawned in detached POSIX sessions, exit-reparent to PID 1, and
+    # would otherwise outlive `claude -p`'s clean exit. The tracker has
+    # accumulated their PIDs throughout the worker's life; stop_and_reap
+    # SIGKILLs the union.
+    leaked = await descendant_tracker.stop_and_reap()
+    if leaked:
+        log(f"  [{sid}] reaped {leaked} backgrounded subprocess(es) "
+            f"that survived `claude -p` exit")
 
     if envelope is None:
         stderr_txt = b"".join(stderr_chunks).decode(errors="replace").strip()
@@ -3225,12 +4005,24 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
     `planner-bug-fixing`, `integrator-feat-001`, `conformer-feat-003`).
 
     `add_dirs` are extra paths forwarded to the CLI as `--add-dir` entries.
-    Used by the inspect bucket (classifier, planner, reconciler) so the
-    `Read`/`Grep`/`Glob` sandbox and the allowlisted `Bash` verbs can reach
-    sibling repos referenced in the task description. Resolved by
+    Used by the inspect bucket (classifier, planner, reconciler, provision)
+    so the `Read`/`Grep`/`Glob` sandbox and the allowlisted `Bash` verbs can
+    reach sibling repos referenced in the task description. Resolved by
     `resolve_inspect_dirs()` and persisted under `st.data["inspect_dirs"]`
     so `--resume` honors the original choice.
     """
+    # Drift guard: typos in `schema_key` would write orphan rows into
+    # calls.ndjson (judge/heal filter by call_type, so an orphan is
+    # silently dropped). Fail fast at the call site instead. The
+    # allowed set is WORKER_TYPES plus the two post-run skill schemas
+    # (`judge`, `patch_generator`) that are not main-loop workers but
+    # do invoke claude_p with their own schema.
+    _allowed_schema_keys = set(WORKER_TYPES) | {"judge", "patch_generator"}
+    if schema_key not in _allowed_schema_keys:
+        raise ValueError(
+            f"claude_p called with unknown schema_key {schema_key!r}; "
+            f"expected one of {sorted(_allowed_schema_keys)}"
+        )
     schema = json.dumps(SCHEMAS[schema_key], separators=(",", ":"))
     pila_dir = st.path.parent
     verbosity = st.data.get("verbosity", VERBOSITY_DEFAULT)
@@ -4180,6 +4972,613 @@ async def phase_heal(call_type: str, failing_records: list[dict],
 
 
 # =========================================================================
+# per-repo dependency provisioning helpers (DESIGN §6½)
+# =========================================================================
+
+# Categories that touch only documentation / non-code surfaces. If classify
+# returned *only* these, phase_provision short-circuits to kind:none — no
+# point installing deps for a docs-only run. The check is "are all returned
+# categories in this set?" so a feature+docs task still provisions.
+_DOCS_ONLY_CATEGORIES = frozenset({"documentation"})
+
+
+async def run_setup_hook(repo_root: Path, log_dir: Path,
+                          st: "State") -> None:
+    """Execute `<repo>/.pila-setup.sh` if present. Idempotent via
+    `st.data["provision"]["sh_hook_ran"]` — re-entering this function
+    after the hook has already run is a no-op.
+
+    The script runs as the `pila` container user (non-root), in the
+    repo root, with the same environment workers will see. Output
+    streams to `<log_dir>/setup-hook.log`. Nonzero exit → `die()`.
+
+    **What the hook CAN do** (runs unprivileged):
+    - `mise install <lang>@<version>` to add a language runtime mise
+      supports beyond the image-baked LTS bake (Ruby, Java, Rust, etc.).
+    - Install user-space CLI tools into `~/.local/bin` or any other
+      user-writable location.
+    - Pre-populate fixtures the workers need (sample data, config).
+    - Set per-run environment variables via `~/.bashrc` (note: the
+      orchestrator does not source bashrc by default; the hook would
+      need to write its own activation).
+
+    **What the hook CANNOT do** (no root, no sudo):
+    - `apt-get install` or any package-manager invocation requiring
+      root. The container intentionally does NOT ship sudo.
+    - Write to `/usr/*`, `/etc/*`, or any other system directory.
+    - Install system services.
+
+    If a repo needs a system package the language layer can't provide,
+    the documented workaround is to maintain a fork of the pila
+    Dockerfile that installs it at image-build time and override
+    `IMAGE_TAG`. Out of scope for pila to automate.
+    """
+    prov = st.data.setdefault("provision", {})
+    if prov.get("sh_hook_ran"):
+        return
+    hook = repo_root / ".pila-setup.sh"
+    if not hook.exists():
+        return
+    # A path at .pila-setup.sh that isn't a regular file (most likely a
+    # directory committed by mistake) is silent-failure-shaped: workers
+    # would later die with confusing "command not found" messages from
+    # the unrun setup. Surface the misshape here with a clear message.
+    if not hook.is_file():
+        die(
+            f".pila-setup.sh at {hook} exists but is not a regular "
+            "file (it's a directory or special file). Remove the "
+            "misnamed entry or replace it with an executable script."
+        )
+
+    log("phase 1½: running .pila-setup.sh")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "setup-hook.log"
+    try:
+        proc = await run_proc(
+            ["bash", str(hook)],
+            cwd=str(repo_root),
+            timeout=600,  # 10 minutes
+        )
+    except subprocess.TimeoutExpired:
+        die(".pila-setup.sh did not complete within 10 minutes")
+    # Persist combined output for inspection.
+    try:
+        log_path.write_text(
+            (proc.stdout or "") + (proc.stderr or ""))
+    except OSError:
+        pass
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-40:])
+        die(f".pila-setup.sh exited {proc.returncode}\n{tail}")
+    prov["sh_hook_ran"] = True
+    st.save()
+
+
+# Regex for extracting the `go 1.X[.Y]` directive from a go.mod file.
+# Matches the canonical form documented at https://go.dev/ref/mod#go-mod-file-go .
+_GO_MOD_VERSION_RE = re.compile(r"^\s*go\s+(\d+(?:\.\d+){0,2})\s*$", re.MULTILINE)
+
+
+def _existing_mise_toml_path(repo_root: Path) -> Path | None:
+    """Return the path to whichever of `mise.toml` or `.mise.toml`
+    exists in the repo root, or None if neither does. Prefers the
+    non-dotted form when both exist — matches mise's documented
+    discovery precedence
+    (https://mise.jdx.dev/configuration.html: "Paths which start
+    with `mise` can be dotfiles, e.g.: `.mise.toml`").
+    """
+    for name in ("mise.toml", ".mise.toml"):
+        p = repo_root / name
+        if p.is_file():
+            return p
+    return None
+
+
+def _go_already_pinned(repo_root: Path) -> bool:
+    """Return True if the repo already specifies a Go version mise would
+    pick up — via `.go-version`, a `go` entry in `.tool-versions`, or a
+    `[tools] go = "..."` in `mise.toml`/`.mise.toml`. In any of these
+    cases pila should NOT synthesize an override; the existing pin wins.
+    """
+    if (repo_root / ".go-version").is_file():
+        return True
+    tv = repo_root / ".tool-versions"
+    if tv.is_file():
+        try:
+            for line in tv.read_text(errors="replace").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#") or not stripped:
+                    continue
+                # `.tool-versions` is whitespace-separated: `tool version`.
+                parts = stripped.split()
+                if parts and parts[0].lower() == "go":
+                    return True
+        except OSError:
+            pass
+    mt = _existing_mise_toml_path(repo_root)
+    if mt is not None:
+        try:
+            content = mt.read_text(errors="replace")
+            # Cheap text-level check — TOML parsing here would pull in
+            # tomllib but the heuristic is sufficient: any `go =` line
+            # under a [tools] section indicates a pin.
+            if re.search(r"(?m)^\s*go\s*=", content):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+# Strip leading `v` or `V` (any number) from `.nvmrc`/`.node-version`
+# values; mise expects bare semver. Compiled once at module load.
+_LEADING_V_RE = re.compile(r"^[vV]+")
+
+
+# Idiomatic version files mise reads natively *when discovery walks
+# the repo* — but NOT when `MISE_OVERRIDE_CONFIG_FILENAMES` is set
+# (verified against mise discussions #6598 / #7058). When the override
+# fires (because pila synthesized a go pin), every idiomatic file the
+# repo committed for some OTHER language is silently dropped — workers
+# end up running on the image-baked LTS instead of the pinned version.
+# So when the override fires, pila scans these files and injects their
+# pins into the override's `[tools]` section.
+_IDIOMATIC_VERSION_FILES = (
+    # (filename, mise tool key, value transformer)
+    (".nvmrc", "node", lambda s: _LEADING_V_RE.sub("", s)),
+    (".node-version", "node", lambda s: _LEADING_V_RE.sub("", s)),
+    (".python-version", "python", lambda s: s),
+    (".ruby-version", "ruby", lambda s: s),
+)
+
+
+# asdf-compatible names (used by `.tool-versions`) that mise treats as
+# aliases for its canonical tool names. Without this map, a repo with
+# `.nvmrc` (injects `node`) plus `.tool-versions` carrying
+# `nodejs 20.11.0` would end up with both `node` and `nodejs` in the
+# override — mise treats both as the same tool, producing ambiguous
+# resolution. Normalize asdf names BEFORE checking already_pinned.
+_ASDF_TOOL_ALIASES = {
+    "nodejs": "node",
+    "python3": "python",
+}
+
+
+def _existing_mise_toml_tool_keys(text: str | None) -> set[str]:
+    """Return the set of tool keys pinned by a `[tools]` section in the
+    given mise.toml text. Used by `synth_mise_go_override` to avoid
+    re-pinning a tool the repo already wired up explicitly. Heuristic
+    line-level scan — full TOML parsing would pull in tomllib and the
+    set of forms we care about (top-level `[tools]` table, simple
+    `<key> =` lines) is tiny.
+    """
+    if not text:
+        return set()
+    keys: set[str] = set()
+    in_tools = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_tools = (stripped == "[tools]")
+            continue
+        if not in_tools:
+            continue
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=", line)
+        if m:
+            keys.add(m.group(1))
+    return keys
+
+
+def _read_idiomatic_pins(repo_root: Path,
+                          already_pinned: set[str]) -> list[tuple[str, str]]:
+    """Return [(tool, version), ...] for every idiomatic version file in
+    `repo_root` whose tool is NOT already in `already_pinned`.
+
+    Used to bridge the `MISE_OVERRIDE_CONFIG_FILENAMES` semantic: when
+    the override is set, mise reads ONLY the listed files; idiomatic
+    discovery is suppressed. Pila must therefore copy the pins forward
+    explicitly. See DESIGN §6½ "Per-repo dependency provisioning."
+
+    `.tool-versions` is parsed line-by-line (asdf-compatible format:
+    `<tool> <version>` per line, comments with `#`).
+
+    `rust-toolchain.toml` is intentionally out of scope — the file's
+    `[toolchain] channel = "..."` shape needs more care than a regex
+    sweep, and the rare repo that committed only rust-toolchain.toml
+    can add a `mise.toml` or commit `.tool-versions` instead.
+    """
+    pins: list[tuple[str, str]] = []
+    for filename, tool, transform in _IDIOMATIC_VERSION_FILES:
+        if tool in already_pinned:
+            continue
+        path = repo_root / filename
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(errors="replace").strip()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        version = transform(raw.splitlines()[0].strip())
+        if not version:
+            continue
+        pins.append((tool, version))
+        already_pinned.add(tool)
+    # .tool-versions: asdf-compatible, multiple tools per file.
+    # asdf and mise sometimes disagree on tool names (asdf calls Node
+    # `nodejs`, mise calls it `node`). Normalize via _ASDF_TOOL_ALIASES
+    # before the dedup check so we don't pin both `node` AND `nodejs`
+    # (which mise treats as the same tool — ambiguous resolution).
+    tv = repo_root / ".tool-versions"
+    if tv.is_file():
+        try:
+            content = tv.read_text(errors="replace")
+        except OSError:
+            content = ""
+        for line in content.splitlines():
+            stripped = line.split("#", 1)[0].strip()
+            if not stripped:
+                continue
+            parts = stripped.split()
+            if len(parts) < 2:
+                continue
+            raw_tool, version = parts[0], parts[1]
+            tool = _ASDF_TOOL_ALIASES.get(raw_tool, raw_tool)
+            if tool in already_pinned:
+                continue
+            pins.append((tool, version))
+            already_pinned.add(tool)
+    return pins
+
+
+def synth_mise_go_override(repo_root: Path, run_dir: Path) -> Path | None:
+    """If `go.mod` exists and no other Go pin is in place, write a mise
+    override file that pins the Go version mise should install. Returns
+    the absolute path to the override file (so the caller can export
+    `MISE_OVERRIDE_CONFIG_FILENAMES` before invoking `mise install`),
+    or None if no synthesis was needed.
+
+    `MISE_OVERRIDE_CONFIG_FILENAMES` REPLACES the default config
+    discovery rather than merging with it (verified against mise docs
+    and discussions #4136 / #8510 / #6598 / #7058). When the override
+    is set, mise reads ONLY the listed files — both `mise.toml` AND
+    idiomatic files (`.nvmrc`, `.python-version`, etc.) are otherwise
+    silently dropped. This helper preserves both:
+
+      - Existing `mise.toml` content is read and the `go = "X"` pin
+        is inserted into its `[tools]` section (no duplicate header).
+      - Idiomatic version files in the repo root (`.nvmrc`,
+        `.node-version`, `.python-version`, `.ruby-version`,
+        `.tool-versions`) are read; any tool NOT already pinned in
+        `mise.toml` gets its pin copied into the override's `[tools]`
+        section alongside the synthesized go pin.
+
+    Without the idiomatic-file copy, a polyglot Go+Node repo with
+    `go.mod` + `.nvmrc: 20.11.0` and no `mise.toml` would silently
+    install only Go; the Node version pinned in `.nvmrc` would drop
+    to the image-baked LTS, defeating the runtime-version guarantee
+    the entire mise layer was built to provide.
+
+    **Known limits of the existing-mise-config scanner:**
+    `_existing_mise_toml_tool_keys` reads tool pins from the canonical
+    `[tools]` section with bare keys (`node = "20"`). Two valid TOML
+    forms are NOT detected — when present, pila will re-inject pins
+    from idiomatic files alongside the existing ones, producing
+    duplicate keys that mise rejects mid-run:
+
+      - Inline-table form: `tools = { node = "20.11.0" }`
+      - Quoted keys: `[tools]\n"node" = "20.11.0"`
+
+    Both are rare in practice (the canonical form is what mise's
+    docs and `mise use` write). Repos that hit these can switch to
+    the canonical form. A proper fix would need `tomllib` (3.11+
+    stdlib) — pila's minimum is 3.10 — or a hand-written inline-
+    table parser; neither is justified by current usage.
+
+    See DESIGN §6½ and IMPLEMENTATION §6½ step 3.
+    """
+    gomod = repo_root / "go.mod"
+    if not gomod.is_file():
+        return None
+    if _go_already_pinned(repo_root):
+        return None
+    try:
+        text = gomod.read_text(errors="replace")
+    except OSError:
+        return None
+    m = _GO_MOD_VERSION_RE.search(text)
+    if not m:
+        return None
+    version = m.group(1)
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    override_path = run_dir / "mise-overrides.toml"
+
+    header_comment = (
+        "# Synthesized by pila from go.mod (DESIGN §6½).\n"
+        "# mise's go plugin does not parse go.mod itself; idiomatic\n"
+        "# version files (.nvmrc, .python-version, etc.) are copied in\n"
+        "# because MISE_OVERRIDE_CONFIG_FILENAMES suppresses discovery.\n"
+    )
+
+    existing = _existing_mise_toml_path(repo_root)
+    existing_text: str | None = None
+    if existing is not None:
+        try:
+            existing_text = existing.read_text(errors="replace")
+        except OSError:
+            existing_text = None
+
+    # Build the full set of new pins (go + every idiomatic-file tool
+    # that the existing mise.toml doesn't already pin).
+    already_pinned = _existing_mise_toml_tool_keys(existing_text)
+    already_pinned.add("go")  # we're adding it ourselves below
+    idiomatic_pins = _read_idiomatic_pins(repo_root, already_pinned)
+    new_pin_lines = [f'go = "{version}"'] + [
+        f'{tool} = "{ver}"' for tool, ver in idiomatic_pins
+    ]
+
+    if existing_text is None:
+        # No existing mise.toml — emit a minimal override carrying just
+        # the new pins.
+        body = "[tools]\n" + "\n".join(new_pin_lines) + "\n"
+        override_path.write_text(header_comment + body)
+        return override_path
+
+    # Insert new pin lines into the existing [tools] section if one
+    # exists; otherwise append a fresh [tools] section. We avoid
+    # emitting a duplicate [tools] header (TOML 1.0 §6.5 — "Defining a
+    # table more than once is invalid").
+    lines = existing_text.rstrip("\n").split("\n")
+    out_lines: list[str] = []
+    inserted = False
+    in_tools = False
+    for line in lines:
+        out_lines.append(line)
+        stripped = line.strip()
+        # Detect entering the [tools] table. A subsequent table header
+        # (`[other]`) exits it. Subtables (`[tools.something]`) are also
+        # valid TOML but are out of scope for this synthesis — pila only
+        # cares about adding scalar keys to the top-level [tools].
+        if not in_tools and stripped == "[tools]":
+            in_tools = True
+            # Insert immediately after the header, before any existing
+            # keys. This is the safe minimal change.
+            out_lines.extend(new_pin_lines)
+            inserted = True
+            in_tools = False  # done — keys after are preserved as-is
+            continue
+    if not inserted:
+        # No [tools] section in the existing file — append one.
+        if out_lines and out_lines[-1].strip() != "":
+            out_lines.append("")
+        out_lines.append("[tools]")
+        out_lines.extend(new_pin_lines)
+
+    override_path.write_text(
+        header_comment + "\n".join(out_lines) + "\n")
+    return override_path
+
+
+# Filenames that signal "this repo pins a runtime version mise should
+# install." Used by `_repo_has_version_signal` to decide whether to
+# invoke `mise install` at all — an unversioned repo runs on the
+# image-baked LTS without bothering mise.
+_MISE_SIGNAL_FILES = (
+    "mise.toml", ".mise.toml",
+    ".tool-versions",
+    ".nvmrc", ".node-version",
+    ".python-version",
+    ".ruby-version",
+    "rust-toolchain.toml",
+    ".go-version",
+)
+
+
+def _repo_has_version_signal(repo_root: Path,
+                              override_file: Path | None) -> bool:
+    """Return True if the repo declares any runtime version pin mise
+    can act on, OR if pila already synthesized an override file. False
+    means there's nothing for `mise install` to do; the LTS fallback
+    in the image is the right answer."""
+    if override_file is not None:
+        return True
+    for name in _MISE_SIGNAL_FILES:
+        if (repo_root / name).is_file():
+            return True
+    return False
+
+
+async def run_mise_install(repo_root: Path, log_dir: Path,
+                            st: "State",
+                            override_file: Path | None = None) -> None:
+    """Invoke `mise install` at the repo root. If `override_file` is
+    provided, exports `MISE_OVERRIDE_CONFIG_FILENAMES` so mise reads
+    pila's synthesized config instead of the default discovery walk.
+
+    Captures resolved versions via `mise ls --current --json` and stores
+    the raw blob at `st.data["provision"]["mise_versions"]` — callers can
+    reduce `tools[name][0].version` for display.
+
+    Failures propagate to `die()` with the failing tool/version and the
+    last 40 lines of mise output.
+
+    No-signals short-circuit: if the repo has zero version pins (no
+    `mise.toml`, `.tool-versions`, idiomatic file, or pila-synthesized
+    override), this function is a logged no-op. The image-baked LTS
+    Node and Python on PATH then become the workers' runtime. Without
+    this guard, mise's exact behavior for `mise install` with no
+    declared tools is implementation-dependent and could `die()` the
+    whole run with a confusing "no tools to install" message — exactly
+    the case the LTS-fallback story was supposed to handle smoothly.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "provision.log"
+
+    if not _repo_has_version_signal(repo_root, override_file):
+        log("  no version pins detected — workers run on image-baked LTS")
+        prov = st.data.setdefault("provision", {})
+        prov["mise_versions"] = {}
+        st.save()
+        return
+
+    env = os.environ.copy()
+    if override_file is not None:
+        env["MISE_OVERRIDE_CONFIG_FILENAMES"] = str(override_file)
+
+    # `mise install` with no tool args reads the active config and
+    # installs every declared tool. We let the resolver figure out the
+    # set from the repo's .tool-versions / .nvmrc / .python-version /
+    # rust-toolchain.toml / .go-version (the last either committed or
+    # synthesized by synth_mise_go_override).
+    proc = await asyncio.create_subprocess_exec(
+        "mise", "install",
+        cwd=str(repo_root),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    stdout, _ = await proc.communicate()
+    output = stdout.decode(errors="replace") if stdout else ""
+    try:
+        # Append rather than overwrite — phase_provision may write
+        # multiple log entries across its steps.
+        with log_path.open("a") as f:
+            f.write("=== mise install ===\n")
+            f.write(output)
+            f.write("\n")
+    except OSError:
+        pass
+    if proc.returncode != 0:
+        tail = "\n".join(output.splitlines()[-40:])
+        die(f"mise install failed (exit {proc.returncode})\n{tail}")
+
+    # Capture resolved versions. `mise ls --current --json` is the
+    # documented machine-readable view; `mise current --json` does NOT
+    # exist (verified against mise.usage.kdl).
+    proc = await asyncio.create_subprocess_exec(
+        "mise", "ls", "--current", "--json",
+        cwd=str(repo_root),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        # Not fatal — phase_provision can still execute install commands
+        # without knowing the resolved versions. Log and move on.
+        log(f"mise ls --current --json failed (exit {proc.returncode}); "
+            "skipping version capture")
+        return
+    try:
+        versions = json.loads(stdout.decode(errors="replace") if stdout else "{}")
+    except (ValueError, TypeError):
+        versions = {}
+    prov = st.data.setdefault("provision", {})
+    prov["mise_versions"] = versions
+    st.save()
+
+
+def wrap_with_mise_exec(cmd: list[str]) -> list[str]:
+    """Prepend `mise exec --` to a command so the resolved toolchain is
+    active. Idempotent — if the command is already wrapped, returns it
+    unchanged.
+
+    `mise exec` is a true execvp (verified against `src/cli/exec.rs`),
+    so the wrapped command's children (postinstall scripts, node-gyp
+    builds, etc.) inherit the activated PATH and see the right runtime.
+    """
+    if cmd[:3] == ["mise", "exec", "--"]:
+        return cmd
+    return ["mise", "exec", "--"] + list(cmd)
+
+
+async def replay_provision_in_worktree(worktree: Path, st: "State") -> None:
+    """Replay the persisted provision recipe against a fresh worktree.
+
+    Called once per `new-worktree.sh` invocation, after the worktree is
+    created and before the implementer worker runs. Each install command
+    runs through `mise exec --` so the same toolchain resolved by
+    phase_provision is active in the new worktree (the version files —
+    `.nvmrc` etc. — are tracked, so they're already checked out).
+
+    Shared caches (pnpm store, pip wheels, go-mod, cargo registry) make
+    this fast on the second+ worktree because the warm-up pass in
+    phase_provision already populated them.
+
+    A failure during replay is non-fatal — logged, but the worker still
+    starts. The orchestrator's existing per-subtask gates (build/lint/
+    test in conformance) will catch a worktree that's genuinely broken
+    by a missing install. Treating replay failure as terminal here would
+    block runs in the rare case where a worktree-specific install hiccup
+    (concurrent cache write that lost a race, transient network blip)
+    can be tolerated; the conformance phase is the load-bearing check.
+    """
+    prov = st.data.get("provision") or {}
+    recipe = prov.get("recipe") or []
+    if not recipe:
+        return
+    log_path = st.run_dir / "logs" / "provision.log"
+
+    # The override env var is what bridges the gap when the synth fired
+    # for a polyglot repo (e.g. go.mod + .nvmrc, no .go-version). Without
+    # this, mise's discovery in the worktree wouldn't find the
+    # synthesized go pin (the override file lives under .pila/, which is
+    # not in the worktree's tracked-file set), and `mise exec -- go ...`
+    # would fall through to system PATH — no Go on PATH, command not
+    # found, attributed confusingly to the worker.
+    override_file = prov.get("override_file")
+    env = os.environ.copy()
+    if override_file:
+        env["MISE_OVERRIDE_CONFIG_FILENAMES"] = str(override_file)
+
+    for entry in recipe:
+        kind = entry.get("kind")
+        if kind == "none":
+            continue
+        if kind not in ("install", "build"):
+            continue
+        cmd = entry.get("command") or []
+        if not cmd:
+            continue
+        wrapped = wrap_with_mise_exec(cmd)
+        wd = entry.get("working_dir", ".")
+        timeout = entry.get("timeout_s") or 1800
+        cwd = worktree if wd in (".", "") else worktree / wd
+        # Direct asyncio.create_subprocess_exec (instead of run_proc) so
+        # we can pass env. Matches the pattern in run_mise_install.
+        proc = await asyncio.create_subprocess_exec(
+            *wrapped,
+            cwd=str(cwd),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            await _terminate_proc_tree(proc)
+            log(f"  warning: worktree replay timed out: {' '.join(cmd)}")
+            continue
+        out = stdout.decode(errors="replace") if stdout else ""
+        err = stderr.decode(errors="replace") if stderr else ""
+        try:
+            with log_path.open("a") as f:
+                f.write(f"=== replay {worktree.name}: {' '.join(wrapped)} ===\n")
+                f.write(out + err)
+                f.write("\n")
+        except OSError:
+            pass
+        if proc.returncode != 0:
+            log(f"  warning: worktree replay exited {proc.returncode}: "
+                f"{' '.join(cmd)} (see {log_path})")
+
+
+# =========================================================================
 # phases
 # =========================================================================
 async def phase_classify(task: str, st: State, caps: dict, clarify: bool,
@@ -4368,6 +5767,209 @@ def surface_clarification(sid: str, question: dict, checkpoint_path: str,
     st.data["answers"] = answers
     st.save()
     return True
+
+
+def _format_provision_user_prompt(fixtures: dict, task: str) -> str:
+    """Compose the LLM-fallback user prompt from the assembled fixture
+    set. Mirrors the layout the worker prompt expects."""
+    parts: list[str] = [
+        f"TASK CONTEXT:\n{task}",
+        "",
+        "Below are the repo signals you have to decide how to install "
+        "its dependencies. Emit a recipe that uses the project's own "
+        "documented commands. Reject any command outside the allowlist."
+        " Emit `kind: none` if no install is needed (pure docs repo).",
+        "",
+    ]
+    if fixtures["readme"]:
+        parts += ["=== README (install-relevant slice) ===",
+                  fixtures["readme"], ""]
+    for name, text in fixtures["manifests"].items():
+        parts += [f"=== {name} ===", text, ""]
+    for rel, text in fixtures["workspace_manifests"]:
+        parts += [f"=== {rel} (workspace child) ===", text, ""]
+    for name, text in fixtures["workflows"]:
+        parts += [f"=== .github/workflows/{name} ===", text, ""]
+    if fixtures["contributing"]:
+        parts += ["=== CONTRIBUTING / DEVELOPMENT docs ===",
+                  fixtures["contributing"], ""]
+    if fixtures["hit_ceiling"]:
+        parts.append(
+            "[fixture set was truncated to the 24KB budget — some "
+            "files may be incomplete]")
+    return "\n".join(parts)
+
+
+async def phase_provision(repo_root: Path, st: State, caps: dict,
+                           models: dict[str, str]) -> None:
+    """Phase 1½: per-repo dependency provisioning.
+
+    Runs after classify so a docs-only run can short-circuit. Five
+    ordered steps (DESIGN §6½):
+
+      1. Docs-only short-circuit. If classify returned only
+         documentation categories, persist `kind: none` and return.
+      2. `.pila-setup.sh` hook if present.
+      3. Synthesize a mise go-override from `go.mod` if needed.
+      4. `mise install` at the repo root (reads .tool-versions natively
+         and .nvmrc / .python-version / .ruby-version /
+         rust-toolchain.toml via the image-set
+         MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS env). Capture
+         resolved versions via `mise ls --current --json`.
+      5. Detect install commands: deterministic lockfile table first
+         (emits all matches for polyglot repos), LLM fallback if the
+         table abstains. Validate the recipe, then execute each
+         command through `mise exec --` so the resolved toolchain is
+         active. Persist recipe + per-command status to
+         st.data["provision"].
+
+    Naturally skipped on `--resume` because the entire fresh-run
+    else-branch in `orchestrate()` is skipped.
+    """
+    log("phase 1½: provisioning per-repo deps")
+    prov = st.data.setdefault("provision", {})
+    log_dir = st.run_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Docs-only short-circuit.
+    cats = set(st.data.get("categories") or [])
+    if cats and cats <= _DOCS_ONLY_CATEGORIES:
+        log("  docs-only task: skipping dep install")
+        prov["source"] = "skipped-docs-only"
+        prov["recipe"] = [{"kind": "none", "command": [],
+                           "working_dir": ".", "timeout_s": 0}]
+        prov["commands"] = []
+        st.save()
+        return
+
+    # 2. Setup hook.
+    await run_setup_hook(repo_root, log_dir, st)
+
+    # 3. Synthesize a mise go override if go.mod lacks a sibling pin.
+    override = synth_mise_go_override(repo_root, st.run_dir)
+    if override is not None:
+        log(f"  synthesized mise override at {override.name} "
+            f"(go.mod → .go-version equivalent)")
+    # Persist so replay_provision_in_worktree can re-export
+    # MISE_OVERRIDE_CONFIG_FILENAMES against the same file when a fresh
+    # worktree replays the recipe. Without this, mise's discovery in
+    # the worktree wouldn't see the synthesized go pin (go.mod isn't
+    # parsed by mise) and `mise exec -- go ...` would fall through to
+    # system PATH where Go isn't installed — confusing failure.
+    prov["override_file"] = str(override) if override is not None else None
+    st.save()
+
+    # 4. mise install + version capture.
+    await run_mise_install(repo_root, log_dir, st, override_file=override)
+    versions = prov.get("mise_versions") or {}
+    if versions:
+        version_summary = ", ".join(
+            f"{tool} {entries[0].get('version', '?')}"
+            for tool, entries in sorted(versions.items())
+            if isinstance(entries, list) and entries
+        )
+        if version_summary:
+            log(f"  resolved versions: {version_summary}")
+
+    # 5a. Detect install commands — table first.
+    recipe = detect_recipe_from_lockfiles(repo_root)
+    if recipe:
+        prov["source"] = "table"
+        log(f"  table emitted {len(recipe)} install command(s)")
+    else:
+        # 5b. LLM fallback.
+        log("  table abstained — invoking provision worker")
+        fixtures = gather_provision_fixtures(repo_root)
+        sys_prompt = load_prompt("provision")
+        user_prompt = _format_provision_user_prompt(fixtures, st.data["task"])
+        st.bump_workers(caps)
+        result = await claude_p(
+            user_prompt=user_prompt,
+            system_prompt=sys_prompt,
+            schema_key="provision",
+            cwd=str(repo_root),
+            allowed_tools=INSPECT_TOOLS,
+            max_turns=30,
+            autonomous=False,
+            caps=caps, st=st,
+            model=models.get("provision", MODEL_DEFAULT),
+            sid="provision",
+            add_dirs=st.data.get("inspect_dirs") or None,
+        )
+        recipe = result.get("recipe") or []
+        prov["source"] = "llm"
+
+    # Validate before executing. This is the §12 carve-out's mechanical
+    # containment: any drift from the schema or allowlist is rejected
+    # here, not in the prompt.
+    try:
+        validate_provision_recipe(recipe)
+    except ValueError as e:
+        die(f"provision recipe failed validation: {e}")
+
+    prov["recipe"] = recipe
+    prov["commands"] = []
+    st.save()
+
+    # 5c. Execute each command through `mise exec --`. Persist per-
+    # command status as we go so a partial failure leaves a useful audit.
+    log_path = log_dir / "provision.log"
+    for i, entry in enumerate(recipe):
+        kind = entry["kind"]
+        if kind == "none":
+            prov["commands"].append({
+                "kind": "none", "cmd": [], "status": "skipped",
+                "log_tail": "",
+            })
+            st.save()
+            continue
+        wrapped = wrap_with_mise_exec(entry["command"])
+        wd = entry.get("working_dir", ".")
+        timeout = entry.get("timeout_s") or 1800
+        cwd = repo_root if wd in (".", "") else repo_root / wd
+        log(f"  [{i + 1}/{len(recipe)}] {' '.join(entry['command'])} "
+            f"(cwd={wd}, timeout={timeout}s)")
+        try:
+            proc = await run_proc(wrapped, cwd=str(cwd), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            tail = ""
+            try:
+                with log_path.open("a") as f:
+                    f.write(f"=== TIMEOUT: {' '.join(wrapped)} (cwd={wd}) ===\n")
+            except OSError:
+                pass
+            prov["commands"].append({
+                "kind": kind, "cmd": entry["command"], "status": "timeout",
+                "log_tail": tail,
+            })
+            st.save()
+            die(f"provision command timed out after {timeout}s: "
+                f"{' '.join(entry['command'])}")
+        combined = (proc.stdout or "") + (proc.stderr or "")
+        try:
+            with log_path.open("a") as f:
+                f.write(f"=== {' '.join(wrapped)} (cwd={wd}) ===\n")
+                f.write(combined)
+                f.write("\n")
+        except OSError:
+            pass
+        tail = "\n".join(combined.splitlines()[-40:])
+        if proc.returncode != 0:
+            prov["commands"].append({
+                "kind": kind, "cmd": entry["command"],
+                "status": "failed", "log_tail": tail,
+            })
+            st.save()
+            die(f"provision command failed (exit {proc.returncode}): "
+                f"{' '.join(entry['command'])}\n{tail}")
+        prov["commands"].append({
+            "kind": kind, "cmd": entry["command"],
+            "status": "ok", "log_tail": "",
+        })
+        st.save()
+
+    log(f"  provision complete ({len(recipe)} command(s), "
+        f"source={prov['source']})")
 
 
 async def phase_plan(task: str, st: State, caps: dict,
@@ -4759,6 +6361,11 @@ async def run_implementer(sid: str, pila_dir: Path, caps: dict, st: State,
     if proc.returncode != 0:
         raise WorkerError(f"worktree creation failed for {sid}: {proc.stderr.strip()}")
     worktree = proc.stdout.strip().splitlines()[-1]
+    # Replay the persisted provision recipe so this fresh worktree has
+    # its deps installed before the implementer worker starts. Shared
+    # caches (pnpm/Go/Cargo/pip wheels) make this fast on the second+
+    # worktree (DESIGN §6½).
+    await replay_provision_in_worktree(Path(worktree), st)
 
     # DESIGN §11 mid-execution clarification: the worker may exit with
     # `needs-clarification` only when --clarify is in effect. Without
@@ -5594,90 +7201,32 @@ async def phase_execute(pila_dir: Path, st: State, caps: dict,
         st.save()
 
 
-async def push_and_open_pr(st: State, no_verify: bool) -> None:
-    """Push the run branch to `origin` and open a PR via `gh pr create`.
-
-    Called from `phase_finalize` when `--no-push` is NOT in effect. The
-    run branch is the integration artifact; the PR is the proposed
-    integration into the working branch. Pila does not merge into
-    the working branch locally. See DESIGN §6 "Finalization" for the
-    failure-handling contract:
-
-    - Push failure: capture stderr, write `push_error` to run.json,
-      log a multi-line message naming the run branch (where the work
-      lives) and the working branch (unchanged), exit non-zero (die).
-      User can retry the push manually.
-    - PR-creation failure: capture stderr, write `pr_error` to run.json,
-      log a multi-line *warning* with the pushed-branch URL and the
-      retry command, exit success (the run is complete; the PR is a
-      courtesy).
-
-    The body for `gh pr create` is generated deterministically by
-    `compose_pr_body(st.data, st.run_id)`."""
-    run_branch = compute_run_branch(st.run_id)
-    working_branch = (st.run_dir / "working-branch").read_text().strip()
-
-    # ----- step 1: push --------------------------------------------------
-    push_cmd = ["git", "push", "-u", "origin", run_branch]
-    if no_verify:
-        push_cmd.append("--no-verify")
-    log(f"finalize: pushing {run_branch} to origin"
-        f"{' (--no-verify)' if no_verify else ''}")
-    push = subprocess.run(push_cmd, capture_output=True, text=True, check=False)
-    if push.returncode != 0:
-        stderr = (push.stderr or "").strip()
-        _write_run_json(
-            st.run_dir,
-            pushed_at=None, push_error=stderr or "git push failed",
-            pr_url=None, pr_error=None,
-        )
-        die(
-            f"git push failed for branch `{run_branch}`.\n"
-            f"  Local state is intact:\n"
-            f"    - run branch:     {run_branch}     (holds all wave merges)\n"
-            f"    - working branch: {working_branch}      (unchanged from run start; the intended PR base)\n"
-            f"  Resolve and retry manually:\n"
-            f"    git push -u origin {run_branch}"
-            f"{' --no-verify' if no_verify else ''}\n"
-            f"  Push stderr was:\n"
-            + "\n".join(f"    {line}" for line in stderr.splitlines())
-        )
-    pushed_at = now()
-    _write_run_json(st.run_dir, pushed_at=pushed_at, push_error=None)
-    log(f"finalize: pushed {run_branch}")
-
-    # ----- step 2: PR creation ------------------------------------------
-    body = compose_pr_body(st.data, st.run_id)
-    title = f"pila: {st.run_id}"
-    pr_cmd = ["gh", "pr", "create",
-              "--base", working_branch,
-              "--head", run_branch,
-              "--title", title,
-              "--body-file", "-"]
-    log(f"finalize: opening PR against {working_branch}")
-    pr = subprocess.run(pr_cmd, input=body, capture_output=True,
-                        text=True, check=False)
-    if pr.returncode != 0:
-        # Non-fatal: the run is complete; only the PR is missing.
-        stderr = (pr.stderr or "").strip()
-        _write_run_json(st.run_dir, pr_url=None, pr_error=stderr or "gh pr create failed")
-        log(
-            f"⚠  `gh pr create` failed; branch was pushed successfully.\n"
-            f"  Pushed branch: {run_branch} (on origin)\n"
-            f"  Open the PR manually:\n"
-            f"    gh pr create --base {working_branch} --head {run_branch}\n"
-            f"  Or via the GitHub web UI for the repo.\n"
-            f"  gh stderr was:\n"
-            + "\n".join(f"    {line}" for line in stderr.splitlines())
-        )
-        return
-    pr_url = (pr.stdout or "").strip()
-    _write_run_json(st.run_dir, pr_url=pr_url or None, pr_error=None)
-    log(f"finalize: opened PR {pr_url}")
+# `push_and_open_pr` was removed when finalize moved to the host
+# launcher (DESIGN §6 *Finalization*). The launcher does `git push` +
+# `gh pr create` in bash + jq after this container exits — auth state
+# lives on the host where it works without forwarding.
+#
+# `compose_pr_body` is kept (above) as the canonical reference for the
+# PR body shape; the launcher's bash composition is structurally
+# equivalent. Keeping the Python version makes future audits cheap
+# (one file to read).
 
 
 async def phase_finalize(pila_dir: Path, st: State, no_push: bool,
                          no_verify: bool) -> None:
+    """Phase 6: verify the run branch and record finalize state.
+
+    The push + PR step has moved to the host launcher (DESIGN §6
+    *Finalization*); this phase no longer makes network calls. It runs
+    `finalize.sh` to verify the run branch is non-empty, runs
+    `cleanup.sh` to drop subtask branches, writes `finished_at` to
+    state.json + run.json, and exits. The launcher polls run.json's
+    `finished_at` sentinel and does `git push` + `gh pr create` on the
+    host using the host's own auth state.
+
+    `no_verify` is passed through into the run.json sidecar so the
+    launcher knows whether to add `--no-verify` to its `git push`.
+    """
     log("phase 6: finalizing")
     proc = await run_script("finalize.sh", st.run_id)
     if proc.returncode != 0:
@@ -5689,27 +7238,26 @@ async def phase_finalize(pila_dir: Path, st: State, no_push: bool,
     tel = st.data.get("telemetry", {})
     st.data["finished_at"] = now()
     st.save()
-    # Record finalize success in the run.json sidecar before push/PR.
-    # If push fails, the sidecar still shows the run completed locally;
-    # the user can read run.json's finished_at + push_error to know
-    # exactly where things stand.
-    _write_run_json(st.run_dir, finished_at=st.data["finished_at"])
+    # Record finalize success in the run.json sidecar. The launcher
+    # uses `finished_at` as the "ready for push" sentinel; `no_push`
+    # and `no_verify` propagate intent the launcher needs.
+    _write_run_json(
+        st.run_dir,
+        finished_at=st.data["finished_at"],
+        no_push=no_push,
+        no_verify=no_verify,
+    )
 
     if no_push:
         log(f"skipped push and PR (--no-push); the run branch "
             f"{compute_run_branch(st.run_id)} is local-only; "
             "your working branch is unchanged")
     else:
-        await push_and_open_pr(st, no_verify=no_verify)
+        log(f"work is on {compute_run_branch(st.run_id)}; the host "
+            "launcher will push and open the PR after this container exits")
 
-    pr_url = None
-    sidecar = st.run_dir / "run.json"
-    if sidecar.exists():
-        try:
-            pr_url = json.loads(sidecar.read_text()).get("pr_url")
-        except (OSError, ValueError):
-            pr_url = None
-    pr_suffix = f" PR: {pr_url}." if pr_url else ""
+    pr_url = None  # the launcher writes pr_url to run.json after gh pr create
+    pr_suffix = ""
     log(f"done — {nsub} subtasks, {len(st.data['waves'])} waves, "
         f"{wc} worker invocations.{pr_suffix} Work is on "
         f"{compute_run_branch(st.run_id)}; working branch unchanged.")
@@ -5806,6 +7354,11 @@ async def orchestrate(args, caps: dict, pila_dir: Path, st: State,
                 started_at=st.data["started_at"],
                 task=task,
             )
+        # Provision per-repo deps (DESIGN §6½). Runs after classify (so a
+        # docs-only run can short-circuit) and after the run-id rename
+        # (so state writes go to the final run dir). On `--resume` the
+        # entire else-branch is skipped, so phase_provision never re-fires.
+        await phase_provision(Path(os.getcwd()), st, caps, models)
         # gather_answers blocks on input(). That's fine here: no concurrent
         # tasks are scheduled yet, so blocking the loop blocks nothing. Kept
         # on the event loop deliberately — every State mutation runs on the
@@ -5903,7 +7456,7 @@ def main() -> None:
     ap.add_argument("--inspect-dir", action="append", metavar="PATH",
                     dest="inspect_dir",
                     help="extra directory the inspect-bucket workers "
-                         "(classifier, planner, reconciler) may read. "
+                         "(classifier, planner, reconciler, provision) may read. "
                          "Forwarded to `claude -p` as --add-dir. Repeatable. "
                          "Use for sibling repos referenced in the task that "
                          "live outside the current repo cwd. Default: none. "
@@ -6012,9 +7565,8 @@ def main() -> None:
         die("`claude` CLI not found on PATH. Install Claude Code (native, "
             "recommended): `curl -fsSL https://claude.ai/install.sh | bash`. "
             "Docs: https://docs.claude.com/en/docs/claude-code/setup")
-    if subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
-                      capture_output=True).returncode != 0:
-        die("not inside a git repository")
+    # The cwd-is-git-repo check moved to the host launcher (DESIGN §6).
+    # If the launcher started us, we're already in a git repo by then.
 
     caps = dict(DEFAULT_CAPS)
     # Resolve max_total_workers across CLI / env / TOML / default. The
