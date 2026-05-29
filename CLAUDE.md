@@ -211,9 +211,10 @@ export PILA_VERBOSITY=normal  # sticky default
 ## Testing
 
 `pytest tests/` from the repo root. Tests cover the deterministic
-enforcement functions (`resolve_source_of_truth`, `gather_answers`
-validation gate, `_retryable_failure`, `check_merge_committed`,
-`validate_result`, `validate_plan`) including a coupling test that the
+enforcement functions (`resolve_source_of_truth`, `resolve_runtime`,
+`gather_answers` validation gate, `_retryable_failure`,
+`check_merge_committed`, `validate_result`, `validate_plan`) including
+a coupling test that the
 retry-policy markers match the live check-function strings. No coverage
 target is set — the suite was introduced from scratch and a number now
 would be arbitrary.
