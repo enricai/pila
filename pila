@@ -300,14 +300,22 @@ if [ "$NO_PUSH" = "false" ]; then
     echo "  to skip the push and PR step at finalize." >&2
     exit 1
   fi
-  if ! gh_auth_stderr="$(gh auth status 2>&1 1>/dev/null)"; gh auth status >/dev/null 2>&1; then
+  # Run gh once, capture combined output (gh writes to stdout, not
+  # stderr — verified against gh 2.69.0). `set -e` is suppressed
+  # inside the condition of a compound command via `|| true`.
+  gh_auth_output="$(gh auth status 2>&1)" || gh_auth_rc=$?
+  gh_auth_rc=${gh_auth_rc:-0}
+  if [ "$gh_auth_rc" -ne 0 ]; then
     echo "pila: error: \`gh\` is installed but not authenticated. Run" >&2
     echo "  \`gh auth login\`, or pass \`--no-push\` to skip the push and" >&2
     echo "  PR step at finalize." >&2
-    echo "gh auth status stderr:" >&2
-    printf '  %s\n' "$gh_auth_stderr" >&2
+    if [ -n "$gh_auth_output" ]; then
+      echo "gh auth status output:" >&2
+      printf '  %s\n' "$gh_auth_output" >&2
+    fi
     exit 1
   fi
+  unset gh_auth_output gh_auth_rc
   if ! git remote get-url origin >/dev/null 2>&1; then
     echo "pila: error: this repository has no \`origin\` remote — finalize cannot" >&2
     echo "  push without one. Add one with \`git remote add origin <url>\` or pass" >&2
