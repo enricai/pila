@@ -106,7 +106,7 @@ def _make_state(pila, run_dir: Path):
 def _patch_invoke(pila, monkeypatch, envelope=_JUDGE_ENVELOPE):
     """Patch pila._invoke to return envelope without network I/O."""
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         return envelope
 
     monkeypatch.setattr(pila, "_invoke", fake_invoke)
@@ -227,7 +227,7 @@ def test_phase_judge_honours_max_parallel(pila, tmp_path, monkeypatch):
     peak_concurrent = [0]
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         concurrent_count[0] += 1
         if concurrent_count[0] > peak_concurrent[0]:
             peak_concurrent[0] = concurrent_count[0]

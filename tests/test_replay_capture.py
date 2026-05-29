@@ -55,7 +55,7 @@ def _stub_invoke(pila, monkeypatch, envelope=_GOOD_ENVELOPE):
     captured = []
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         captured.append({"cmd": cmd, "cwd": cwd})
         return envelope
 
@@ -73,7 +73,7 @@ def test_args_match_capture_fields(pila, tmp_path, monkeypatch):
     collected_cmd: list[list[str]] = []
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         collected_cmd.append(list(cmd))
         return _GOOD_ENVELOPE
 
@@ -121,7 +121,7 @@ def test_override_system_prompt(pila, tmp_path, monkeypatch):
     collected_cmd: list[list[str]] = []
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         collected_cmd.append(list(cmd))
         return _GOOD_ENVELOPE
 
@@ -154,7 +154,7 @@ def test_replay_does_not_pollute_captures(pila, tmp_path, monkeypatch):
     not pollute the captures stream."""
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         return _GOOD_ENVELOPE
 
     monkeypatch.setattr(pila, "_invoke", fake_invoke)
@@ -181,7 +181,7 @@ def test_replay_does_not_modify_existing_capture_file(pila, tmp_path,
     existing.write_text(original_content)
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         return _GOOD_ENVELOPE
 
     monkeypatch.setattr(pila, "_invoke", fake_invoke)
@@ -203,7 +203,7 @@ def test_return_value_shape(pila, tmp_path, monkeypatch):
     """replay_capture returns a 2-tuple (envelope, structured_output)."""
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         return _GOOD_ENVELOPE
 
     monkeypatch.setattr(pila, "_invoke", fake_invoke)

@@ -197,7 +197,7 @@ def _make_judge_invoke():
     == "failrecb" — all distinct, so the sid uniquely identifies the record.
     """
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         if _ID_PASS[:8] in sid:
             return _JUDGE_PASS_ENVELOPE
         return _JUDGE_FAIL_ENVELOPE
@@ -223,7 +223,7 @@ def _make_heal_judge_invoke(n_baseline_calls: int = 2):
     call_counter = [0]
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         call_counter[0] += 1
         # First n_baseline_calls are the unpatched baseline — all fail.
         if call_counter[0] <= n_baseline_calls:

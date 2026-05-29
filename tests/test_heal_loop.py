@@ -109,7 +109,7 @@ def _make_state(pila, run_dir: Path):
 def _patch_invoke_for_judge(pila, monkeypatch, judge_envelope=_JUDGE_ENVELOPE):
     """Patch pila._invoke to return the judge envelope."""
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         return judge_envelope
 
     monkeypatch.setattr(pila, "_invoke", fake_invoke)
@@ -123,7 +123,7 @@ def _patch_replay_and_judge(pila, monkeypatch):
     monkeypatch.setattr(pila, "replay_capture", fake_replay)
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         return _JUDGE_ENVELOPE
 
     monkeypatch.setattr(pila, "_invoke", fake_invoke)

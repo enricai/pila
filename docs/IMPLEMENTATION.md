@@ -488,6 +488,15 @@ pila "task" --heal-max-rounds 10 --heal-success-threshold 0.9
 export PILA_HEAL_MAX_ROUNDS=10
 export PILA_HEAL_SUCCESS_THRESHOLD=0.9
 
+# Diagnostic toggle for the next silent-hang reproduction. When set,
+# every `claude -p` worker subprocess inherits DEBUG=* and
+# ANTHROPIC_LOG=debug so its internal state surfaces on stderr — the
+# idle watchdog (worker_idle_warn_sec, see §Caps) then flushes a tail
+# of that stderr alongside its silence warning. Off by default because
+# verbose CLI logging is noisy on healthy runs.
+export PILA_WORKER_DEBUG=1
+pila "task"
+
 # Run post-run skill phases against an existing run's captured LLM calls.
 # --phase judge: score every call in calls.ndjson with the 3-dim judge rubric
 #   and write verdict files to <run-dir>/<judge-dir>/.
@@ -1235,6 +1244,7 @@ Defaults in `DEFAULT_CAPS` and the per-worker `claude_p` call sites.
 | concurrent workers within a wave | 4 (`--max-parallel`) | throughput throttle |
 | turns per `claude -p` call | per worker (below) | worker stops; implementer → `incomplete-handoff` |
 | per-worker wall-clock (`worker_timeout_sec`) | 5400 s (90 min) | worker killed; implementer → `incomplete-handoff` |
+| per-worker idle-event warning (`worker_idle_warn_sec`) | 300 s (5 min) | log a `no stdout events in <gap>s` warning naming the worker, its PID, and any stderr tail. Observation-only — the worker is NOT killed; `worker_timeout_sec` remains the only kill. Surfaces silent-hang failures (a worker that never emits its first `system/init` event) so the user is not left with zero feedback between phase start and the 90-min hard kill. |
 
 `--max-turns` by worker: classifier 60, planner 100, integrator 60,
 implementer 120, conformer 60, judge 40, heal patch_generator 40. For

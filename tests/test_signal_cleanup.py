@@ -518,9 +518,14 @@ def test_run_proc_and_invoke_exception_handlers_call_terminate_proc_tree():
         # and on the catch-all BaseException. Count occurrences rather
         # than slicing nested blocks (which is brittle to inner
         # try/except inside _invoke's coroutines like _read_stream).
+        # Both regexes allow non-await statements (e.g. a synchronous
+        # watchdog_task.cancel()) between the `except` line and the
+        # _terminate_proc_tree call — the invariant being pinned is
+        # "the handler calls _terminate_proc_tree", not "_terminate is
+        # the literal next line."
         timeout_present = re.search(
-            r"except asyncio\.TimeoutError:[^\n]*\n\s*await _terminate_proc_tree\(proc\)",
-            body,
+            r"except asyncio\.TimeoutError:.*?\n\s*await _terminate_proc_tree\(proc\)",
+            body, re.DOTALL,
         )
         base_present = re.search(
             r"except BaseException:.*?\n\s*await _terminate_proc_tree\(proc\)",
@@ -528,7 +533,7 @@ def test_run_proc_and_invoke_exception_handlers_call_terminate_proc_tree():
         )
         assert timeout_present, (
             f"{label}'s `except asyncio.TimeoutError` handler must "
-            f"`await _terminate_proc_tree(proc)` immediately."
+            f"`await _terminate_proc_tree(proc)`."
         )
         assert base_present, (
             f"{label}'s `except BaseException` handler must call "

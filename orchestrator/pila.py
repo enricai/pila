@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -96,6 +97,13 @@ DEFAULT_CAPS = {
     # advisory and never produces a `failed` / `blocked` subtask status.
     "conformance_rounds": 2,
     "worker_timeout_sec": 5400,     # 90 minutes per worker process
+    # If a worker emits no stdout events for this many seconds, log a
+    # warning naming the worker, its PID, the elapsed silence, and any
+    # stderr tail. Observation-only — does not kill the worker. The
+    # 90-min `worker_timeout_sec` remains the only kill. Surfaces the
+    # silent-hang failure class that otherwise gives the user zero
+    # feedback between phase start and the 90-min hard kill.
+    "worker_idle_warn_sec": 300,
     # Worker-internal evidence-gate iterations for planner and implementer
     # (DESIGN §8 + §13). User-tunable via --confidence-rounds /
     # PILA_CONFIDENCE_ROUNDS / pila.toml; see IMPLEMENTATION.md §2
@@ -3926,7 +3934,8 @@ def _get_progress(st: "State") -> tuple[int, int] | None:
 
 async def _invoke(cmd: list[str], cwd: str, timeout: int,
                   sid: str, pila_dir: Path, verbosity: str,
-                  progress: tuple[int, int] | None = None) -> dict:
+                  progress: tuple[int, int] | None = None,
+                  idle_warn_sec: float | None = None) -> dict:
     """Run a `claude -p` command, streaming events as they arrive.
 
     The CLI is invoked with `--output-format stream-json --verbose`; each
@@ -3955,16 +3964,50 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
     # wraps and re-raises as ValueError("Separator is not found,
     # and chunk exceed the limit"). Either name in `except` works —
     # but the user-visible exception is ValueError.
+    # PILA_WORKER_DEBUG=1 injects DEBUG=* and ANTHROPIC_LOG=debug into the
+    # worker's environment. The point: if a worker hangs before emitting
+    # any stdout event, rerunning with this env var makes the CLI emit its
+    # internal state to stderr (which the watchdog below surfaces), so an
+    # otherwise-invisible silent stall becomes diagnosable without
+    # redeploying pila. The variable is opt-in because verbose CLI logging
+    # is noisy on healthy runs.
+    worker_env = None
+    if os.environ.get("PILA_WORKER_DEBUG"):
+        worker_env = os.environ.copy()
+        worker_env["DEBUG"] = "*"
+        worker_env["ANTHROPIC_LOG"] = "debug"
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=cwd,
+        # stdin=DEVNULL: workers receive their full prompt + schema via
+        # argv and never read terminal input. Without this the worker
+        # inherits the orchestrator's stdin, which inside a `nerdctl run
+        # -it` container is /dev/pts/0 — a real TTY. A CLI that branches
+        # on isatty() (e.g. to prompt for permission) would hang
+        # invisibly waiting for input that never arrives. Closing stdin
+        # eliminates that whole class of hang.
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         limit=10 * 1024 * 1024,
         # Session/PG leader so `_terminate_proc_tree` can reap the tool-call
         # grandchildren `claude -p` spawns (vitest, dev servers, etc.).
         start_new_session=True,
+        env=worker_env,
     )
+    # Spawn heartbeat: surfaces *that* the worker was launched before the
+    # await blocks on its first event. Without this line, the user sees
+    # the phase header and then silence until the first stream-json event
+    # arrives (or the 90-min `worker_timeout_sec` fires) — a silent worker
+    # was the failure class that motivated the watchdog below.
+    #
+    # Suppressed at `quiet`: per the verbosity contract, quiet emits
+    # phase boundaries + errors only. The watchdog warning below IS
+    # error-class and fires at every verbosity; this spawn line is
+    # operational chatter and stays gated.
+    if verbosity != "quiet":
+        log(f"  [{sid}] spawned (pid={proc.pid})")
     # Track every descendant PID that ever appears under this worker. Claude
     # Code's Bash tool uses `run_in_background: true` to fire-and-forget
     # long-running commands (test runners, builds, dev servers); those
@@ -3976,9 +4019,14 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
     descendant_tracker.start()
     envelope: dict | None = None
     stderr_chunks: list[bytes] = []
+    # Watchdog state: last_event_at is updated by _read_stream on every
+    # successfully-parsed stream-json event. The _idle_watchdog coroutine
+    # below observes this clock and warns when no events arrive for
+    # `worker_idle_warn_sec` seconds.
+    last_event_at = time.monotonic()
 
     async def _read_stream():
-        nonlocal envelope
+        nonlocal envelope, last_event_at
         # `buffering=1` is line-buffered: every newline flushes to disk.
         # Without this Python text-mode files are fully buffered when not
         # connected to a TTY, so `tail -f .pila/logs/<sid>.log` would
@@ -3989,6 +4037,11 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
                 async for raw in proc.stdout:
                     if not raw:
                         continue
+                    # Any bytes from the worker count as liveness — refresh
+                    # the watchdog clock before parsing, so a stream of
+                    # non-JSON lines (which are logged and skipped below)
+                    # still counts as activity.
+                    last_event_at = time.monotonic()
                     line = raw.decode(errors="replace").rstrip("\n")
                     # File: always record the raw event with a timestamp
                     # header. The header lets `tail -f` users see
@@ -4045,22 +4098,86 @@ async def _invoke(cmd: list[str], cwd: str, timeout: int,
                 return
             stderr_chunks.append(chunk)
 
+    async def _idle_watchdog():
+        # Observation-only stall detector. Wakes every `warn_sec` seconds
+        # and warns if the worker has emitted no stdout bytes for that
+        # long. Never kills the worker — the 90-min `worker_timeout_sec`
+        # remains the only kill. Surfaces the silent-hang failure class
+        # that motivated this watchdog: a `claude -p` worker that gets
+        # stuck before its first `system/init` event would otherwise
+        # leave the user with zero feedback for up to 90 minutes.
+        #
+        # When the worker exits normally (success or timeout), the
+        # surrounding try/finally cancels this task; CancelledError is
+        # suppressed by the awaiting caller.
+        # `idle_warn_sec` carries the resolved per-run cap from
+        # `claude_p` (which built `caps = dict(DEFAULT_CAPS)` and then
+        # honored any CLI / env / TOML override). Direct `_invoke`
+        # callers — preflight smoke-test, replay paths, tests — don't
+        # plumb caps and pass `None`; we fall back to `DEFAULT_CAPS`
+        # so the watchdog still functions for them without forcing
+        # every call site to thread the full caps dict.
+        warn_sec = (idle_warn_sec if idle_warn_sec is not None
+                    else DEFAULT_CAPS["worker_idle_warn_sec"])
+        while True:
+            await asyncio.sleep(warn_sec)
+            gap = time.monotonic() - last_event_at
+            # Compare in floats — truncating to int here would make a
+            # sub-second `warn_sec` (e.g. in tests) compare against 0
+            # and never warn.
+            if gap < warn_sec:
+                continue
+            # Stderr tail: if the CLI is logging to stderr (e.g. when
+            # PILA_WORKER_DEBUG=1), surface the most recent bytes
+            # alongside the silence warning so the user has something
+            # actionable. Truncated to the last 400 chars to keep the
+            # orchestrator log readable.
+            tail = b"".join(stderr_chunks[-10:]).decode(
+                errors="replace").strip()
+            tail_note = (f" — stderr tail: {tail[-400:]!r}"
+                         if tail else "")
+            log(f"  [{sid}] no stdout events in {int(gap)}s "
+                f"(pid={proc.pid}, hard kill at "
+                f"{timeout}s){tail_note}")
+
+    watchdog_task = asyncio.create_task(_idle_watchdog())
     try:
-        await asyncio.wait_for(
-            asyncio.gather(_read_stream(), _drain_stderr(), proc.wait()),
-            timeout=timeout)
-    except asyncio.TimeoutError:
-        await _terminate_proc_tree(proc)
-        await descendant_tracker.stop_and_reap()
-        raise subprocess.TimeoutExpired(cmd, timeout)
-    except BaseException:
-        # Terminate the worker's whole subtree (claude -p + its tool-call
-        # grandchildren via PPID walk) and reap any backgrounded
-        # subprocesses the tracker observed during the run. Then re-raise.
-        # Pila's gather_or_cancel relies on this for clean aborts.
-        await _terminate_proc_tree(proc)
-        await descendant_tracker.stop_and_reap()
-        raise
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(_read_stream(), _drain_stderr(),
+                               proc.wait()),
+                timeout=timeout)
+        except asyncio.TimeoutError:
+            # Cancel the watchdog BEFORE the termination awaits so it
+            # cannot wake during them and log a stale "no stdout events"
+            # warning against a worker that's already being killed. The
+            # `finally:` below still collects the task; cancel() is
+            # idempotent.
+            watchdog_task.cancel()
+            await _terminate_proc_tree(proc)
+            await descendant_tracker.stop_and_reap()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        except BaseException:
+            # Same race-closing cancel as above. Then terminate the
+            # worker's whole subtree (claude -p + its tool-call
+            # grandchildren via PPID walk) and reap any backgrounded
+            # subprocesses the tracker observed during the run. Then
+            # re-raise. Pila's gather_or_cancel relies on this for clean
+            # aborts.
+            watchdog_task.cancel()
+            await _terminate_proc_tree(proc)
+            await descendant_tracker.stop_and_reap()
+            raise
+    finally:
+        # The watchdog runs for the whole worker lifetime and must be
+        # cancelled on every exit path (success, timeout, abort) so it
+        # doesn't outlive the worker and fire spuriously against a stale
+        # `last_event_at`. The contextlib.suppress is the standard
+        # asyncio pattern for awaiting a cancelled task without
+        # propagating the CancelledError.
+        watchdog_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog_task
     # Success path: reap any backgrounded subprocesses the worker left
     # behind. `claude -p` workers use Claude Code's Bash tool with
     # `run_in_background: true` for long-running tasks (test runners,
@@ -4181,7 +4298,10 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
         _t0 = time.monotonic()
         envelope = await _invoke(build(retry_note), cwd, timeout,
                                  sid, pila_dir, verbosity,
-                                 progress=_get_progress(st))
+                                 progress=_get_progress(st),
+                                 idle_warn_sec=caps.get(
+                                     "worker_idle_warn_sec",
+                                     DEFAULT_CAPS["worker_idle_warn_sec"]))
         _latency_ms = int((time.monotonic() - _t0) * 1000)
 
         # record run-weight telemetry

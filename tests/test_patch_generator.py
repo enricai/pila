@@ -117,7 +117,7 @@ def _patch_network(pila, monkeypatch):
     monkeypatch.setattr(pila, "replay_capture", fake_replay)
 
     async def fake_invoke(cmd, cwd, timeout, sid, pila_dir, verbosity,
-                          progress=None):
+                          progress=None, **_kw):
         return _JUDGE_ENVELOPE
 
     monkeypatch.setattr(pila, "_invoke", fake_invoke)
