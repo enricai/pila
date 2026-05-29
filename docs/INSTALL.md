@@ -241,6 +241,27 @@ nerdctl run --rm hello-world
 You should see "Hello from Docker!" (containerd uses the same image).
 If that fails, pila will too.
 
+## Fly.io runtime (optional)
+
+By default pila runs workers locally via `nerdctl`. Passing `--runtime fly`
+(or setting `PILA_RUNTIME=fly` or `runtime = fly` in `pila.toml`) routes
+each worker through Fly.io Machines instead — useful when you want to off-load
+worker compute from your local machine.
+
+Prerequisites for the fly runtime:
+
+1. **`flyctl` installed and authenticated** — `fly auth status` must succeed.
+   Install from https://fly.io/docs/flyctl/install/ (or `brew install flyctl`
+   on macOS).
+2. **A published pila image** — build and push with `scripts/publish-image.sh`
+   (see `docs/IMPLEMENTATION.md` §0.5 *Registry publish path*). The fly runtime
+   pulls this image for each worker Machine it starts.
+
+The local `nerdctl` setup above is **not required** when using `--runtime fly`;
+pila's launcher skips the local container preflight and delegates the entire
+worker lifecycle to the Fly.io API. The local container runtime (Colima on
+macOS, containerd on Linux) is only needed for the default `local` runtime.
+
 ## What pila mounts into the container
 
 When the container starts, the launcher mounts the following:
