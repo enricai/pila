@@ -85,16 +85,84 @@ _runtime_nerdctl_arch() {
   fi
 }
 
+# Detect host CPU + RAM on macOS and emit `--cpu N --memory M` flags
+# sized at half-of-host, clamped to [floor, ceiling]. Emits nothing on
+# non-macOS (Colima is macOS-only — Linux runs containerd natively).
+#
+# Bounds rationale:
+#   CPU 2..8 — pila needs ≥2 cores for parallel workers; >8 is wasted
+#     on dev workstations (the VM doesn't scale linearly past that).
+#   RAM 4..16 GB — the Colima default of 2 GB OOMs pila under concurrent
+#     `claude -p` workers (~300 MB each) plus toolchain processes;
+#     16 GB has ~60% headroom over the observed working-set of two
+#     parallel pila containers running ~8 implementers between them.
+#
+# Caller is expected to expand the result with intentional word-
+# splitting: `colima start ... $size_flags`.
+_runtime_colima_size_flags() {
+  [ "$(uname -s)" = "Darwin" ] || return 0
+  local host_cpu host_mem_bytes host_mem_gb cpu mem
+  host_cpu="$(sysctl -n hw.ncpu 2>/dev/null || echo 0)"
+  host_mem_bytes="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+  host_mem_gb=$(( host_mem_bytes / 1073741824 ))   # bytes → GiB
+  cpu=$(( host_cpu / 2 ))
+  [ "$cpu" -lt 2 ] && cpu=2
+  [ "$cpu" -gt 8 ] && cpu=8
+  mem=$(( host_mem_gb / 2 ))
+  [ "$mem" -lt 4 ] && mem=4
+  [ "$mem" -gt 16 ] && mem=16
+  printf -- "--cpu %d --memory %d" "$cpu" "$mem"
+}
+
+# Check the currently-configured Colima sizing against the auto-
+# recommendation. If the running VM is materially undersized for
+# parallel pila workloads, log a one-line hint with the exact resize
+# command. No-op on non-macOS or if config can't be read. Called only
+# when the launcher decides to leave an already-running VM alone.
+_runtime_check_colima_sizing() {
+  [ "$(uname -s)" = "Darwin" ] || return 0
+  local cfg cur_cpu cur_mem rec_flags rec_cpu rec_mem
+  cfg="$HOME/.colima/default/colima.yaml"
+  [ -f "$cfg" ] || return 0
+  # Authoritative: the YAML the user (or installer) set. Grep + awk
+  # avoids a yq/python dependency; the two fields are flat top-level.
+  cur_cpu="$(awk -F': *' '/^cpu:/{print $2; exit}' "$cfg" 2>/dev/null)"
+  cur_mem="$(awk -F': *' '/^memory:/{print $2; exit}' "$cfg" 2>/dev/null)"
+  rec_flags="$(_runtime_colima_size_flags)"
+  [ -n "$rec_flags" ] || return 0
+  # Parse "--cpu N --memory M" back into integers for comparison.
+  # shellcheck disable=SC2086  # intentional word-split of flag string
+  set -- $rec_flags
+  rec_cpu="$2"
+  rec_mem="$4"
+  # Only warn if BOTH cpu and mem are below recommendation — otherwise
+  # the user may have deliberately tuned one knob and we don't want
+  # to be naggy about a half-match.
+  if [ -n "$cur_cpu" ] && [ -n "$cur_mem" ] \
+     && [ "$cur_cpu" -lt "$rec_cpu" ] && [ "$cur_mem" -lt "$rec_mem" ]; then
+    _runtime_log "Colima is running with ${cur_cpu} cpu / ${cur_mem} GB."
+    _runtime_log "  Parallel pila runs benefit from ≥${rec_cpu} cpu / ${rec_mem} GB. To resize:"
+    _runtime_log "    colima stop && colima start --runtime containerd --mount-type virtiofs ${rec_flags}"
+  fi
+}
+
 # --- public: macOS install (Colima via brew) ----------------------------
 
 # Returns 0 on success, 1 on failure. Caller is responsible for the TTY
 # guard before invoking (brew install may run sudo).
 runtime_install_macos() {
+  local size_flags
+  size_flags="$(_runtime_colima_size_flags)"
   if _runtime_have_runnable colima; then
-    # Already installed; verify it's running.
+    # Already installed.
     if [ "$DRY_RUN" = "false" ] && ! colima status >/dev/null 2>&1; then
-      _runtime_log "starting Colima VM (first start may take 30-60s)"
-      _runtime_run colima start --runtime containerd --mount-type virtiofs || return 1
+      # VM not running — start it with auto-sized resources.
+      _runtime_log "starting Colima VM (first start may take 30-60s, sizing: ${size_flags:-default})"
+      # shellcheck disable=SC2086  # intentional word-split of flag string
+      _runtime_run colima start --runtime containerd --mount-type virtiofs $size_flags || return 1
+    elif [ "$DRY_RUN" = "false" ]; then
+      # VM is already running — leave it alone, but hint if undersized.
+      _runtime_check_colima_sizing
     fi
     return 0
   fi
@@ -106,8 +174,9 @@ runtime_install_macos() {
   _runtime_log "installing Colima via Homebrew"
   _runtime_run brew install colima || return 1
   if [ "$DRY_RUN" = "false" ]; then
-    _runtime_log "starting Colima VM (first start may take 30-60s)"
-    _runtime_run colima start --runtime containerd --mount-type virtiofs || return 1
+    _runtime_log "starting Colima VM (first start may take 30-60s, sizing: ${size_flags:-default})"
+    # shellcheck disable=SC2086  # intentional word-split of flag string
+    _runtime_run colima start --runtime containerd --mount-type virtiofs $size_flags || return 1
   fi
   return 0
 }

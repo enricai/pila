@@ -211,7 +211,11 @@ case "$(uname -s)" in
     if ! have_runnable colima; then
       if [ "$NO_RUNTIME_INSTALL" = "true" ]; then
         err "colima is missing. Install with: brew install colima"
-        err "Then start the VM:           colima start --runtime containerd --mount-type virtiofs"
+        # Same auto-sizing rationale as the install path: suggest the
+        # half-of-host sizing so the user doesn't OOM under pila's
+        # parallel-worker workload (Colima's 2-cpu / 2-GB default is
+        # not enough).
+        err "Then start the VM:           colima start --runtime containerd --mount-type virtiofs $(_runtime_colima_size_flags)"
         err "(Do NOT 'brew install nerdctl' on macOS — the formula requires Linux."
         err " Colima provides nerdctl inside its VM and installs a host-side shim;"
         err " pila auto-runs 'colima nerdctl install' on first launch if needed.)"
@@ -220,9 +224,16 @@ case "$(uname -s)" in
         runtime_install_macos || runtime_ok=false
       fi
     elif [ "$DRY_RUN" = "false" ] && ! colima status >/dev/null 2>&1; then
-      # Already installed but VM not running — start it.
-      log "starting Colima VM (first start may take 30-60s)"
-      run colima start --runtime containerd --mount-type virtiofs
+      # Already installed but VM not running — start it with auto-sized
+      # resources (see _runtime_colima_size_flags for the rationale).
+      size_flags="$(_runtime_colima_size_flags)"
+      log "starting Colima VM (first start may take 30-60s, sizing: ${size_flags:-default})"
+      # shellcheck disable=SC2086  # intentional word-split of flag string
+      run colima start --runtime containerd --mount-type virtiofs $size_flags
+    elif [ "$DRY_RUN" = "false" ]; then
+      # Already installed AND running — leave it alone, but hint if
+      # the existing sizing is below the auto-recommendation.
+      _runtime_check_colima_sizing
     fi
     ;;
   Linux)

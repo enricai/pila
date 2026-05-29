@@ -15,9 +15,20 @@ then how to install pila itself.
 
 The one-line installer **auto-installs and starts** the container runtime
 for you (`brew install colima` + `colima start --runtime containerd
---mount-type virtiofs`). If you'd rather install the runtime yourself —
-common in CI or with dotfiles managers — pass `--no-runtime-install` or
-set `PILA_NO_RUNTIME_INSTALL=1` and the installer will print the manual
+--mount-type virtiofs --cpu N --memory M`). The `--cpu` / `--memory`
+values are auto-detected from your host: half of the host's logical
+cores (clamped to 2–8) and half of the host's RAM in GB (clamped to
+4–16). On an 8-core / 16-GB Mac you'd get a 4-CPU / 8-GB VM; on a
+16-core / 64-GB Mac you'd get the 8-CPU / 16-GB ceiling.
+
+This replaces Colima's 2-CPU / 2-GB default, which is not enough for
+pila's parallel-worker workload (concurrent `claude -p` workers plus
+toolchain processes blow through 2 GB, triggering a kernel OOM in the
+VM that manifests as `exit 255` on the launcher with no diagnostic).
+
+If you'd rather install the runtime yourself — common in CI or with
+dotfiles managers — pass `--no-runtime-install` or set
+`PILA_NO_RUNTIME_INSTALL=1` and the installer will print the manual
 commands and exit 1.
 
 ```bash
@@ -49,9 +60,13 @@ Notes:
 - The Colima VM persists across reboots — `colima start` again is
   enough to bring it back up. To autostart at login:
   `brew services start colima`.
-- Default resources are usually fine. For heavier workloads (large
-  Next.js builds, many parallel test runs):
-  `colima start --cpu 6 --memory 12 --runtime containerd --mount-type virtiofs`.
+- The installer auto-sizes the VM (half-of-host CPU/RAM, bounded
+  2–8 cores / 4–16 GB; see the macOS section above). To override —
+  e.g. you want more or less than the auto-sized default:
+  `colima stop && colima start --cpu 6 --memory 12 --runtime containerd --mount-type virtiofs`.
+- If you have Colima already running with a smaller-than-recommended
+  VM, re-running the installer will leave the VM alone but log a
+  one-line hint with the resize command.
 
 ### macOS-specific: bind-mount scope
 

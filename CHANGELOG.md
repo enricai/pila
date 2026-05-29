@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Installer auto-sizes the Colima VM to half the host's CPU/RAM
+  instead of using Colima's 2-CPU / 2-GB defaults.** The 2/2 defaults
+  were not enough for parallel pila runs — concurrent `claude -p`
+  workers (~300 MB each) plus toolchain processes (`tsc`, `vitest`,
+  etc.) blew through 2 GB in minutes, triggering a kernel OOM in the
+  Colima VM. The OOM killer hit the host-side `nerdctl` daemons (not
+  the container's PID 1), so the failure manifested on the Mac
+  launcher as `exit 255` with no orchestrator diagnostic — the
+  container's stdout just stopped mid-stream. The installer now
+  detects host resources via `sysctl hw.ncpu` / `hw.memsize` and
+  starts Colima with `--cpu N --memory M` sized at half-of-host,
+  clamped to CPU 2..8 and RAM 4..16 GB. The Linux path is untouched
+  (Linux runs containerd natively, no VM to size). Already-running
+  VMs are left alone, but a one-line hint is logged if the current
+  sizing is below the auto-recommendation. See
+  `_runtime_colima_size_flags` in `scripts/runtime-install.sh` for
+  the bounds rationale.
+
 - **Per-container Claude config isolation eliminates the silent-hang
   race.** Concurrent pila containers used to share a single host
   `~/.claude.json` via bind mount, which exposed the well-documented
