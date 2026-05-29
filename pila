@@ -139,6 +139,32 @@ for arg in "$@"; do
   fi
 done
 
+# --- remote execution mode knob ----------------------------------------
+# --remote on the CLI, PILA_REMOTE=1 in the env, or `remote = true` in
+# pila.toml selects remote execution (e.g. Fly.io) instead of the local
+# `nerdctl run`. Precedence: CLI > env > TOML, matching other knobs.
+# The flag is consumed here and never forwarded to the orchestrator's
+# argparse (same pattern as --no-runtime-install).
+REMOTE=false
+case "${PILA_REMOTE:-}" in
+  1|true|TRUE|yes|YES) REMOTE=true ;;
+esac
+if [ -f "$USER_REPO/pila.toml" ]; then
+  toml_remote="$(awk '/^[[:space:]]*remote[[:space:]]*=/ {
+                        gsub(/^[[:space:]]*remote[[:space:]]*=[[:space:]]*/, "", $0);
+                        gsub(/^"|"$/, "", $0);
+                        print; exit
+                      }' "$USER_REPO/pila.toml" 2>/dev/null || true)"
+  case "${toml_remote:-}" in
+    1|true|TRUE|yes|YES) REMOTE=true ;;
+  esac
+fi
+for arg in "$@"; do
+  if [ "$arg" = "--remote" ]; then
+    REMOTE=true
+  fi
+done
+
 # DRY_RUN is referenced by scripts/runtime-install.sh; default to false
 # in the launcher (the launcher has no --dry-run flag — that's install.sh).
 DRY_RUN=false
@@ -438,6 +464,10 @@ for arg in "$@"; do
       # Launcher-only flag; consumed by the runtime preflight above.
       # The orchestrator's argparse doesn't know it.
       ;;
+    --remote)
+      # Launcher-only flag; consumed by the remote-mode knob above.
+      # The orchestrator's argparse doesn't know it.
+      ;;
     *)
       REWRITTEN_ARGS+=("$arg")
       ;;
@@ -675,45 +705,56 @@ CACHE_MOUNTS=(
 # launcher invocations. Not user-tunable here.
 
 # --- run -----------------------------------------------------------------
-# --rm: container is removed on exit. Worktrees + .pila/ state persist on
-#       the host filesystem via the /work bind mount, so --resume still works.
-# Mount-table rationale lives in docs/IMPLEMENTATION.md §0.5.
-#
-# TTY flags adapt to whether the launcher itself has a controlling terminal:
-#   Terminal mode (real pty on stdin) → -it. The container gets a
-#     controlling TTY; pila's log() lines stream live and the user can
-#     answer `--clarify` prompts interactively via input().
-#   Plugin mode (Claude Code's Bash tool: no TTY) → -i only.
-#     Inside the container, sys.stdin.isatty() returns False, so pila's
-#     gather_answers and mid-execution clarification paths trigger the
-#     existing EXIT_NEEDS_ANSWERS=10 flow: write .pila/pending-questions.json
-#     (visible on the host via the /work bind mount), exit 10. The plugin
-#     agent reads the file, asks the user in chat, writes .pila/answers.json,
-#     re-runs the container with --answers.
-# Ctrl-C (terminal) or harness cancellation (plugin) → SIGINT to container
-# PID 1 → orchestrator exits → kernel reaps the PID namespace (DESIGN §6
-# *Worker subtree termination*). The cleanup guarantee is identical in
-# both modes.
-TTY_FLAGS="-i"
-[ -t 0 ] && TTY_FLAGS="-it"
-
-# Use ${arr[@]+"${arr[@]}"} so empty arrays expand to nothing under
-# `set -u` (bash 3.2, the macOS system default, otherwise errors).
-#
-# Note: NOT `exec` — we need control to return to the launcher after the
-# container exits so the host-side finalize block (below) can run.
 container_rc=0
-nerdctl run \
-  --rm $TTY_FLAGS \
-  --name "pila-$(date +%s)-$$" \
-  -e PILA_INSPECT_DIRS= \
-  -v "$USER_REPO:/work" \
-  -v "$PILA_REPO:/work/.pila-image:ro" \
-  ${AUTH_MOUNTS[@]+"${AUTH_MOUNTS[@]}"} \
-  ${CACHE_MOUNTS[@]+"${CACHE_MOUNTS[@]}"} \
-  ${INSPECT_MOUNTS[@]+"${INSPECT_MOUNTS[@]}"} \
-  -w /work \
-  "$IMAGE_TAG" ${REWRITTEN_ARGS[@]+"${REWRITTEN_ARGS[@]}"} || container_rc=$?
+if [ "$REMOTE" = "true" ]; then
+  # --- remote execution path (stub) ------------------------------------
+  # Full Fly.io dispatch is implemented by the feat-remote-* subtasks.
+  # This branch is the routing hook; reaching it confirms --remote was
+  # parsed and the local nerdctl path is bypassed.
+  echo "pila: remote mode selected (--remote / PILA_REMOTE / pila.toml remote=true)" >&2
+  echo "pila: error: remote execution is not yet implemented" >&2
+  container_rc=1
+else
+  # --- local container execution path ----------------------------------
+  # --rm: container is removed on exit. Worktrees + .pila/ state persist on
+  #       the host filesystem via the /work bind mount, so --resume still works.
+  # Mount-table rationale lives in docs/IMPLEMENTATION.md §0.5.
+  #
+  # TTY flags adapt to whether the launcher itself has a controlling terminal:
+  #   Terminal mode (real pty on stdin) → -it. The container gets a
+  #     controlling TTY; pila's log() lines stream live and the user can
+  #     answer `--clarify` prompts interactively via input().
+  #   Plugin mode (Claude Code's Bash tool: no TTY) → -i only.
+  #     Inside the container, sys.stdin.isatty() returns False, so pila's
+  #     gather_answers and mid-execution clarification paths trigger the
+  #     existing EXIT_NEEDS_ANSWERS=10 flow: write .pila/pending-questions.json
+  #     (visible on the host via the /work bind mount), exit 10. The plugin
+  #     agent reads the file, asks the user in chat, writes .pila/answers.json,
+  #     re-runs the container with --answers.
+  # Ctrl-C (terminal) or harness cancellation (plugin) → SIGINT to container
+  # PID 1 → orchestrator exits → kernel reaps the PID namespace (DESIGN §6
+  # *Worker subtree termination*). The cleanup guarantee is identical in
+  # both modes.
+  TTY_FLAGS="-i"
+  [ -t 0 ] && TTY_FLAGS="-it"
+
+  # Use ${arr[@]+"${arr[@]}"} so empty arrays expand to nothing under
+  # `set -u` (bash 3.2, the macOS system default, otherwise errors).
+  #
+  # Note: NOT `exec` — we need control to return to the launcher after the
+  # container exits so the host-side finalize block (below) can run.
+  nerdctl run \
+    --rm $TTY_FLAGS \
+    --name "pila-$(date +%s)-$$" \
+    -e PILA_INSPECT_DIRS= \
+    -v "$USER_REPO:/work" \
+    -v "$PILA_REPO:/work/.pila-image:ro" \
+    ${AUTH_MOUNTS[@]+"${AUTH_MOUNTS[@]}"} \
+    ${CACHE_MOUNTS[@]+"${CACHE_MOUNTS[@]}"} \
+    ${INSPECT_MOUNTS[@]+"${INSPECT_MOUNTS[@]}"} \
+    -w /work \
+    "$IMAGE_TAG" ${REWRITTEN_ARGS[@]+"${REWRITTEN_ARGS[@]}"} || container_rc=$?
+fi
 
 # --- host-side finalize (push + PR) -------------------------------------
 # DESIGN §6 *Finalization*: the container's phase_finalize writes

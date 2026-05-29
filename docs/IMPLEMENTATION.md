@@ -417,6 +417,12 @@ pila --list
 pila "task" --no-push
 export PILA_NO_PUSH=1
 
+# Route to remote execution (e.g. Fly.io) instead of local nerdctl run:
+pila "task" --remote
+export PILA_REMOTE=1
+# Or commit to pila.toml for a per-repo default:
+#   remote = true
+
 # Skip pre-push hooks at finalize (the user's explicit override; defaults off).
 # Affects only the final `git push`; worker `git commit` operations inside
 # worktrees continue to run all hooks normally.
@@ -1620,6 +1626,25 @@ moved to the host where the auth state actually lives.
 env, `no_push = true` in `pila.toml`. `--no-verify` is CLI-only and
 only affects the push step (worker `git commit`s inside worktrees
 still run all hooks).
+
+### Remote execution mode
+
+`--remote` routes execution to a remote backend (Fly.io) instead of the
+local `nerdctl run`. The launcher consumes the flag before building
+`REWRITTEN_ARGS`, so the orchestrator's argparse never sees it.
+Resolution order (highest priority first):
+
+1. **`--remote`** CLI flag.
+2. **`PILA_REMOTE`** environment variable (boolean: `1`/`true`/`TRUE`/`yes`/`YES`).
+3. **`pila.toml`** at the repo root, `remote = true`.
+4. **Default `false`** — local `nerdctl run` is used when unset.
+
+When `REMOTE=true`, the launcher skips the per-OS nerdctl preflight, the
+image-build check, the auth/cache mount assembly, and the `nerdctl run`
+invocation, and instead calls the remote dispatch path. The remote
+implementation is a stub — it emits a "not yet implemented" message and
+exits non-zero — until the feat-remote-* subtasks flesh out the Fly.io
+integration.
 
 Maps to `DESIGN.md`: §6 (Finalization).
 
