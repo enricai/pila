@@ -31,6 +31,7 @@ inside the container (DESIGN §6 / §0.5 below).
 | `Dockerfile` | Image recipe (Debian 12 + Node + pnpm + claude CLI + baked orchestrator source). Built locally on first run, tagged `pila:<VERSION>`. |
 | `scripts/container-entry.sh` | Container PID 1. `cd /work && exec python3 /work/.pila-image/orchestrator/pila.py "$@"`. |
 | `scripts/remote/build-push.sh` | Build and push a self-contained pila image to Fly.io's registry. The baked source at `/work/.pila-image/` lets the image run on Fly Machines without any bind mount. |
+| `scripts/remote/provision.sh` | Fly.io machine lifecycle helper (sourced by the `pila` launcher's `REMOTE=true` branch). Exports `provision_machine()` (create → wait-started → register destroy trap) and `destroy_machine()`. The destroy trap fires on EXIT, INT, and TERM so no machine is leaked by Ctrl-C or crash. |
 
 ### Python runtime — provisioned inside the container
 
@@ -434,9 +435,11 @@ pila/
 │   ├── install.sh                 one-command installer (curl | bash); preflight git/claude/curl +
 │   │                               runtime preflight (colima / nerdctl) + clones + symlinks
 │   └── remote/
-│       └── build-push.sh          build and push a self-contained image for Fly.io Machines;
-│                                   the baked /work/.pila-image/ lets the image run without
-│                                   a bind mount (§0.5 "Registry publish path")
+│       ├── build-push.sh          build and push a self-contained image for Fly.io Machines;
+│       │                           the baked /work/.pila-image/ lets the image run without
+│       │                           a bind mount (§0.5 "Registry publish path")
+│       └── provision.sh           Fly Machine lifecycle (sourced by launcher REMOTE=true branch);
+│                                   provision_machine() → create → wait-started → destroy trap
 ├── commands/pila.md            thin plugin skill — launches the orchestrator
 ├── skills/
 │   ├── judge-llm-batch/SKILL.md  post-run judge skill — scores a batch of captured
@@ -1746,12 +1749,47 @@ Resolution order (highest priority first):
 
 When `REMOTE=true`, the launcher skips the per-OS nerdctl preflight, the
 image-build check, the auth/cache mount assembly, and the `nerdctl run`
-invocation, and instead calls the remote dispatch path. The remote
-implementation is a stub — it emits a "not yet implemented" message and
-exits non-zero — until the feat-remote-* subtasks flesh out the Fly.io
-integration.
+invocation, and instead calls the remote dispatch path via
+`scripts/remote/provision.sh`.
 
-Maps to `DESIGN.md`: §6 (Finalization).
+#### Machine lifecycle (`scripts/remote/provision.sh`)
+
+The provision script is **sourced** (not exec'd) by the launcher so the
+machine ID and destroy trap live in the launcher's process. It provides
+two functions:
+
+- **`provision_machine()`** — creates a Fly Machine from `$FLY_IMAGE_TAG`
+  (resolved as `registry.fly.io/$PILA_FLY_APP:$PILA_VERSION` by default,
+  or overridden via `PILA_FLY_IMAGE`), polls `flyctl machine status`
+  until the machine reaches state `started`, and registers
+  `destroy_machine` as an EXIT/INT/TERM trap. Exports `$PILA_MACHINE_ID`.
+  Returns 0 on success; destroys the machine and returns 1 on failure.
+- **`destroy_machine()`** — runs `flyctl machine destroy $PILA_MACHINE_ID
+  --app $PILA_FLY_APP --force`, with a stop-then-destroy fallback for
+  machines already in a terminal state. Registered as a trap immediately
+  after the machine is created so no Ctrl-C or crash can leak it.
+
+Environment variables consumed by `provision.sh`:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PILA_FLY_APP` | `pila` | Fly.io app name |
+| `FLY_IMAGE_TAG` | `registry.fly.io/<app>:<version>` | Full image tag to launch (set by the launcher) |
+| `FLY_REGION` | `iad` | Fly.io region |
+| `FLY_VM_CPUS` | `4` | vCPU count for the machine |
+| `FLY_VM_MEMORY` | `8192` | Memory in MB for the machine |
+| `PILA_MACHINE_START_TIMEOUT` | `120` | Seconds to wait for `state=started` |
+
+`provision_machine` requires `flyctl` on `PATH` and `flyctl auth status`
+to succeed. Missing or unauthenticated `flyctl` produces an actionable
+error with install instructions.
+
+Current state: the machine lifecycle (create → started → destroy-on-exit)
+is implemented. Seeding (git clone + rsync uncommitted delta) and worker
+auth forwarding are handled by subsequent feat-remote-* subtasks.
+
+Maps to `DESIGN.md`: §6 (container boundary / teardown),
+`remote-task-system.md` §"microVM = 1 Colima" (lines 163–206).
 
 ---
 

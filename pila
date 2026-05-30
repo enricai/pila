@@ -707,13 +707,44 @@ CACHE_MOUNTS=(
 # --- run -----------------------------------------------------------------
 container_rc=0
 if [ "$REMOTE" = "true" ]; then
-  # --- remote execution path (stub) ------------------------------------
-  # Full Fly.io dispatch is implemented by the feat-remote-* subtasks.
-  # This branch is the routing hook; reaching it confirms --remote was
-  # parsed and the local nerdctl path is bypassed.
-  echo "pila: remote mode selected (--remote / PILA_REMOTE / pila.toml remote=true)" >&2
-  echo "pila: error: remote execution is not yet implemented" >&2
-  container_rc=1
+  # --- remote execution path (Fly.io Machines) -------------------------
+  # provision.sh implements the machine create → started → destroy-on-exit
+  # lifecycle — the remote equivalent of `nerdctl run --rm`.
+  # Sourcing it brings provision_machine() and destroy_machine() into scope
+  # and registers an EXIT/INT/TERM trap after the machine starts so no
+  # Ctrl-C or crash can leak a machine.
+  #
+  # FLY_IMAGE_TAG is the registry-tagged image to launch. It is derived from
+  # PILA_FLY_APP (default "pila") and PILA_VERSION, or overridden by
+  # PILA_FLY_IMAGE in the environment.
+  echo "[pila] remote: starting Fly.io machine (--remote / PILA_REMOTE / pila.toml remote=true)" >&2
+
+  : "${PILA_FLY_APP:=pila}"
+  FLY_IMAGE_TAG="${PILA_FLY_IMAGE:-registry.fly.io/${PILA_FLY_APP}:${PILA_VERSION}}"
+  export PILA_FLY_APP FLY_IMAGE_TAG
+
+  PROVISION_SCRIPT="$PILA_REPO/scripts/remote/provision.sh"
+  if [ ! -f "$PROVISION_SCRIPT" ]; then
+    echo "pila: error: $PROVISION_SCRIPT not found" >&2
+    container_rc=1
+  else
+    # shellcheck disable=SC1090
+    . "$PROVISION_SCRIPT"
+
+    if provision_machine; then
+      # Machine is running and reachable. Subsequent feat-remote-* subtasks
+      # add seeding (git clone + rsync uncommitted delta) and worker auth
+      # forwarding here, then exec pila inside the machine.
+      # For now, validate the lifecycle and exit cleanly so the destroy
+      # trap fires and the machine is reaped.
+      echo "[pila] remote: machine $PILA_MACHINE_ID is reachable — lifecycle OK" >&2
+      echo "[pila] remote: note: seeding and orchestration not yet implemented" >&2
+      container_rc=0
+    else
+      container_rc=1
+    fi
+    # destroy_machine() is called by the EXIT trap registered in provision.sh.
+  fi
 else
   # --- local container execution path ----------------------------------
   # --rm: container is removed on exit. Worktrees + .pila/ state persist on
