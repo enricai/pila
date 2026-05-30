@@ -38,7 +38,6 @@
 !scripts/integrate.sh
 !scripts/finalize.sh
 !scripts/cleanup.sh
-!scripts/publish-image.sh
 !scripts/install.sh
 !scripts/runtime-install.sh
 
