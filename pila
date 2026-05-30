@@ -150,19 +150,8 @@ done
 # --runtime is NOT consumed — it flows through REWRITTEN_ARGS to the
 # orchestrator's own argparse.
 RUNTIME=local
-# env alias (legacy)
-case "${PILA_REMOTE:-}" in
-  1|true|TRUE|yes|YES) RUNTIME=fly ;;
-esac
-# env (canonical)
-case "${PILA_RUNTIME:-}" in
-  local|fly) RUNTIME="${PILA_RUNTIME}" ;;
-  "")        : ;;
-  *)
-    echo "pila: PILA_RUNTIME=${PILA_RUNTIME} is not one of local|fly" >&2
-    exit 1
-    ;;
-esac
+# Precedence (lowest → highest): default → legacy-toml → canonical-toml →
+# legacy-env → canonical-env → CLI.  TOML is resolved first so env overrides it.
 if [ -f "$USER_REPO/pila.toml" ]; then
   # legacy: remote = true
   toml_remote="$(awk '/^[[:space:]]*remote[[:space:]]*=/ {
@@ -188,6 +177,19 @@ if [ -f "$USER_REPO/pila.toml" ]; then
       ;;
   esac
 fi
+# env alias (legacy) — overrides TOML
+case "${PILA_REMOTE:-}" in
+  1|true|TRUE|yes|YES) RUNTIME=fly ;;
+esac
+# env (canonical) — overrides TOML and legacy env alias
+case "${PILA_RUNTIME:-}" in
+  local|fly) RUNTIME="${PILA_RUNTIME}" ;;
+  "")        : ;;
+  *)
+    echo "pila: PILA_RUNTIME=${PILA_RUNTIME} is not one of local|fly" >&2
+    exit 1
+    ;;
+esac
 # CLI (highest priority) — scanned before REWRITTEN_ARGS loop below.
 # --remote sets RUNTIME=fly (legacy). --runtime=VALUE / --runtime VALUE set
 # RUNTIME directly and also flow through to the orchestrator.

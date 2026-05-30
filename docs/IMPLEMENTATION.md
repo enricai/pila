@@ -31,7 +31,7 @@ inside the container (DESIGN §6 / §0.5 below).
 | `Dockerfile` | Image recipe (Debian 12 + Node + pnpm + claude CLI + baked orchestrator source). Built locally on first run, tagged `pila:<VERSION>`. |
 | `scripts/container-entry.sh` | Container PID 1. `cd /work && exec python3 /work/.pila-image/orchestrator/pila.py "$@"`. |
 | `scripts/remote/build-push.sh` | Build and push a self-contained pila image to Fly.io's registry. The baked source at `/work/.pila-image/` lets the image run on Fly Machines without any bind mount. |
-| `scripts/remote/provision.sh` | Fly.io machine lifecycle helper (sourced by the `pila` launcher's `REMOTE=true` branch). Exports `provision_machine()` (create → wait-started → register destroy trap) and `destroy_machine()`. The destroy trap fires on EXIT, INT, and TERM so no machine is leaked by Ctrl-C or crash. |
+| `scripts/remote/provision.sh` | Fly.io machine lifecycle helper (sourced by the `pila` launcher's `RUNTIME=fly` branch). Exports `provision_machine()` (create → wait-started → register destroy trap) and `destroy_machine()`. The destroy trap fires on EXIT, INT, and TERM so no machine is leaked by Ctrl-C or crash. |
 
 ### Python runtime — provisioned inside the container
 
@@ -438,7 +438,7 @@ pila/
 │       ├── build-push.sh          build and push a self-contained image for Fly.io Machines;
 │       │                           the baked /work/.pila-image/ lets the image run without
 │       │                           a bind mount (§0.5 "Registry publish path")
-│       └── provision.sh           Fly Machine lifecycle (sourced by launcher REMOTE=true branch);
+│       └── provision.sh           Fly Machine lifecycle (sourced by launcher RUNTIME=fly branch);
 │                                   provision_machine() create→started→trap; destroy_machine()
 ├── commands/pila.md            thin plugin skill — launches the orchestrator
 ├── skills/
@@ -482,10 +482,11 @@ pila "task" --no-push
 export PILA_NO_PUSH=1
 
 # Route to remote execution (e.g. Fly.io) instead of local nerdctl run:
-pila "task" --remote
-export PILA_REMOTE=1
+pila "task" --runtime fly
+export PILA_RUNTIME=fly
 # Or commit to pila.toml for a per-repo default:
-#   remote = true
+#   runtime = fly
+# Legacy aliases still work (--remote, PILA_REMOTE=1, pila.toml remote=true).
 
 # Skip pre-push hooks at finalize (the user's explicit override; defaults off).
 # Affects only the final `git push`; worker `git commit` operations inside
@@ -1737,17 +1738,31 @@ still run all hooks).
 
 ### Remote execution mode
 
-`--remote` routes execution to a remote backend (Fly.io) instead of the
-local `nerdctl run`. The launcher consumes the flag before building
-`REWRITTEN_ARGS`, so the orchestrator's argparse never sees it.
+`--runtime fly` (or `PILA_RUNTIME=fly` / `pila.toml runtime=fly`) routes
+execution to Fly.io Machines instead of the local `nerdctl run`. The
+Colima/containerd preflight block is gated on `RUNTIME=local` and skipped
+entirely when `RUNTIME=fly`. `--runtime` flows through `REWRITTEN_ARGS`
+to the orchestrator's argparse; `--remote` (legacy) is consumed and not
+forwarded.
+
 Resolution order (highest priority first):
 
-1. **`--remote`** CLI flag.
-2. **`PILA_REMOTE`** environment variable (boolean: `1`/`true`/`TRUE`/`yes`/`YES`).
-3. **`pila.toml`** at the repo root, `remote = true`.
-4. **Default `false`** — local `nerdctl run` is used when unset.
+1. **`--runtime local|fly`** CLI flag (canonical). Passed through to the
+   orchestrator so both the launcher and the orchestrator share the same
+   resolved value.
+2. **`PILA_RUNTIME`** environment variable, values `local` | `fly`.
+3. **`pila.toml`** at the repo root, `runtime = local|fly`.
+4. **`--remote`** CLI flag (legacy alias for `--runtime fly`; consumed,
+   not forwarded).
+5. **`PILA_REMOTE`** environment variable (boolean: `1`/`true`/`TRUE`/`yes`/`YES`;
+   legacy alias).
+6. **`pila.toml`** `remote = true` (legacy alias).
+7. **Default `local`** — local `nerdctl run` is used when unset.
 
-When `REMOTE=true`, the launcher skips the per-OS nerdctl preflight, the
+Invalid values in env or TOML are rejected immediately with an error
+message and exit 1 before any preflight runs.
+
+When `RUNTIME=fly`, the launcher skips the per-OS nerdctl preflight, the
 image-build check, the auth/cache mount assembly, and the `nerdctl run`
 invocation, and instead calls the remote dispatch path via
 `scripts/remote/provision.sh`.
