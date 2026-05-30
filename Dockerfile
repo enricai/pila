@@ -28,6 +28,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# Python runtime deps. See docs/IMPLEMENTATION.md §0 "Python runtime"
+# for the policy (stdlib-preferred; libs allowed when they earn it) and
+# the current dep list. --break-system-packages is required on Debian
+# 13 (PEP 668); the container's Python is owned by the orchestrator so
+# system-wide install is correct here.
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+
 # GitHub CLI — the finalize phase pushes the run branch and opens a PR via
 # `gh pr create` (pila.py:5828). Without this, default-mode runs die at the
 # preflight `shutil.which("gh")` check (pila.py:1282). GitHub publishes a

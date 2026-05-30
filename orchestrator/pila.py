@@ -38,6 +38,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from tenacity import (
+    AsyncRetrying,
+    RetryCallState,
+    RetryError,
+    retry_if_result,
+    stop_after_delay,
+    wait_exponential_jitter,
+)
+
 ROOT = Path(__file__).resolve().parent.parent       # pila plugin/repo root
 PROMPTS = ROOT / "prompts"
 SCRIPTS = ROOT / "scripts"
@@ -144,6 +153,18 @@ DEFAULT_CAPS = {
     # pools regularly hit 50+ PIDs per worker, but a runaway shell loop
     # is in the thousands.
     "worker_pids_max": 256,
+    # Auth/quota backoff budget. When `claude -p` returns an envelope
+    # whose `api_error_status` is 401/429 or whose result message names
+    # an auth/rate-limit failure, `claude_p()` retries with tenacity's
+    # `wait_exponential_jitter(initial=15, max=120, jitter=5)` until
+    # this many cumulative seconds have elapsed, then bails with a
+    # WorkerError that names the Claude Code subscription cap. 300 s
+    # (~4 retries: 15 + 30 + 60 + 120 = 225 s plus jitter) is enough
+    # to ride out a brief gateway hiccup but small enough that a real
+    # 5-hour subscription cap surfaces to the user quickly rather than
+    # tying the run up overnight. See IMPLEMENTATION.md §3 *Auth/quota
+    # backoff* and §6 caps row.
+    "auth_retry_max_sec": 300,
 }
 
 # Every key the orchestrator writes to `st.data`. Canonical alongside the
@@ -4211,6 +4232,26 @@ class WorkerError(RuntimeError):
     pass
 
 
+def _is_auth_or_quota_failure(envelope: dict) -> bool:
+    """True if the `claude -p` envelope looks like a 401/429/auth-message
+    rejection from the Anthropic gateway.
+
+    These need backoff, not the immediate corrective retry that the
+    schema-error path uses — the request was rejected before reaching
+    a model and a fresh request will be rejected too until the user's
+    Claude Code subscription window clears. The auth/quota retry loop
+    in claude_p() consults this classifier; non-matching envelopes
+    fall through to the existing 2-attempt schema loop unchanged.
+    """
+    status = envelope.get("api_error_status")
+    if status in (401, 429, "401", "429"):
+        return True
+    msg = str(envelope.get("result") or "").lower()
+    return ("invalid authentication" in msg
+            or "rate limit" in msg
+            or "rate-limit" in msg)
+
+
 def _extract_tool_result_text(block: dict) -> str:
     """Tool-result `content` is either a string or a list of content
     blocks (`{type: "text", text: "..."}`). Normalize to a plain
@@ -5132,11 +5173,13 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
         return cmd
 
     timeout = caps["worker_timeout_sec"]
-    last_problem = ""
-    for attempt in (1, 2):
-        retry_note = ("" if attempt == 1 else
-                      f"\n\nYOUR PREVIOUS ATTEMPT FAILED: {last_problem} "
-                      "Return output that conforms exactly to the required schema.")
+
+    async def _spawn(retry_note: str) -> dict:
+        """One `_invoke` + telemetry + NDJSON capture + non-clean-exit
+        warnings. Factored out so the auth/quota backoff loop below can
+        re-invoke the worker without duplicating the capture/telemetry
+        bookkeeping — every retry, success or failure, still produces
+        one calls.ndjson row so the audit trail is complete."""
         _t0 = time.monotonic()
         envelope = await _invoke(build(retry_note), cwd, timeout,
                                  sid, pila_dir, verbosity,
@@ -5205,6 +5248,65 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
             log(f"  ⚠  worker returned at {turns}/{max_turns} turns "
                 f"(≥80% of cap) — output may have been produced against a "
                 "degraded context window")
+
+        return envelope
+
+    auth_retry_max_sec = caps.get(
+        "auth_retry_max_sec", DEFAULT_CAPS["auth_retry_max_sec"])
+    last_problem = ""
+    for attempt in (1, 2):
+        retry_note = ("" if attempt == 1 else
+                      f"\n\nYOUR PREVIOUS ATTEMPT FAILED: {last_problem} "
+                      "Return output that conforms exactly to the required schema.")
+        envelope = await _spawn(retry_note)
+
+        # Auth/quota backoff: 401/429/auth-message envelopes need waiting,
+        # not the immediate corrective retry below. The gateway has already
+        # rejected the request and a fresh request will be rejected too
+        # until the user's Claude Code subscription window clears. Run
+        # tenacity's exponential-backoff-with-jitter loop, capped at
+        # `auth_retry_max_sec` cumulative seconds. The loop exits when an
+        # invocation returns a non-auth envelope (success or a different
+        # error class) or when the budget is exhausted.
+        if _is_auth_or_quota_failure(envelope):
+            def _log_before_sleep(rs: RetryCallState) -> None:
+                env = rs.outcome.result()
+                marker = (env.get("api_error_status") or "auth/quota")
+                log(f"  worker hit {marker} — retrying in "
+                    f"{rs.next_action.sleep:.0f}s "
+                    f"(elapsed {rs.seconds_since_start:.0f}s of "
+                    f"{auth_retry_max_sec}s budget)")
+
+            # Use tenacity's __call__ (decorator) form rather than the
+            # iterator form: the iterator form's AttemptManager.__exit__
+            # unconditionally overwrites retry_state's result with None
+            # on clean exit, defeating retry_if_result. __call__ sets
+            # the result correctly inside its own loop and surfaces the
+            # last attempt via RetryError.last_attempt on stop-fire.
+            try:
+                envelope = await AsyncRetrying(
+                    wait=wait_exponential_jitter(
+                        initial=15, max=120, jitter=5),
+                    stop=stop_after_delay(auth_retry_max_sec),
+                    retry=retry_if_result(_is_auth_or_quota_failure),
+                    reraise=False,
+                    before_sleep=_log_before_sleep,
+                )(_spawn, retry_note)
+            except RetryError as e:
+                # Budget exhausted with the envelope still auth/quota.
+                # Surface the last attempt's envelope so the
+                # subscription-cap WorkerError below fires with
+                # accurate context. retry_if_result only filters
+                # results (not exceptions), so last_attempt holds a
+                # result Future — .result() returns the envelope.
+                envelope = e.last_attempt.result()
+
+            if _is_auth_or_quota_failure(envelope):
+                raise WorkerError(
+                    "Claude API returned auth/quota error after "
+                    f"~{auth_retry_max_sec}s of retries — your Claude "
+                    "Code subscription likely hit its rolling usage "
+                    "cap. Run --resume once the window clears.")
 
         if envelope.get("is_error"):
             last_problem = str(envelope.get("api_error_status")

@@ -6,10 +6,11 @@ code surface; read this file first.
 
 ## Tech stack
 
-Python 3.10+, stdlib-only orchestrator. The orchestrator shells out
-to `claude -p` (Claude Code CLI, on the user's subscription — no API
-key) and uses git worktrees for parallel implementer isolation.
-`pytest` is the only dev dependency.
+Python 3.10+, stdlib-preferred orchestrator (runtime deps pinned in
+`requirements.txt` and listed in `docs/IMPLEMENTATION.md` §0). The
+orchestrator shells out to `claude -p` (Claude Code CLI, on the user's
+subscription — no API key) and uses git worktrees for parallel
+implementer isolation. `pytest` is the only dev dependency.
 
 **Pila runs inside a container.** The `pila` launcher shells out to
 `nerdctl run` to start a container per run (DESIGN §6 *Worker subtree
@@ -33,8 +34,9 @@ launcher (a portable bash script) and the `Dockerfile` are the only
 other moving parts on the orchestrator side. The orchestrator is
 deliberately kept as a single module rather than split across
 packages — the design goal is that you can read the whole control
-flow top-to-bottom in one sitting. Stdlib-only on the Python side;
-`pytest` is the sole dev dependency.
+flow top-to-bottom in one sitting. Stdlib-preferred on the Python side
+— runtime deps are pinned in `requirements.txt` and listed in
+`docs/IMPLEMENTATION.md` §0; `pytest` is the sole dev dependency.
 
 ## The three-layer rule (load-bearing — read first)
 
@@ -114,8 +116,9 @@ orchestrator and not used anywhere in this repo.
 
 ## Code style
 
-- **Imports:** stdlib first, then third-party (currently none in
-  production code), then local. Alphabetical within each group.
+- **Imports:** stdlib first, then third-party, then local.
+  Alphabetical within each group. Third-party deps are kept minimal —
+  see `docs/IMPLEMENTATION.md` §0 for the current list.
 - **Naming:** `snake_case` for functions and variables, `PascalCase` for
   classes, `ALL_CAPS` for module constants.
 - **Logging:** `log("...")` for normal output, `die("...", code=N)` for

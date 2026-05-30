@@ -49,9 +49,21 @@ On local runs the launcher's bind mount (`-v $PILA_REPO:/work/.pila-image:ro`)
 shadows the baked copy, so iterating on `orchestrator/pila.py` still
 does not require an image rebuild — the host file is used on the next run.
 
-The orchestrator itself remains stdlib-only — no `pip install`, no
-`pyproject.toml`, no PyPI release. `pytest` is still the only dev
-dependency, run on the host against the bind-mounted source.
+The orchestrator prefers stdlib. Third-party runtime libraries are
+permitted when they (a) replace non-trivial logic with a widely-used,
+stable implementation, (b) earn their distribution cost (image size,
+build time, dependency tracking), and (c) are documented here. Pins
+live in `requirements.txt` at the repo root; the Dockerfile runs
+`pip3 install --break-system-packages --no-cache-dir -r requirements.txt`
+once per image build. There is no `pyproject.toml` and no PyPI release.
+
+Current runtime deps:
+
+- `tenacity` — exponential backoff for transient `claude -p` envelope
+  errors (auth / rate-limit). See §3 *Auth/quota backoff*.
+
+`pytest` remains the sole dev dependency, run on the host against the
+bind-mounted source.
 
 ### Path A — Claude Code plugin marketplace (primary)
 
@@ -1279,6 +1291,42 @@ The validated payload is read from `structured_output` on the envelope. On a
 missing or schema-invalid payload, `claude_p()` retries once with the violation
 quoted into the prompt; a second failure raises `WorkerError`.
 
+#### Auth/quota backoff
+
+A separate retry path handles transient `claude -p` envelope errors that
+indicate the Claude Code subscription is rate-limited (HTTP 401, HTTP 429,
+or result text containing `Invalid authentication` / `rate limit` /
+`rate-limit`). These need *backoff*, not the immediate corrective retry
+above — the gateway has already rejected the request and a fresh request
+will be rejected too until the user's rolling usage window clears.
+
+When `_is_auth_or_quota_failure(envelope)` matches, `claude_p()` enters a
+`tenacity.AsyncRetrying` loop with `wait_exponential_jitter(initial=15,
+max=120, jitter=5)` and `stop_after_delay(auth_retry_max_sec)`. Each
+sleep is logged with the wait and the elapsed/total budget so the user
+can Ctrl-C if they know the window won't clear in time. If the budget
+is exhausted with the envelope still classified as auth/quota,
+`claude_p()` raises `WorkerError` with a message naming the subscription
+cap and instructing the user to re-run with `--resume` once the window
+clears. If a retry returns a non-auth envelope (success or a different
+error), the loop exits and normal handling resumes — a schema-invalid
+non-auth envelope still gets one corrective retry under the existing
+2-attempt loop.
+
+The first tenacity iteration runs without a pre-sleep — tenacity
+sleeps *between* iterations, not before the first — so the effective
+sequence is one immediate retry followed by waits of roughly 15 s,
+30 s, 60 s, 120 s, 120 s up to the 300 s budget. Each `_invoke`
+produces one `calls.ndjson` row, so a single logical `claude_p()`
+call can now write up to ~7 rows when both outer schema-loop
+attempts hit auth/quota and exhaust the budget. The budget resets
+per outer schema-loop attempt; in the rare case where attempt 2 also
+enters backoff, total wait can reach ~10 minutes.
+
+The classifier and the budget constant (`auth_retry_max_sec`) live in
+`pila.py`; the budget is in §6 *Code-enforced caps*. The non-auth
+`is_error` path is unchanged — schema parse failures stay immediate.
+
 `WorkerError` handling by worker type — per DESIGN §7's salvage rule
 ("salvage if there is something to salvage; abort cleanly otherwise"):
 - **implementer** — `run_implementer()` catches it, converts to an
@@ -1659,6 +1707,7 @@ Defaults in `DEFAULT_CAPS` and the per-worker `claude_p` call sites.
 | per-worker idle-event warning (`worker_idle_warn_sec`) | 300 s (5 min) | log a `no stdout events in <gap>s` warning naming the worker, its PID, and any stderr tail. Observation-only — the worker is NOT killed; `worker_timeout_sec` remains the only kill. Surfaces silent-hang failures (a worker that never emits its first `system/init` event) so the user is not left with zero feedback between phase start and the 90-min hard kill. |
 | per-worker cgroup memory cap (`worker_memory_max_bytes`) | auto-derived from `/proc/meminfo` (VM ram split across `max_parallel + 1` slots, clamped to ≤ 4 GiB), or `--worker-memory-max SIZE` / `PILA_WORKER_MEMORY_MAX` / `worker_memory_max` in `pila.toml`. Suffixes K/M/G/T accepted | the kernel OOM-kills inside the worker's cgroup; sibling workers, the orchestrator, and host-side services (sshd, lima-guestagent) are not eligible victims. Requires the launcher's writable `/sys/fs/cgroup` bind-mount (see `pila` launcher); on incompatible hosts the probe at startup logs one warn line and the run continues uncapped. See DESIGN §6 *Memory containment*. |
 | per-worker cgroup PIDs cap (`worker_pids_max`) | 256 | kernel rejects further `fork()` from any process in the worker cgroup once the count is reached. Catches runaway fork-bomb behavior in tool subtrees. |
+| auth/quota backoff budget (`auth_retry_max_sec`) | 300 s (5 min) | `claude_p()` retries the worker with `tenacity` exponential backoff (initial 15 s, max 120 s, ±5 s jitter) on 401/429/auth-message envelopes. Budget exhausted → `WorkerError` naming the subscription cap. See §3 *Auth/quota backoff*. |
 
 `--max-turns` by worker: classifier 60, planner 100, integrator 60,
 implementer 120, conformer 60, judge 40, heal patch_generator 40. For
