@@ -438,8 +438,12 @@ pila/
 │       ├── build-push.sh          build and push a self-contained image for Fly.io Machines;
 │       │                           the baked /work/.pila-image/ lets the image run without
 │       │                           a bind mount (§0.5 "Registry publish path")
-│       └── provision.sh           Fly Machine lifecycle (sourced by launcher RUNTIME=fly branch);
-│                                   provision_machine() create→started→trap; destroy_machine()
+│       ├── provision.sh           Fly Machine lifecycle (sourced by launcher RUNTIME=fly branch);
+│       │                           provision_machine() create→started→trap; destroy_machine()
+│       └── seed-auth.sh           Worker auth + config seeding (sourced by launcher after
+│                                   provision_machine() returns); seed_auth() delivers
+│                                   ~/.claude.json + ~/.claude/ + git identity to the machine
+│                                   via flyctl machine exec tar-pipe and git config calls
 ├── commands/pila.md            thin plugin skill — launches the orchestrator
 ├── skills/
 │   ├── judge-llm-batch/SKILL.md  post-run judge skill — scores a batch of captured
@@ -1802,12 +1806,48 @@ using `$PILA_FLY_APP` and `$PILA_VERSION`, or overridden by setting
 to succeed. Missing/unauthenticated `flyctl` produces an actionable error
 with install instructions rather than a cryptic failure mid-run.
 
-Current state: the machine lifecycle is implemented (create → started →
-destroy-on-exit). Seeding (git clone + rsync uncommitted delta) and worker
-auth forwarding are handled by subsequent feat-remote-* subtasks.
+#### Worker auth + config seeding (`scripts/remote/seed-auth.sh`)
+
+After `provision_machine()` returns successfully, the launcher sources
+`scripts/remote/seed-auth.sh` and calls `seed_auth()`. This is the remote
+equivalent of the `AUTH_MOUNTS` bind-mount block (launcher lines ~542–726):
+instead of mounting `$STAGE` as container volumes, the same content is
+delivered via `flyctl machine exec` tar-pipe and git config calls.
+
+`seed_auth()` performs three steps, in order:
+
+1. **Tar-pipe delivery of `$STAGE` (Claude files only).** `tar -cC $STAGE`
+   (excluding `.gitconfig`, `.gitconfig.local`, `.gitignore`,
+   `.gitignore_global`, `.git-credentials`, `.netrc`, `.ssh`, `.gnupg`,
+   `.config`) is piped into `flyctl machine exec --stdin -- tar -xC /home/pila`.
+   This delivers `~/.claude.json` (projects-stripped) and `~/.claude/`
+   (session/history/bulk dirs already filtered during `$STAGE` assembly),
+   including `~/.claude/.credentials.json` if Keychain-extracted on macOS.
+
+2. **Token fallback.** If `$STAGE/.claude/.credentials.json` was not written
+   (Linux, or macOS Keychain extraction failure) but `$CLAUDE_CODE_OAUTH_TOKEN`
+   is set, `seed_auth()` writes a minimal credentials JSON
+   `{"claudeAiOauth":{"accessToken":"<token>"}}` directly to
+   `/home/pila/.claude/.credentials.json` on the machine via
+   `flyctl machine exec --stdin`. If neither source is available, `seed_auth()`
+   returns 1 with an actionable error message.
+
+3. **Git identity.** Reads `user.name` and `user.email` from the host's git
+   config (`git config user.name` / `git config user.email`) and sets them
+   globally on the remote machine via two `flyctl machine exec -- git config
+   --global` calls. Worker commits carry the host user's identity.
+
+Git-push auth (SSH keys, `.netrc`, `~/.config/gh`) is **not** seeded — that
+auth lives on the host per DESIGN §6 *Finalization* and is not needed inside
+the remote machine for `claude -p` worker authentication or `git commit`.
+
+Current state: machine lifecycle + auth/config seeding are implemented.
+Code seeding (git clone + rsync uncommitted delta) and the exec-pila step
+are handled by subsequent feat-remote-* subtasks.
 
 Maps to `DESIGN.md`: §6 (container boundary / teardown), `remote-task-system.md`
-§"microVM = 1 Colima" (lines 163–206).
+§"microVM = 1 Colima" (lines 163–206) and §"The hard problem is auth-crossing"
+(lines 232–253).
 
 ---
 

@@ -803,22 +803,32 @@ if [ "$RUNTIME" = "fly" ]; then
   export FLY_IMAGE_TAG
 
   PROVISION_SCRIPT="$PILA_REPO/scripts/remote/provision.sh"
+  SEED_AUTH_SCRIPT="$PILA_REPO/scripts/remote/seed-auth.sh"
   if [ ! -f "$PROVISION_SCRIPT" ]; then
     echo "pila: error: $PROVISION_SCRIPT not found" >&2
+    container_rc=1
+  elif [ ! -f "$SEED_AUTH_SCRIPT" ]; then
+    echo "pila: error: $SEED_AUTH_SCRIPT not found" >&2
     container_rc=1
   else
     # shellcheck disable=SC1090
     . "$PROVISION_SCRIPT"
+    # shellcheck disable=SC1090
+    . "$SEED_AUTH_SCRIPT"
 
     if provision_machine; then
-      # Machine is running and reachable. Subsequent feat-remote-* subtasks
-      # add seeding (git clone + rsync uncommitted delta) and worker auth
-      # forwarding here, then exec pila inside the machine.
-      # For now, validate the lifecycle and exit cleanly so the destroy
-      # trap fires and the machine is reaped.
-      echo "[pila] remote: machine $PILA_MACHINE_ID is reachable — lifecycle OK" >&2
-      echo "[pila] remote: note: seeding and orchestration not yet implemented" >&2
-      container_rc=0
+      # Machine is running and reachable. Seed Claude config + git identity
+      # so `claude -p` workers can authenticate and commit.
+      if seed_auth; then
+        # Auth seeded. Subsequent feat-remote-* subtasks add code seeding
+        # (git clone + rsync uncommitted delta) and exec pila inside the
+        # machine here.
+        echo "[pila] remote: auth seeded — orchestration not yet implemented" >&2
+        container_rc=0
+      else
+        echo "pila: error: seed_auth failed — aborting remote run" >&2
+        container_rc=1
+      fi
     else
       container_rc=1
     fi
