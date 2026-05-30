@@ -26,6 +26,10 @@
 !Dockerfile
 !.dockerignore
 
+# Python runtime deps — installed inside the image (see Dockerfile
+# `pip3 install -r /tmp/requirements.txt`).
+!requirements.txt
+
 # Orchestrator source — baked into /work/.pila-image/orchestrator/.
 !orchestrator/
 !orchestrator/pila.py
