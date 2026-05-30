@@ -139,31 +139,92 @@ for arg in "$@"; do
   fi
 done
 
-# --- remote execution mode knob ----------------------------------------
-# --remote on the CLI, PILA_REMOTE=1 in the env, or `remote = true` in
-# pila.toml selects remote execution (e.g. Fly.io) instead of the local
-# `nerdctl run`. Precedence: CLI > env > TOML, matching other knobs.
-# The flag is consumed here and never forwarded to the orchestrator's
-# argparse (same pattern as --no-runtime-install).
-REMOTE=false
-case "${PILA_REMOTE:-}" in
-  1|true|TRUE|yes|YES) REMOTE=true ;;
-esac
+# --- runtime-mode knob ---------------------------------------------------
+# Resolves RUNTIME=local|fly. Precedence: CLI --runtime > PILA_RUNTIME env
+# > pila.toml `runtime` key > default `local`. Mirrors the orchestrator's
+# resolve_runtime() (pila.py) so the launcher routes correctly before the
+# container starts.
+#
+# Backward-compat aliases: --remote / PILA_REMOTE / pila.toml `remote=true`
+# map to RUNTIME=fly. The --remote flag is consumed here and not forwarded;
+# --runtime is NOT consumed — it flows through REWRITTEN_ARGS to the
+# orchestrator's own argparse.
+RUNTIME=local
+# Precedence (lowest → highest): default → legacy-toml → canonical-toml →
+# legacy-env → canonical-env → CLI.  TOML is resolved first so env overrides it.
 if [ -f "$USER_REPO/pila.toml" ]; then
+  # legacy: remote = true
   toml_remote="$(awk '/^[[:space:]]*remote[[:space:]]*=/ {
                         gsub(/^[[:space:]]*remote[[:space:]]*=[[:space:]]*/, "", $0);
                         gsub(/^"|"$/, "", $0);
                         print; exit
                       }' "$USER_REPO/pila.toml" 2>/dev/null || true)"
   case "${toml_remote:-}" in
-    1|true|TRUE|yes|YES) REMOTE=true ;;
+    1|true|TRUE|yes|YES) RUNTIME=fly ;;
+  esac
+  # canonical: runtime = local|fly
+  toml_runtime="$(awk '/^[[:space:]]*runtime[[:space:]]*=/ {
+                         gsub(/^[[:space:]]*runtime[[:space:]]*=[[:space:]]*/, "", $0);
+                         gsub(/^"|"$/, "", $0);
+                         print; exit
+                       }' "$USER_REPO/pila.toml" 2>/dev/null || true)"
+  case "${toml_runtime:-}" in
+    local|fly) RUNTIME="${toml_runtime}" ;;
+    "")        : ;;
+    *)
+      echo "pila: pila.toml: runtime=${toml_runtime} is not one of local|fly" >&2
+      exit 1
+      ;;
   esac
 fi
+# env alias (legacy) — overrides TOML
+case "${PILA_REMOTE:-}" in
+  1|true|TRUE|yes|YES) RUNTIME=fly ;;
+esac
+# env (canonical) — overrides TOML and legacy env alias
+case "${PILA_RUNTIME:-}" in
+  local|fly) RUNTIME="${PILA_RUNTIME}" ;;
+  "")        : ;;
+  *)
+    echo "pila: PILA_RUNTIME=${PILA_RUNTIME} is not one of local|fly" >&2
+    exit 1
+    ;;
+esac
+# CLI (highest priority) — scanned before REWRITTEN_ARGS loop below.
+# --remote sets RUNTIME=fly (legacy). --runtime=VALUE / --runtime VALUE set
+# RUNTIME directly and also flow through to the orchestrator.
 for arg in "$@"; do
-  if [ "$arg" = "--remote" ]; then
-    REMOTE=true
+  case "$arg" in
+    --remote)           RUNTIME=fly ;;
+    --runtime=local)    RUNTIME=local ;;
+    --runtime=fly)      RUNTIME=fly ;;
+    --runtime=*)
+      echo "pila: --runtime=${arg#--runtime=} is not one of local|fly" >&2
+      exit 1
+      ;;
+  esac
+done
+# Handle the two-argument form --runtime VALUE.
+prev_was_runtime=false
+for arg in "$@"; do
+  if $prev_was_runtime; then
+    case "$arg" in
+      local|fly) RUNTIME="$arg" ;;
+      *)
+        echo "pila: --runtime $arg is not one of local|fly" >&2
+        exit 1
+        ;;
+    esac
+    prev_was_runtime=false
+    continue
+  fi
+  if [ "$arg" = "--runtime" ]; then
+    prev_was_runtime=true
   fi
 done
+# Maintain backward-compat REMOTE alias consumed downstream.
+REMOTE=false
+[ "$RUNTIME" = "fly" ] && REMOTE=true
 
 # DRY_RUN is referenced by scripts/runtime-install.sh; default to false
 # in the launcher (the launcher has no --dry-run flag — that's install.sh).
@@ -177,6 +238,9 @@ if [ -f "$PILA_REPO/scripts/runtime-install.sh" ]; then
   . "$PILA_REPO/scripts/runtime-install.sh"
 fi
 
+# Colima/containerd preflight is only needed for local nerdctl invocations.
+# Skip entirely when RUNTIME=fly (or any future non-local runtime).
+if [ "$RUNTIME" = "local" ]; then
 case "$OS" in
   Darwin)
     # Auto-install Colima if missing, with a TTY guard. The brew install
@@ -291,6 +355,7 @@ case "$OS" in
     exit 1
     ;;
 esac
+fi  # end RUNTIME=local preflight
 
 # --- host preflight: git repo + gh + jq ---------------------------------
 # These checks moved out of the orchestrator (DESIGN §6 *Finalization*).
@@ -465,8 +530,8 @@ for arg in "$@"; do
       # The orchestrator's argparse doesn't know it.
       ;;
     --remote)
-      # Launcher-only flag; consumed by the remote-mode knob above.
-      # The orchestrator's argparse doesn't know it.
+      # Launcher-only flag (legacy alias for --runtime fly); consumed by
+      # the runtime-mode knob above. The orchestrator's argparse doesn't know it.
       ;;
     *)
       REWRITTEN_ARGS+=("$arg")
@@ -704,16 +769,59 @@ CACHE_MOUNTS=(
 # (Dockerfile) so the resolver and mount target are stable across
 # launcher invocations. Not user-tunable here.
 
+# --- remote: resolve Fly.io image tag -----------------------------------
+# FLY_IMAGE_TAG is the registry-tagged image that will be launched as a
+# Fly Machine. It is only resolved when REMOTE=true so the local path
+# does not pay the version-lookup cost.
+resolve_fly_image_tag() {
+  local fly_app region version tag
+  fly_app="${PILA_FLY_APP:-pila}"
+  region="${FLY_REGION:-iad}"
+  version="$PILA_VERSION"
+  tag="registry.fly.io/$fly_app:$version"
+  # Allow the caller to override the full tag via env.
+  echo "${PILA_FLY_IMAGE:-$tag}"
+}
+
 # --- run -----------------------------------------------------------------
 container_rc=0
-if [ "$REMOTE" = "true" ]; then
-  # --- remote execution path (stub) ------------------------------------
-  # Full Fly.io dispatch is implemented by the feat-remote-* subtasks.
-  # This branch is the routing hook; reaching it confirms --remote was
-  # parsed and the local nerdctl path is bypassed.
-  echo "pila: remote mode selected (--remote / PILA_REMOTE / pila.toml remote=true)" >&2
-  echo "pila: error: remote execution is not yet implemented" >&2
-  container_rc=1
+if [ "$RUNTIME" = "fly" ]; then
+  # --- remote execution path (Fly.io Machines) -------------------------
+  # provision.sh handles the machine create → started → destroy lifecycle,
+  # the remote equivalent of `nerdctl run --rm`. Sourcing it exports
+  # provision_machine() and destroy_machine() and registers the EXIT trap
+  # after a successful machine start.
+  #
+  # Auth + config seeding and code seeding (git clone + rsync delta) are
+  # handled by later feat-remote-* subtasks. This branch establishes the
+  # machine lifecycle; the orchestrator itself is not yet executed inside
+  # the remote machine here.
+  echo "[pila] remote: starting Fly.io machine (--runtime fly / PILA_RUNTIME=fly / pila.toml runtime=fly)" >&2
+
+  FLY_IMAGE_TAG="$(resolve_fly_image_tag)"
+  export FLY_IMAGE_TAG
+
+  PROVISION_SCRIPT="$PILA_REPO/scripts/remote/provision.sh"
+  if [ ! -f "$PROVISION_SCRIPT" ]; then
+    echo "pila: error: $PROVISION_SCRIPT not found" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  . "$PROVISION_SCRIPT"
+
+  if provision_machine; then
+    # Machine is running. Subsequent feat-remote-* subtasks will add the
+    # seeding (git clone + rsync) and worker-auth steps here, then exec
+    # pila inside the machine via flyctl ssh / flyctl machine exec.
+    # For now, validate that the machine is up and exit cleanly so the
+    # destroy trap fires and the machine is reaped.
+    echo "[pila] remote: machine $PILA_MACHINE_ID is reachable — lifecycle OK" >&2
+    echo "[pila] remote: note: seeding and orchestration not yet implemented" >&2
+    container_rc=0
+  else
+    container_rc=1
+  fi
+  # destroy_machine() is called by the EXIT trap registered in provision.sh.
 else
   # --- local container execution path ----------------------------------
   # --rm: container is removed on exit. Worktrees + .pila/ state persist on
