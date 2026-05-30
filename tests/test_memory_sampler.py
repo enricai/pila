@@ -150,3 +150,68 @@ def test_collector_exception_does_not_kill_sampler(pila, tmp_path,
     # And memory.ndjson should not have been created (every collect
     # attempt failed before the write).
     assert not (st.run_dir / "memory.ndjson").exists()
+
+
+def test_sampler_follows_run_dir_rename(pila, tmp_path):
+    """Regression: the orchestrator atomically renames the run dir from
+    `_bootstrap-<6hex>` to the final `<run-id>` at the end of phase 1
+    (`State.rename_to` mutates `st.run_dir`). The sampler must re-resolve
+    `st.run_dir` on every tick — capturing the path once outside the loop
+    silently strands every sample after the rename, because the bootstrap
+    directory no longer exists and `open("a")` raises FileNotFoundError
+    (which the sampler swallows).
+
+    The original sampler ship (`2df0eb6`) had this bug; it surfaced as a
+    46-minute run with only 3 memory.ndjson lines, all written before the
+    rename. Pin the contract so a future refactor doesn't recapture the
+    path."""
+    bootstrap = tmp_path / "runs" / "_bootstrap-aaaaaa"
+    bootstrap.mkdir(parents=True)
+    final = tmp_path / "runs" / "feat-final-abc123"
+    st = SimpleNamespace(
+        run_dir=bootstrap,
+        data={"current_phase": "phase 1: classify", "worker_count": 1},
+    )
+
+    async def run() -> tuple[int, list[dict]]:
+        task = asyncio.create_task(
+            pila._memory_sampler(st, interval_sec=0.03))
+        # Pre-rename ticks: at least one sample lands in the bootstrap
+        # dir while the captured path (if any) still resolves.
+        await asyncio.sleep(0.08)
+        pre_count = len((bootstrap / "memory.ndjson").read_text()
+                        .splitlines())
+        # Now simulate the rename + State.rename_to mutation. After
+        # this, a bug-equivalent sampler that captured the path once
+        # outside the loop keeps writing to the *old* path string —
+        # which the rename carried the file out from under, so the
+        # writes hit a nonexistent parent dir and `open("a")` raises
+        # FileNotFoundError (swallowed). Distinguishing "post-rename
+        # writes landed" from "the file was simply carried along by
+        # the rename" requires comparing line counts before vs after.
+        import os
+        os.rename(bootstrap, final)
+        st.run_dir = final
+        # Let several more ticks fire after the rename. A correct
+        # sampler re-resolves st.run_dir each tick and continues
+        # writing into the renamed dir. A buggy one silently stops.
+        await asyncio.sleep(0.18)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return pre_count, [json.loads(l) for l
+                           in (final / "memory.ndjson").read_text()
+                           .splitlines()]
+
+    pre_count, samples = asyncio.run(run())
+    # The bug surfaces as: pre-rename writes land, post-rename writes
+    # silently no-op. Assert that the final file has strictly more
+    # lines than were present at rename time — i.e. at least one
+    # post-rename tick wrote successfully.
+    assert len(samples) > pre_count, (
+        f"sampler stranded after run-dir rename: {pre_count} sample(s) "
+        f"at rename time, {len(samples)} sample(s) after. No "
+        "post-rename writes landed — the sampler likely captured "
+        "st.run_dir outside the loop instead of re-resolving each tick.")

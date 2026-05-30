@@ -4316,9 +4316,16 @@ async def _memory_sampler(st: "State",
     sample-write is exception-guarded, and an exception thrown anywhere
     inside the loop body is swallowed (telemetry that crashes the
     orchestrator is worse than no telemetry)."""
-    out = st.run_dir / "memory.ndjson"
+    # Re-resolve `st.run_dir` every tick — the orchestrator atomically
+    # renames the run dir from `_bootstrap-<6hex>` to the final
+    # `<run-id>` at the end of phase_classify (State.rename_to mutates
+    # st.run_dir). Capturing the Path once would silently strand every
+    # sample after the rename, since the bootstrap directory no longer
+    # exists and `open("a")` would raise FileNotFoundError (swallowed
+    # by the except below).
     while True:
         try:
+            out = st.run_dir / "memory.ndjson"
             sample = _collect_memory_sample(st)
             with out.open("a", buffering=1) as f:
                 f.write(json.dumps(sample, separators=(",", ":")) + "\n")
@@ -4332,6 +4339,7 @@ async def _memory_sampler(st: "State",
             # full, run_dir gone), the existing samples on disk are
             # still useful; don't mask the CancelledError.
             try:
+                out = st.run_dir / "memory.ndjson"
                 sample = _collect_memory_sample(st)
                 with out.open("a", buffering=1) as f:
                     f.write(json.dumps(sample, separators=(",", ":")) + "\n")

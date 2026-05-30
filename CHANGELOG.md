@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Memory sampler stranded after the bootstrap-dir → final-run-id
+  rename.** The sampler shipped earlier in this release captured
+  `out = st.run_dir / "memory.ndjson"` once outside its tick loop.
+  At end of phase 1 the orchestrator atomically renames
+  `_bootstrap-<6hex>` to the final `<run-id>` (via `State.rename_to`,
+  which mutates `st.run_dir`), but the sampler's captured Path still
+  pointed at the now-nonexistent bootstrap directory. Every
+  subsequent `open("a")` raised `FileNotFoundError`, which the
+  intentionally-broad outer `except Exception: pass` swallowed —
+  silently no-op'ing the sampler for the rest of the run. Surfaced
+  as `memory.ndjson` files frozen at ~3 lines (the pre-rename
+  ticks). Fix moves the `out = st.run_dir / "memory.ndjson"` re-
+  resolution inside the loop in both the normal tick and the
+  cancel-path final-sample. Added a regression test
+  (`test_sampler_follows_run_dir_rename`) that compares pre-rename
+  vs post-rename sample counts — the previous tests used a
+  SimpleNamespace stub with a fixed `run_dir` and never exercised
+  the rename hazard, which is exactly how the bug slipped through.
+
 ### Added
 
 - **Orchestrator memory-leak telemetry: `.pila/runs/<id>/memory.ndjson`.**
