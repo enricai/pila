@@ -390,6 +390,7 @@ live `claude` binary would be needed; out of scope for the current suite).
 | `scripts/finalize.sh` | Verify the run branch is non-empty and ready to push (the working branch is not modified locally — the push + PR step lives in Python's `push_and_open_pr`, called from `phase_finalize` unless `--no-push`) |
 | `scripts/cleanup.sh` | Remove worktrees for one run (default `--run-id`) or all runs (`--all-runs`). State dir always preserved as audit. `--branches` also deletes the matching `pila/runs/<id>` run branch *and* `pila/subtasks/<id>/*` subtask branches. `--subtask-branches` deletes only the subtask branches and keeps `pila/runs/<id>` (the post-finalize default — the run branch is the PR head). `--bootstrap` removes orphaned `_bootstrap-*` dirs (runs that died before classify completed). |
 | `scripts/remote/build-push.sh` | Build and push a self-contained pila image to Fly.io's registry (source baked in at `/work/.pila-image/`). See `docs/IMPLEMENTATION.md` §0.5 *Registry publish path*. |
+| `scripts/remote/provision.sh` | Fly Machine lifecycle helper (sourced by the launcher's `REMOTE=true` branch). Provides `provision_machine()` (create → wait-started → register destroy trap) and `destroy_machine()`. See `docs/IMPLEMENTATION.md` §7 *Machine lifecycle*. |
 | `pila` | Executable entry-point wrapper |
 | `commands/pila.md` | Thin plugin skill — reachable as `/pila` from Claude Code |
 | `docs/DESIGN.md` | Full design document and rationale |
