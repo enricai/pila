@@ -12,7 +12,7 @@
 # image is self-contained without a bind-mount. An image rebuild IS required
 # after source changes.
 
-FROM debian:12-slim
+FROM debian:13-slim
 
 # Base tools pila + claude -p + typical worker tasks need.
 # build-essential covers native-module compilation (sharp, bcrypt, etc.) so
