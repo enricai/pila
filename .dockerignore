@@ -1,5 +1,11 @@
 # Build context for the pila image.
 #
+# The Dockerfile bakes orchestrator/, scripts/, prompts/, and .claude-plugin/
+# into the image so Fly.io Machines can run without a bind mount (§0.5).
+# Exclude everything else to keep the build context lean — .git, tests,
+# caches, and docs are not needed inside the image and traversing them over
+# the host-to-VM bridge (on Colima/macOS) wastes time.
+#
 # LOCAL MODE: the orchestrator source is bind-mounted at runtime
 #   (-v $PILA_HOME:/work/.pila-image:ro), so build-context contents are
 #   irrelevant — the COPY instructions below are shadowed by the mount.
@@ -48,3 +54,6 @@
 !prompts/judge.md
 !prompts/patch_generator.md
 !prompts/_clarification_filter.md
+
+# Plugin manifest — baked into /work/.pila-image/.claude-plugin/.
+!.claude-plugin/
