@@ -125,6 +125,7 @@ STATE_FIELDS = (
     "worker_count", "telemetry",
     "categories", "classifier_questions", "answers",
     "needs_source_of_truth", "source_of_truth_pref", "clarify",
+    "dangerously_skip_permissions",
     "verbosity", "inspect_dirs",
     "test_runner",
     "integrator_failure", "integrator_warnings", "scope_warnings",
@@ -186,16 +187,21 @@ def is_protected_path(path: str) -> bool:
 _READ_BASE = "Read,Grep,Glob,WebSearch,WebFetch"
 # INSPECT_TOOLS is the read-only-with-shell bucket for classifier, planner,
 # and reconciler. These workers run in the real repo cwd (not a worktree),
-# so they cannot use --dangerously-skip-permissions safely. Without
-# pre-approval, Bash calls in -p mode are gated by the permission system,
-# return is_error=true, and surface as "tool-fail" — even for benign
-# commands like `ls foo 2>&1` whose redirection trips the
+# so the default is that they cannot use --dangerously-skip-permissions.
+# Without pre-approval, Bash calls in -p mode are gated by the permission
+# system, return is_error=true, and surface as "tool-fail" — even for
+# benign commands like `ls foo 2>&1` whose redirection trips the
 # multiple-operations splitter. The Bash(<verb>:*) prefix patterns
 # pre-approve specific read-only verbs (verified against claude 2.1.150:
 # the pattern matcher handles trailing redirection like `2>&1`).
-# Write/Edit are deliberately omitted: the §12 "read-only worker" contract
-# stays mechanically enforced — anything outside this allowlist falls
-# through and is rejected in non-interactive mode.
+# Write/Edit are deliberately omitted: by default, the §12 "read-only
+# worker" contract stays mechanically enforced — anything outside this
+# allowlist falls through and is rejected in non-interactive mode. The
+# top-level `pila --dangerously-skip-permissions` flag (DESIGN §12 last
+# paragraph) is the documented escape hatch: when set, claude_p passes
+# --dangerously-skip-permissions to every worker, including the inspect
+# bucket; the allowlist still names what the worker can call without
+# prompting, but the gate that rejects everything else is lifted.
 INSPECT_TOOLS = (
     f"{_READ_BASE},"
     "Bash(ls:*),Bash(find:*),Bash(cat:*),Bash(head:*),Bash(tail:*),"
@@ -266,6 +272,17 @@ NO_PUSH_FILE = SOURCE_OF_TRUTH_FILE
 # safety override).
 CLARIFY_ENV = "PILA_CLARIFY"
 CLARIFY_FILE = SOURCE_OF_TRUTH_FILE
+
+# --dangerously-skip-permissions escape hatch (DESIGN §12). Forces
+# every claude -p worker — including the judgment workers that run in
+# the real repo cwd — to pass --dangerously-skip-permissions, waiving
+# the mechanical §12 read-only enforcement on classifier / planner /
+# reconciler / provision. Named identically to the underlying CLI flag
+# on purpose: choosing it means the user understands they are removing
+# a guardrail. Resolution order: --dangerously-skip-permissions CLI
+# flag → PILA_DANGEROUSLY_SKIP_PERMISSIONS env → pila.toml → False.
+DANGEROUS_SKIP_PERMS_ENV = "PILA_DANGEROUSLY_SKIP_PERMISSIONS"
+DANGEROUS_SKIP_PERMS_FILE = SOURCE_OF_TRUTH_FILE
 
 # Verbosity — see IMPLEMENTATION.md §2 "Verbosity". Four levels with
 # stackable -v/-q shortcuts following the clig.dev / cargo / kubectl
@@ -2132,6 +2149,28 @@ def resolve_clarify(repo_root: Path, cli_value: bool) -> bool:
     return _resolve_bool_pref(
         repo_root, cli_value,
         env_var=CLARIFY_ENV, file_key="clarify", file_name=CLARIFY_FILE)
+
+
+def resolve_dangerously_skip_permissions(
+        repo_root: Path, cli_value: bool) -> bool:
+    """Resolve the --dangerously-skip-permissions preference. Order:
+    --dangerously-skip-permissions CLI flag (action='store_true') →
+    PILA_DANGEROUSLY_SKIP_PERMISSIONS env var →
+    dangerously_skip_permissions in pila.toml → False.
+
+    When True, EVERY claude -p worker — including the judgment workers
+    (classifier, planner, reconciler, provision) that run in the real
+    repo cwd, not an isolated worktree — is invoked with
+    --dangerously-skip-permissions. This waives the DESIGN §12
+    mechanical enforcement that planners stay read-only; trust shifts
+    onto the prompts. Off by default; users opting in are making one
+    all-or-nothing trust decision. See DESIGN §12 (last paragraph) and
+    IMPLEMENTATION.md §2 "Permission override (dangerous)"."""
+    return _resolve_bool_pref(
+        repo_root, cli_value,
+        env_var=DANGEROUS_SKIP_PERMS_ENV,
+        file_key="dangerously_skip_permissions",
+        file_name=DANGEROUS_SKIP_PERMS_FILE)
 
 
 def _positive_int(s: str) -> int:
@@ -4483,7 +4522,11 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
     single-result mode (`structured_output` present on schema success).
 
     `autonomous` workers skip permission prompts (they act on files inside an
-    isolated worktree); non-autonomous workers get only read tools.
+    isolated worktree); non-autonomous workers get only read tools — unless
+    `state.dangerously_skip_permissions` is set, in which case every worker
+    is invoked with `--dangerously-skip-permissions`, waiving the §12
+    mechanical read-only enforcement on judgment workers. See DESIGN §12
+    and IMPLEMENTATION.md §2 "Permission override (dangerous)".
 
     `model` is a `claude --model` alias (`sonnet` / `opus` / `haiku`);
     resolved per worker-type by `resolve_models()` at startup.
@@ -4528,9 +4571,16 @@ async def claude_p(user_prompt: str, system_prompt: str, *, schema_key: str,
         ]
         for d in (add_dirs or ()):
             cmd.extend(["--add-dir", d])
-        if autonomous:
-            # acting workers run inside an isolated worktree; skipping prompts
-            # is what makes the run unattended. Blast radius is the worktree.
+        skip_perms = autonomous or bool(
+            st.data.get("dangerously_skip_permissions", False))
+        if skip_perms:
+            # Acting workers (autonomous=True) run inside an isolated
+            # worktree; skipping prompts is what makes the run unattended,
+            # blast radius bounded by the worktree. When the user passes
+            # the top-level --dangerously-skip-permissions escape hatch
+            # (DESIGN §12 last paragraph), judgment workers in the real
+            # repo cwd also get the flag — §12 mechanical enforcement
+            # waived, trust shifts onto the prompts.
             cmd.append("--dangerously-skip-permissions")
         return cmd
 
@@ -7773,6 +7823,8 @@ async def _run_phases(args, caps: dict, pila_dir: Path, st: State,
         st.data["verbosity"] = verbosity
         st.data["inspect_dirs"] = list(getattr(args, "inspect_dirs", []) or [])
         st.data["clarify"] = bool(args.clarify)
+        st.data["dangerously_skip_permissions"] = bool(
+            args.dangerously_skip_permissions)
         st.save()
         # Absorb --answers on resume too. The documented user flow for
         # a non-interactive deferred-question exit (Phase-1 or §11
@@ -7797,7 +7849,9 @@ async def _run_phases(args, caps: dict, pila_dir: Path, st: State,
                    "source_of_truth_pref": sot_pref,
                    "verbosity": verbosity,
                    "inspect_dirs": list(getattr(args, "inspect_dirs", []) or []),
-                   "clarify": bool(args.clarify)}
+                   "clarify": bool(args.clarify),
+                   "dangerously_skip_permissions": bool(
+                       args.dangerously_skip_permissions)}
         st.save()
         await preflight(pila_dir, verbosity=verbosity,
                         skip_smoke=args.skip_smoke,
@@ -7925,6 +7979,19 @@ def main() -> None:
                          "(hooks run). CLI flag only (no env/TOML mirror — "
                          "matches CLAUDE.md's explicit-user-request "
                          "principle for hook-skipping).")
+    ap.add_argument("--dangerously-skip-permissions", action="store_true",
+                    help="DANGEROUS: pass --dangerously-skip-permissions "
+                         "to EVERY claude -p worker — including the "
+                         "judgment workers (classifier, planner, "
+                         "reconciler, provision) that run in the real "
+                         "repo cwd, not an isolated worktree. Waives "
+                         "the DESIGN §12 mechanical enforcement that "
+                         "they stay read-only. Use only on repos you "
+                         "would run `claude --dangerously-skip-permissions` "
+                         "against directly. Default: off (judgment "
+                         "workers narrow-allowlisted). Also "
+                         f"{DANGEROUS_SKIP_PERMS_ENV} env var or "
+                         "dangerously_skip_permissions=true in pila.toml.")
     ap.add_argument("--max-workers", type=_positive_int, metavar="N",
                     help=f"total worker-invocation budget "
                          f"(default {DEFAULT_CAPS['max_total_workers']}); "
@@ -8134,6 +8201,18 @@ def main() -> None:
     # the canonical "clarify" key.
     args.clarify = resolve_clarify(repo_root, args.clarify)
 
+    # Resolve --dangerously-skip-permissions (DESIGN §12 escape hatch).
+    # Same precedence shape as --no-push / --clarify. Re-attach to args
+    # so orchestrate() folds it into state.json under the canonical
+    # "dangerously_skip_permissions" key; claude_p reads it from there
+    # on every invocation instead of threading another parameter.
+    args.dangerously_skip_permissions = resolve_dangerously_skip_permissions(
+        repo_root, args.dangerously_skip_permissions)
+    if args.dangerously_skip_permissions:
+        log("dangerously-skip-permissions: ON "
+            "(judgment workers run with prompts disabled — "
+            "§12 enforcement waived)")
+
     # Resolve --inspect-dir: CLI flags (repeatable) → PILA_INSPECT_DIRS
     # env (colon-separated) → inspect_dirs in pila.toml (comma-separated)
     # → []. Re-attached to args so orchestrate() can fold it into state.
@@ -8160,6 +8239,15 @@ def main() -> None:
         if not phase_st.load():
             die(f"no state.json found for run {phase_run_id!r}; "
                 f"the run may not have reached the execute phase yet")
+        # Refresh the escape-hatch preference so a user invoking
+        # `--phase judge|heal --dangerously-skip-permissions` gets the
+        # flag flowed into the judge/patch_generator workers — without
+        # this, claude_p reads the value the original run persisted and
+        # the visible startup log would lie about whether the workers
+        # actually see the override.
+        phase_st.data["dangerously_skip_permissions"] = bool(
+            args.dangerously_skip_permissions)
+        phase_st.save()
         phase_run_dir = phase_st.run_dir
         judge_out_dir = phase_run_dir / args.judge_dir
         heal_out_dir = phase_run_dir / args.heal_dir

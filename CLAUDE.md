@@ -200,6 +200,12 @@ export PILA_MAX_WORKERS=80
 # Skip the live `claude -p` smoke test during development:
 ./pila "task" --skip-smoke
 
+# Waive §12 mechanical read-only enforcement on judgment workers
+# (use on repos where the planner needs pnpm/tsc/vitest visibility —
+# also PILA_DANGEROUSLY_SKIP_PERMISSIONS=1 or
+# `dangerously_skip_permissions = true` in pila.toml):
+./pila "task" --dangerously-skip-permissions
+
 # Verbosity: default is `stream` (one-line summary per worker event).
 # Per-worker .pila/logs/<sid>.log files are always written.
 ./pila "task" -q       # normal (pre-streaming terse output)

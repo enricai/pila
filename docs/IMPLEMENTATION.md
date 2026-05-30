@@ -723,6 +723,47 @@ priority first):
 An invalid value in env or file is rejected at startup via `die()` —
 same shape as `--source-of-truth` resolution.
 
+### Permission override (dangerous)
+
+By default, judgment workers (classifier, planner, reconciler,
+provision) run in the real repo cwd with a narrow Bash allowlist
+(`INSPECT_TOOLS`) and **without** `--dangerously-skip-permissions`.
+This mechanically prevents them from mutating state — the §12
+enforcement that a planner cannot run `pnpm run typecheck`,
+`tsc --noEmit`, or any other side-effecting subprocess. Acting workers
+(implementer, conformer, integrator) run in isolated worktrees with
+the broader `ACT_TOOLS` allowlist and the skip-permissions flag —
+their blast radius is bounded by the worktree.
+
+`--dangerously-skip-permissions` is the escape hatch. When set, every
+`claude -p` invocation — including judgment workers in the real repo
+cwd — is invoked with `--dangerously-skip-permissions`. This waives
+the §12 mechanical read-only enforcement on judgment workers and
+shifts trust onto their prompts. Use it on repositories where the
+planner needs to observe build/test tooling that the narrow inspect
+allowlist excludes — Node/TS repos where the planner reflexively
+reaches for `pnpm`/`tsc`/`biome`/`vitest`/`npx` and currently
+~18-19% of its Bash calls fail with "requires approval" in headless
+mode. See DESIGN §12 and §15 *Known limitations* (the "unattended
+execution requires broad write permission" paragraph) for the
+guarantee being waived.
+
+Resolution order (highest priority first):
+
+1. **`--dangerously-skip-permissions`** CLI flag (action=`store_true`).
+2. **`PILA_DANGEROUSLY_SKIP_PERMISSIONS`** environment variable
+   (boolean, parsed by `_parse_bool_envtoml`: 1/0, true/false, yes/no,
+   on/off).
+3. **`pila.toml` at the repo root** with
+   `dangerously_skip_permissions = true`.
+4. **Default `False`.** Judgment workers stay narrow-allowlisted; the
+   §12 mechanical enforcement holds.
+
+An invalid value in env or file is rejected at startup via `die()` —
+same shape as `--no-push` resolution. When the flag is active, pila
+emits a visible startup log line so every run shows the escape hatch
+is engaged.
+
 ### Runtime mode
 
 Controls which execution backend runs the per-subtask worker containers.
@@ -2257,6 +2298,7 @@ written somewhere in `orchestrator/pila.py`. The coupling test in
 | `needs_source_of_truth` | bool | whether classifier asked for source-of-truth disambiguation |
 | `source_of_truth_pref` | str | resolved preference (`codebase` / `research` / `both`) |
 | `clarify` | bool | whether asking the user is allowed for this run (resolved from `--clarify` / `PILA_CLARIFY` / `pila.toml` / default `False`) |
+| `dangerously_skip_permissions` | bool | whether every `claude -p` worker — including the judgment workers running in the real repo cwd — is invoked with `--dangerously-skip-permissions`. Resolved from `--dangerously-skip-permissions` / `PILA_DANGEROUSLY_SKIP_PERMISSIONS` / `pila.toml` / default `False`. When `True`, waives the DESIGN §12 mechanical read-only enforcement on the classifier / planner / reconciler / provision workers; trust shifts onto their prompts. Re-resolved fresh on every run, including `--resume`, so the user can flip it without editing state |
 | `verbosity` | str | resolved verbosity level (`quiet` / `normal` / `stream` / `debug`); re-resolved fresh on every run, including `--resume`, so the user can dial up or down without editing state |
 | `inspect_dirs` | list[str] | extra absolute paths granted to inspect-bucket workers (classifier, planner, reconciler, provision) via `--add-dir`. Resolved from `--inspect-dir` / `PILA_INSPECT_DIRS` / `inspect_dirs` in `pila.toml`; re-resolved fresh on every run, including `--resume`, so the user can add or remove paths without editing state. Empty list when nothing is configured |
 | `test_runner` | list[str] | detected short-circuit test command |

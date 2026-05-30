@@ -1349,6 +1349,21 @@ strengths, and the design depends on keeping them clearly separated. The
 concrete enforcement points — which function checks what, at which phase — are
 catalogued in `IMPLEMENTATION.md`.
 
+One enforcement point — the mechanical "judgment workers (classifier, planner,
+reconciler, provision) cannot mutate state because they run in the real repo
+cwd without `--dangerously-skip-permissions`" guarantee — has an explicit
+opt-out: `pila --dangerously-skip-permissions`. The flag is named identically
+to the underlying Claude Code CLI flag, on purpose: choosing it means the user
+understands they are removing a guardrail, not merely changing a setting. When
+set, every worker is invoked with `--dangerously-skip-permissions`, including
+the judgment workers; the §12 mechanical enforcement that they stay read-only
+is waived, and trust shifts onto the prompts. The default is off, the safe
+invariant is preserved for everyone who does not pass it, and the opt-out is
+intended for repositories where the planner needs visibility into build/test
+tooling that the narrow inspect allowlist excludes (`pnpm`/`tsc`/`vitest` and
+friends). This is a documented breach of the §12 contract for that single
+invocation, not a softening of the contract.
+
 ---
 
 ## 13. Caps and escalation
