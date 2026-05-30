@@ -127,9 +127,10 @@ RUN if ! getent group "${HOST_GID}" >/dev/null 2>&1; then \
 # pila user's 501:20), which trips the check when worker bash tools
 # run `git -C <worktree-subdir> ...` against per-subtask worktree
 # subdirs. The container is single-tenant (pila user only) and /work
-# is its only repo, so blanket-allow is the standard mitigation
-# (matches every major CI image's posture).
-RUN su pila -c "git config --global --add safe.directory '*'"
+# is its only repo, so the system-wide /etc/gitconfig is the cleanest
+# mitigation — it applies to every user inside the container with no
+# HOME-handling risk (matches the posture of every major CI image).
+RUN git config --system --add safe.directory '*'
 
 # /inspect/ holds read-only bind mounts the launcher creates per
 # --inspect-dir flag. Pre-created (and owned by pila) so the mount targets

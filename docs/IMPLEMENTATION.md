@@ -176,14 +176,18 @@ Base layers (top-down):
   matching the host user. This is what makes files the container
   writes into `/work/.pila/` and the worktrees keep the host user's
   ownership.
-- `git config --global --add safe.directory '*'` is set for the `pila`
-  user. The container is single-tenant (one user) and `/work` is its
-  only repo, so blanket-allow is the standard mitigation — Colima/virtiofs
-  presents `/work`'s mount-root inode with a gid that does not match the
-  in-container `pila` user, which trips git's CVE-2022-24765 check on
-  worker bash tools that run `git -C <worktree-subdir> ...`. Without
-  the relaxation, those calls return non-zero with
+- `git config --system --add safe.directory '*'` is set in the image
+  (writes to `/etc/gitconfig`). The container is single-tenant (one
+  user) and `/work` is its only repo, so blanket-allow is the standard
+  mitigation — Colima/virtiofs presents `/work`'s mount-root inode with
+  a gid that does not match the in-container `pila` user, which trips
+  git's CVE-2022-24765 check on worker bash tools that run
+  `git -C <worktree-subdir> ...`. Without the relaxation, those calls
+  return non-zero with
   `fatal: detected dubious ownership in repository at '/work/.pila/...'`.
+  System-wide config (vs. per-user `--global`) avoids any HOME-handling
+  risk from `su pila -c "git config --global"` and matches the posture
+  of every major CI image.
 - `WORKDIR /work`, `ENTRYPOINT ["/work/.pila-image/scripts/container-entry.sh"]`.
 
 ### Registry publish path (fly.io / remote Machines)
