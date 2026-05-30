@@ -391,6 +391,7 @@ live `claude` binary would be needed; out of scope for the current suite).
 | `scripts/cleanup.sh` | Remove worktrees for one run (default `--run-id`) or all runs (`--all-runs`). State dir always preserved as audit. `--branches` also deletes the matching `pila/runs/<id>` run branch *and* `pila/subtasks/<id>/*` subtask branches. `--subtask-branches` deletes only the subtask branches and keeps `pila/runs/<id>` (the post-finalize default — the run branch is the PR head). `--bootstrap` removes orphaned `_bootstrap-*` dirs (runs that died before classify completed). |
 | `scripts/remote/build-push.sh` | Build and push a self-contained pila image to Fly.io's registry (source baked in at `/work/.pila-image/`). See `docs/IMPLEMENTATION.md` §0.5 *Registry publish path*. |
 | `scripts/remote/provision.sh` | Fly Machine lifecycle helper (sourced by the launcher's `REMOTE=true` branch). Provides `provision_machine()` (create → wait-started → register destroy trap) and `destroy_machine()`. See `docs/IMPLEMENTATION.md` §7 *Machine lifecycle*. |
+| `scripts/remote/seed-repo.sh` | Two-channel repo seeding helper (sourced by the launcher after `provision_machine()` succeeds). Provides `seed_repo()`: full-history partial clone via `git clone --filter=blob:none`, then rsync of the local dirty set via `flyctl machine exec tar`. See `docs/IMPLEMENTATION.md` §7 *Repo seeding*. |
 | `pila` | Executable entry-point wrapper |
 | `commands/pila.md` | Thin plugin skill — reachable as `/pila` from Claude Code |
 | `docs/DESIGN.md` | Full design document and rationale |

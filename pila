@@ -793,10 +793,10 @@ if [ "$RUNTIME" = "fly" ]; then
   # and registers an EXIT/INT/TERM trap after the machine starts so no
   # Ctrl-C or crash can leak a machine.
   #
-  # Auth + config seeding and code seeding (git clone + rsync delta) are
-  # handled by later feat-remote-* subtasks. This branch establishes the
-  # machine lifecycle; the orchestrator itself is not yet executed inside
-  # the remote machine here.
+  # seed-repo.sh provides two-channel repo seeding: git clone --filter=blob:none
+  # for the committed bulk, then rsync of the local dirty set via flyctl machine
+  # exec tar. Worker auth forwarding is handled by a subsequent feat-remote-*
+  # subtask; orchestration inside the machine follows after.
   echo "[pila] remote: starting Fly.io machine (--runtime fly / PILA_RUNTIME=fly / pila.toml runtime=fly)" >&2
 
   FLY_IMAGE_TAG="$(resolve_fly_image_tag)"
