@@ -1,13 +1,59 @@
-# Pila's Dockerfile has no COPY/ADD instructions — the build context is
-# never consulted. Excluding everything keeps `nerdctl build` from shipping
-# .git, tests, caches, etc. into the build daemon (which on Colima must
-# traverse the host-to-VM bridge). The orchestrator source is bind-mounted
-# at runtime, not baked in.
+# Build context for the pila image.
 #
-# We negate Dockerfile + .dockerignore so legacy builders (older `docker
-# build` / some podman modes) that honor `*` literally still find them.
-# Modern BuildKit always reads the Dockerfile regardless, so the negations
-# are belt-and-suspenders for cross-tool compatibility.
+# The Dockerfile bakes orchestrator/, scripts/, prompts/, and .claude-plugin/
+# into the image so Fly.io Machines can run without a bind mount (§0.5).
+# Exclude everything else to keep the build context lean — .git, tests,
+# caches, and docs are not needed inside the image and traversing them over
+# the host-to-VM bridge (on Colima/macOS) wastes time.
+#
+# LOCAL MODE: the orchestrator source is bind-mounted at runtime
+#   (-v $PILA_HOME:/work/.pila-image:ro), so build-context contents are
+#   irrelevant — the COPY instructions below are shadowed by the mount.
+#
+# REGISTRY / FLY MODE: there is no bind-mount, so the COPY instructions
+#   in the Dockerfile bake orchestrator/, scripts/, and prompts/ into
+#   /work/.pila-image/ inside the image. The build context must include
+#   those paths and exclude host-only / run-state artifacts.
+#
+# We negate Dockerfile + .dockerignore so legacy builders (older docker
+# build / some podman modes) that honor `*` literally still find them.
+# Modern BuildKit always reads them regardless.
+
+# Default: exclude everything, then selectively allow.
 *
+
+# Build definition files — always needed.
 !Dockerfile
 !.dockerignore
+
+# Orchestrator source — baked into /work/.pila-image/orchestrator/.
+!orchestrator/
+!orchestrator/pila.py
+
+# Shell scripts — baked into /work/.pila-image/scripts/.
+!scripts/
+!scripts/container-entry.sh
+!scripts/new-worktree.sh
+!scripts/setup-run.sh
+!scripts/integrate.sh
+!scripts/finalize.sh
+!scripts/cleanup.sh
+!scripts/publish-image.sh
+!scripts/install.sh
+!scripts/runtime-install.sh
+
+# Worker prompts — baked into /work/.pila-image/prompts/.
+!prompts/
+!prompts/classifier.md
+!prompts/planner.md
+!prompts/implementer.md
+!prompts/conformer.md
+!prompts/integrator.md
+!prompts/reconciler.md
+!prompts/provision.md
+!prompts/judge.md
+!prompts/patch_generator.md
+!prompts/_clarification_filter.md
+
+# Plugin manifest — baked into /work/.pila-image/.claude-plugin/.
+!.claude-plugin/

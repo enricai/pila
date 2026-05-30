@@ -141,3 +141,55 @@ def test_list_runs_falls_back_to_compute_run_branch(pila, tmp_path, capsys):
     pila.list_runs(tmp_path)
     out = capsys.readouterr().out
     assert "pila/runs/feat-a-aaaaaa" in out
+
+
+# --- list_paused_runs (Phase 2) -------------------------------------------
+
+def test_list_paused_runs_empty(pila, tmp_path, capsys):
+    """No runs at all → 'no paused remote runs'."""
+    pila.list_paused_runs(tmp_path)
+    out = capsys.readouterr().out
+    assert "no paused remote runs" in out
+
+
+def test_list_paused_runs_filters_to_paused_only(pila, tmp_path, capsys):
+    """A mix of paused and non-paused runs renders only the paused ones."""
+    _make_run(tmp_path, "feat-running-aaaaa",
+              {"started_at": "2026-05-29T10:00:00+00:00", "task": "x"})
+    _make_run(tmp_path, "feat-paused-bbbbb",
+              {"started_at": "2026-05-29T11:00:00+00:00", "task": "y"},
+              run_json={
+                  "paused_at": "2026-05-29T12:00:00+00:00",
+                  "fly_machine_id": "mach-paused-001",
+                  "pause_reason": "worker-error",
+              })
+    _make_run(tmp_path, "feat-done-cccccc",
+              {"started_at": "2026-05-29T09:00:00+00:00", "task": "z"},
+              run_json={
+                  "finished_at": "2026-05-29T09:30:00+00:00",
+                  "pushed_at": "2026-05-29T09:30:05+00:00",
+                  "pr_url": "https://github.com/owner/repo/pull/1",
+              })
+    pila.list_paused_runs(tmp_path)
+    out = capsys.readouterr().out
+    assert "feat-paused-bbbbb" in out
+    assert "paused-remote" in out
+    assert "feat-running-aaaaa" not in out
+    assert "feat-done-cccccc" not in out
+
+
+def test_list_paused_excludes_paused_with_push_error(pila, tmp_path, capsys):
+    """Precedence: a paused run with push_error renders as push-failed,
+    not paused-remote, so it doesn't appear in --list-paused."""
+    _make_run(tmp_path, "feat-mixed-ddddd",
+              {"started_at": "2026-05-29T10:00:00+00:00", "task": "x"},
+              run_json={
+                  "paused_at": "2026-05-29T11:00:00+00:00",
+                  "fly_machine_id": "mach-mixed",
+                  "push_error": "fatal: ...",
+              })
+    pila.list_paused_runs(tmp_path)
+    out = capsys.readouterr().out
+    # Excluded — its derived status is push-failed.
+    assert "feat-mixed-ddddd" not in out
+    assert "no paused remote runs" in out

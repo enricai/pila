@@ -1,0 +1,42 @@
+# fly.toml — Fly.io Machine configuration for pila.
+#
+# pila runs as a Fly Machine (not a persistent service): one Machine per run,
+# started via `flyctl machine run` or the Machines API, torn down or stopped
+# when the run completes. There is no HTTP service, no warm pool.
+#
+# Image published by: scripts/publish-image.sh --app pila --push
+# Deploy command:     flyctl deploy --app pila --image registry.fly.io/pila:<version>
+# Per-task launch:    flyctl machine run registry.fly.io/pila:<version> \
+#                       --app pila --region iad \
+#                       --vm-cpus 4 --vm-memory 8192 \
+#                       -- <pila args>
+
+app            = "pila"
+primary_region = "iad"
+
+# Image built and pushed by scripts/publish-image.sh.
+# The version tag is updated to match .claude-plugin/plugin.json on each release.
+[build]
+  image = "registry.fly.io/pila:0.2.1"
+
+# VM sizing matches the local Colima auto-size guidance in docs/INSTALL.md:
+# half-of-host CPU/RAM, clamped to 2–8 cpus / 4–16 GB.
+# 4 cpus / 8 GB is the documented midpoint — adequate for pila's parallel
+# worker workload (concurrent `claude -p` workers + toolchain processes).
+[vm]
+  cpu_kind  = "shared"
+  cpus      = 4
+  memory_mb = 8192
+
+# No always-on machines — zero warm pool, pay only for actual execution time.
+# Machines are started per-task and stopped/destroyed when the run completes.
+[deploy]
+  strategy              = "immediate"
+  # Machines API: no persistent machine kept warm between runs.
+  min_machines_running  = 0
+  # pila is not an HTTP service; Machines are launched explicitly per task.
+  # auto_stop_machines and auto_start_machines are irrelevant here (no
+  # [http_service] listener), but set defensively so no implicit warm
+  # machine persists if the app is later used with fly deploy.
+  auto_stop_machines    = "stop"
+  auto_start_machines   = false

@@ -84,6 +84,44 @@ def test_status_pr_url_without_pushed_at_is_corrupt(pila):
     assert pila._derive_run_status(rj, {}) == "corrupt-sidecar"
 
 
+def test_status_paused_remote(pila):
+    """A paused remote run: paused_at + fly_machine_id set, no pushed_at."""
+    rj = {
+        "paused_at": "2026-05-29T16:00:00+00:00",
+        "fly_machine_id": "1234567890abcd",
+        "pause_reason": "worker-error",
+    }
+    assert pila._derive_run_status(rj, {}) == "paused-remote"
+
+
+def test_status_paused_without_machine_id_is_corrupt(pila):
+    """Invariant: paused_at requires fly_machine_id (cannot resume otherwise)."""
+    rj = {"paused_at": "2026-05-29T16:00:00+00:00"}
+    assert pila._derive_run_status(rj, {}) == "corrupt-sidecar"
+
+
+def test_status_paused_and_pushed_is_corrupt(pila):
+    """Invariant: paused_at and pushed_at are mutually exclusive."""
+    rj = {
+        "paused_at": "2026-05-29T16:00:00+00:00",
+        "fly_machine_id": "abc",
+        "pushed_at": "2026-05-29T16:01:00+00:00",
+    }
+    assert pila._derive_run_status(rj, {}) == "corrupt-sidecar"
+
+
+def test_status_paused_with_push_error_renders_as_push_failed(pila):
+    """Precedence: push_error fires before paused_at so the rendered
+    status matches the action the user needs to take (fix the push, not
+    the pause)."""
+    rj = {
+        "paused_at": "2026-05-29T16:00:00+00:00",
+        "fly_machine_id": "abc",
+        "push_error": "fatal: ...",
+    }
+    assert pila._derive_run_status(rj, {}) == "push-failed"
+
+
 def test_status_table_lists_every_value_used(pila):
     """RUN_STATUSES tuple must contain every value _derive_run_status
     can return — drift guard."""
@@ -91,6 +129,7 @@ def test_status_table_lists_every_value_used(pila):
         "corrupt-sidecar", "in-progress", "done-local",
         "done-pushed-no-pr", "done-pushed-pr",
         "push-failed", "pr-failed",
+        "paused-remote",
     }
     assert set(pila.RUN_STATUSES) == expected
 

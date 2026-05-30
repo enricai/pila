@@ -1,10 +1,12 @@
-"""Tests for `_validate_run_json()` — enforces the three logical
+"""Tests for `_validate_run_json()` — enforces the four logical
 invariants on the `run.json` sidecar (IMPLEMENTATION.md §8).
 
 Invariants:
 1. `pushed_at` and `push_error` are mutually exclusive.
 2. `pr_url` and `pr_error` are mutually exclusive.
 3. If `pr_url` is set, `pushed_at` must be set (no PR without a push).
+4. `paused_at` and `pushed_at` are mutually exclusive; if `paused_at`
+   is set, `fly_machine_id` must also be set.
 
 Valid status combinations (pila --list derives these):
 - `done-local`        — no push attempted, no PR.
@@ -12,6 +14,7 @@ Valid status combinations (pila --list derives these):
 - `done-pushed-pr`    — pushed + PR opened.
 - `push-failed`       — push attempted and failed.
 - `pr-failed`         — push succeeded, PR creation failed.
+- `paused-remote`     — remote run paused on failure; resume via --resume.
 - `in-progress`       — finalize hasn't run yet (no fields set).
 """
 from __future__ import annotations
@@ -125,6 +128,43 @@ def test_rejects_pr_url_with_push_failed(pila):
             push_error="x",
             pr_url="https://github.com/owner/repo/pull/123",
         ))
+
+
+# --- pause-on-failure invariants -------------------------------------------
+
+def test_accepts_paused_remote(pila):
+    """Valid paused run: paused_at + fly_machine_id, no pushed_at."""
+    pila._validate_run_json(_minimal_run_json(
+        paused_at="2026-05-29T16:00:00+00:00",
+        fly_machine_id="148e445b911389",
+        pause_reason="worker-error",
+    ))
+
+
+def test_rejects_paused_and_pushed_both_set(pila):
+    """A run cannot be both paused and finalized."""
+    with pytest.raises(ValueError, match="paused_at and pushed_at"):
+        pila._validate_run_json(_minimal_run_json(
+            paused_at="2026-05-29T16:00:00+00:00",
+            fly_machine_id="abc",
+            pushed_at="2026-05-29T16:01:00+00:00",
+        ))
+
+
+def test_rejects_paused_without_fly_machine_id(pila):
+    """Cannot pause without a recoverable pointer to the machine."""
+    with pytest.raises(ValueError, match="fly_machine_id is null"):
+        pila._validate_run_json(_minimal_run_json(
+            paused_at="2026-05-29T16:00:00+00:00",
+        ))
+
+
+def test_accepts_fly_machine_id_alone(pila):
+    """fly_machine_id without paused_at is fine — provision.sh writes
+    fly_machine_id at provision time, well before any pause decision."""
+    pila._validate_run_json(_minimal_run_json(
+        fly_machine_id="148e445b911389",
+    ))
 
 
 # --- defensive cases -------------------------------------------------------

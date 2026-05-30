@@ -28,17 +28,26 @@ inside the container (DESIGN §6 / §0.5 below).
 | `.claude-plugin/plugin.json` | Existing plugin manifest (commands, skills, metadata). The `version` field is the single source of truth for `pila --version`. |
 | `scripts/install.sh` | The `curl \| bash` shell installer. Preflight (git/claude/curl) → runtime preflight (colima on macOS, nerdctl+containerd on Linux) → clone → symlink → verify. Self-contained bash; deps: `bash`, `curl`, `git`. |
 | `pila` (launcher) | Portable bash. Symlink-walks to its own location, runs the per-OS runtime preflight, builds the pila image once per version, and execs `nerdctl run` with TTY flags adapted via `[ -t 0 ]` (see §0.5). Fast paths for `--version` skip container startup. |
-| `Dockerfile` | Image recipe (Debian 12 + Node + pnpm + claude CLI). Built locally on first run, tagged `pila:<VERSION>`. |
+| `Dockerfile` | Image recipe (Debian 12 + Node + pnpm + claude CLI + baked orchestrator source). Built locally on first run, tagged `pila:<VERSION>`. |
 | `scripts/container-entry.sh` | Container PID 1. `cd /work && exec python3 /work/.pila-image/orchestrator/pila.py "$@"`. |
+| `scripts/remote/build-push.sh` | Build and push a self-contained pila image to Fly.io's registry. The baked source at `/work/.pila-image/` lets the image run on Fly Machines without any bind mount. |
+| `scripts/remote/provision.sh` | Fly.io machine lifecycle helper (sourced by the `pila` launcher's `RUNTIME=fly` branch). Exports `provision_machine()` (create → wait-started → register `decide_teardown` trap), `stop_machine()`, `destroy_machine()`, and `decide_teardown()`. The trap fires on EXIT, INT, and TERM; `decide_teardown` classifies `$PILA_REMOTE_EXIT_RC` and routes to stop (pause-on-failure: writes `paused_at`/`pause_reason` to the run sidecar) or destroy (success, cancellation, rate-limit). |
+| `scripts/remote/lib.sh` | Shared bash helpers sourced by `provision.sh`, `resume-machine.sh`, and `re-seed.sh`. Exports `update_run_json()` (atomic merge of fields into `.pila/runs/<run-id>/run.json` on the host) and `wait_for_started()` (poll `flyctl machine status` until the machine reaches `started`, with timeout). |
+| `scripts/remote/resume-machine.sh` | Resume helper for paused remote runs (sourced by the launcher's `RUNTIME=fly` branch when `paused_at` is set in the run sidecar). Exports `resume_machine()`: reads `fly_machine_id` from the sidecar, runs `flyctl machine start`, waits for `started`, and clears `paused_at`/`pause_reason` from the sidecar. The launcher then runs the orchestrator inside the resumed machine with `--resume --run-id <id>`. |
+| `scripts/remote/attach.sh` | PTY-attach helper (invoked via `pila --attach`). Resolves the Fly Machine ID for a given run (or the only active record under `.pila/remote/`) and `exec`s `flyctl ssh console` to open a real PTY into the machine over Fly's WireGuard mesh. `--tail` mode replaces the bare-shell command with `tail -F` of the orchestrator log. No sshd in the image, no key management: hallpass is platform-injected by Fly. |
+| `scripts/remote/re-seed.sh` | Mid-run re-rsync helper (Phase 4). Exports `re_seed()`: reads `fly_machine_id` from the run sidecar, wakes the machine via `flyctl machine start` if stopped, runs a safety check that refuses re-seed when machine-side `/work` has uncommitted tracked changes (unless `PILA_RE_SEED_FORCE=1`), then calls `seed_repo_dirty` from `seed-repo.sh`. Invoked by the launcher's `--re-seed <run-id>` fast-path and by the auto-re-seed step in the `--resume <run-id> --runtime fly` flow. |
+| `scripts/remote/seed-repo.sh` | Two-channel repo seeding helper (sourced by the `pila` launcher after `provision_machine()` succeeds). Exports three functions: `seed_repo_clone` (Step 1: `git clone --filter=blob:none` on the remote machine via `flyctl machine exec`), `seed_repo_dirty` (Step 2: compute the local dirty set via `git status --porcelain`, pack as tar, pipe via `flyctl machine exec tar`), and the wrapper `seed_repo` (= `seed_repo_clone && seed_repo_dirty`). After seeding, `/work` on the machine mirrors the developer's working tree. `re-seed.sh` (Phase 4) reuses `seed_repo_dirty` standalone. |
+| `scripts/remote/fetch-branch.sh` | Post-run stream-back helper (sourced by the `pila` launcher after remote orchestration succeeds). Exports `fetch_branch()`: (1) discovers the completed run-id by scanning `.pila/runs/*/run.json` on the machine for a `finished_at`-bearing, unpushed entry; (2) creates a `git bundle` of `pila/runs/<run-id>` on the machine and pipes it to the host where `git fetch` materialises the branch; (3) tars `.pila/runs/<run-id>/` from the machine and extracts it on the host so the existing host-side finalize block (push + `gh pr create`) can run unchanged. |
 
 ### Python runtime — provisioned inside the container
 
 Pila requires Python 3.10+. The container image installs Debian 12's
 `python3` (currently 3.11), which satisfies the requirement. The host
-needs no Python at all. The orchestrator's source is bind-mounted from
-`$PILA_HOME` into `/work/.pila-image/` at runtime, *not* baked into the
-image — so iterating on `orchestrator/pila.py` does not require an image
-rebuild.
+needs no Python at all. The orchestrator's source is baked into the
+image at `/work/.pila-image/` via the Dockerfile's `COPY` instructions.
+On local runs the launcher's bind mount (`-v $PILA_REPO:/work/.pila-image:ro`)
+shadows the baked copy, so iterating on `orchestrator/pila.py` still
+does not require an image rebuild — the host file is used on the next run.
 
 The orchestrator itself remains stdlib-only — no `pip install`, no
 `pyproject.toml`, no PyPI release. `pytest` is still the only dev
@@ -169,15 +178,94 @@ Base layers (top-down):
   ownership.
 - `WORKDIR /work`, `ENTRYPOINT ["/work/.pila-image/scripts/container-entry.sh"]`.
 
+### Registry publish path (fly.io / remote Machines)
+
+Fly.io Machines pull an image from a registry rather than using a
+locally-built image. The `HOST_UID/HOST_GID` coupling exists only for
+local bind-mounts (so files written by the container into `/work` keep
+the host user's ownership). Remote Machines have no such bind-mount, so
+the Dockerfile's defaults (`ARG HOST_UID=501 / HOST_GID=20`) are used
+as-is — no UID matching required.
+
+**Baked source.** The Dockerfile's `COPY` instructions bake
+`orchestrator/`, `scripts/`, `prompts/`, and `.claude-plugin/` into the
+image at `/work/.pila-image/`. A Fly Machine that pulls this image can
+run the orchestrator without any bind mount — the ENTRYPOINT
+(`/work/.pila-image/scripts/container-entry.sh`) and the orchestrator
+(`/work/.pila-image/orchestrator/pila.py`) are already present. On
+local runs the launcher's `-v $PILA_REPO:/work/.pila-image:ro` bind
+mount shadows the baked copy, so development iteration (edit a file,
+run pila) still works without rebuilding the image.
+
+`scripts/remote/build-push.sh` provides the remote build path:
+
+```bash
+# Build locally, tag for fly.io private registry, push, and verify:
+./scripts/remote/build-push.sh --app <fly-app-name> --push
+
+# Verify the baked source works inside a Machine:
+flyctl machine run registry.fly.io/<fly-app-name>:<VERSION> \
+  --app <fly-app-name> \
+  -- python3 /work/.pila-image/orchestrator/pila.py --version
+```
+
+Alternative: let fly build remotely (no local container runtime needed):
+
+```bash
+flyctl deploy --build-only --push \
+  --config fly.toml \
+  --dockerfile Dockerfile
+# fly reads the Dockerfile, COPY bakes the source, result is pushed to
+# registry.fly.io/<app> automatically.
+```
+
+#### Auto-publish on first remote run (`ensure_image()` in the launcher)
+
+A remote run requires the image at `$FLY_IMAGE_TAG` to already exist in
+`registry.fly.io`. Without auto-publish the operator must run
+`scripts/remote/build-push.sh --push` once before the first remote run,
+and again after every version bump — otherwise `flyctl machine run`
+fails at provision time with an unfriendly "manifest unknown" error.
+
+The launcher closes that gap with `ensure_image()` in the `RUNTIME=fly`
+branch, run before `provision_machine`:
+
+1. Probe the registry for the resolved tag via `flyctl image show
+   --image $FLY_IMAGE_TAG --app $PILA_FLY_APP` (single round-trip,
+   non-interactive, no auth prompts beyond what `flyctl auth status`
+   already provides).
+2. On hit: skip the build.
+3. On miss: invoke `scripts/remote/build-push.sh --app $PILA_FLY_APP
+   --push` and re-probe to confirm.
+
+Results are cached at `$XDG_CACHE_HOME/pila/published-tags.txt` (default
+`~/.cache/pila/published-tags.txt`), one line per `<tag>` known to be
+present. Cache hits skip the probe entirely; cache misses fall through
+to the probe and on success append the tag. The cache is a *positive*
+list only — a missing entry means "probe", not "absent" — so manual
+`flyctl image` deletions are self-healing on the next run.
+
+Flags:
+
+| Flag | Env | Default | Effect |
+|---|---|---|---|
+| `--no-auto-publish` | `PILA_NO_AUTO_PUBLISH=1` | off | Skip the probe entirely; trust the operator to have published the image. The run still proceeds; if the tag is missing, `provision_machine` fails as before. |
+
+The flag is consumed by the launcher and not forwarded to the
+orchestrator (same convention as `--no-runtime-install` and `--remote`).
+
 Note the two `.pila*` paths inside the container:
 
 - **`/work/.pila/`** is the run-state directory inside the user's
   repo (state.json, logs, worktrees, telemetry). It lives on the
   host filesystem via the `/work` bind mount and persists across
   container runs.
-- **`/work/.pila-image/`** is the read-only bind mount of `$PILA_HOME`
-  on the host — pila's own source tree. The ENTRYPOINT script and
-  `orchestrator/pila.py` are read from there, never written to.
+- **`/work/.pila-image/`** is the orchestrator source tree. On local
+  runs it is a read-only bind mount of `$PILA_HOME` on the host; on
+  Fly Machines it is the baked copy from the Dockerfile's `COPY`
+  instructions. Both paths resolve identically at runtime — the
+  ENTRYPOINT and orchestrator code always live at
+  `/work/.pila-image/{scripts,orchestrator}/`.
 
 The container's PID 1 (the entry script) reads from `.pila-image/`
 and writes to `.pila/`. Confusing the two would either break runs
@@ -195,11 +283,19 @@ cd /work
 exec python3 /work/.pila-image/orchestrator/pila.py "$@"
 ```
 
-The orchestrator's source lives at `/work/.pila-image/` (read-only
-bind mount from `$PILA_HOME` on the host), *not* baked into the
-image. Iterating on `orchestrator/pila.py` therefore does not need
-an image rebuild — edit the file on the host, next `pila` invocation
-picks it up.
+The orchestrator's source lives at `/work/.pila-image/`. It is present
+in two ways depending on execution mode:
+
+- **Local runs:** the launcher bind-mounts `$PILA_HOME` read-only at
+  `/work/.pila-image`. Iterating on `orchestrator/pila.py` does not
+  need an image rebuild — the bind mount shadows the baked copy and
+  the host file is picked up on the next `pila` invocation.
+- **Fly.io Machines (remote):** there is no bind mount. The Dockerfile
+  `COPY` instructions bake `orchestrator/`, `scripts/`, `prompts/`,
+  and `.claude-plugin/` into the image at `/work/.pila-image/` so the
+  entrypoint resolves without any host-side path. A new pila version
+  requires rebuilding and pushing the image (see §0.5 "Registry publish
+  path").
 
 ### Bind-mount table
 
@@ -208,7 +304,7 @@ The launcher passes the following mounts to `nerdctl run`:
 | Host path | Container path | Mode | Purpose |
 |---|---|---|---|
 | `$(pwd -P)` (user repo) | `/work` | rw | The repo pila operates on. Worktrees and `.pila/` state live here. Writes flow back to the host so `--resume` works across container runs. |
-| `$PILA_HOME` (pila install dir) | `/work/.pila-image` | ro | Orchestrator source + Dockerfile + prompts. Read-only because the container has no business mutating the install. |
+| `$PILA_HOME` (pila install dir) | `/work/.pila-image` | ro | *Local mode only.* Orchestrator source + Dockerfile + prompts. Read-only because the container has no business mutating the install. Shadows the baked COPY layer so edits to `orchestrator/pila.py` take effect without an image rebuild. Absent in registry / fly.io mode — the baked COPY layer is used directly. |
 | `$STAGE/.claude.json` (per-run host scratch) | `/home/pila/.claude.json` | rw | Per-container copy of `~/.claude.json` with the `projects[]` block stripped. The host file is never directly mounted into a container: the shared mount is a documented `claude-code` corruption race (anthropics/claude-code issues #28847, #29217, #29395, #40226 — all open) that hangs workers in a recovery loop with no backoff. Each container writes only its private copy. |
 | `$STAGE/.claude` (per-run host scratch) | `/home/pila/.claude` | rw | Per-container copy of `~/.claude/` with bulky, prior-session, and history paths skipped (`history.jsonl`, `projects/`, `sessions/`, `tasks/`, `plans/`, `todos/`, `file-history/`, `paste-cache/`, `shell-snapshots/`, `session-env/`, `telemetry/`, `stats-cache.json`, `debug/`, `downloads/`, `backups/`, `chrome/`, `ralph-state/`, `.last-cleanup`, `settings.json.*`). CLI capability dirs (`agents/`, `skills/`, `commands/`, `hooks/`, `plugins/`, `mcp-needs-auth-cache.json`, `settings.json`, `local/`, `statsig/`, `cache/`, `package.json`, `policy-limits.json`) ride along. |
 | Keychain → `$STAGE/.claude/.credentials.json` (macOS only) | `/home/pila/.claude/.credentials.json` | rw | On macOS the launcher extracts the OAuth token JSON from Keychain (service `Claude Code-credentials`) and writes it to the staged `.claude/.credentials.json`. The Linux CLI reads exactly that path, so both platforms use the same file-based auth flow inside the container. Extraction uses `security find-generic-password -w`; succeeds silently in the user's login session. |
@@ -356,6 +452,9 @@ pila/
 │                                   (DESIGN §6 / §0.5)
 ├── Dockerfile                  container image recipe; built locally on first
 │                                   run, tagged `pila:<VERSION>` (§0.5)
+├── fly.toml                    Fly.io Machine config — app, image, vm sizing
+│                                   (4 cpu / 8 GB midpoint), zero warm-pool
+│                                   (min_machines_running=0). See §0.5.
 ├── orchestrator/pila.py        the orchestrator — all control flow (chmod +x)
 ├── prompts/
 │   ├── classifier.md              Phase 1 worker system prompt
@@ -374,8 +473,37 @@ pila/
 │   ├── finalize.sh                verify the run branch exists and is non-empty; ready for push
 │   ├── cleanup.sh                 remove worktrees / branches (default: scoped to one run)
 │   ├── container-entry.sh         container PID 1: `cd /work && exec python3 orchestrator/pila.py`
-│   └── install.sh                 one-command installer (curl | bash); preflight git/claude/curl +
-│                                   runtime preflight (colima / nerdctl) + clones + symlinks
+│   ├── install.sh                 one-command installer (curl | bash); preflight git/claude/curl +
+│   │                               runtime preflight (colima / nerdctl) + clones + symlinks
+│   └── remote/
+│       ├── build-push.sh          build and push a self-contained image for Fly.io Machines;
+│       │                           the baked /work/.pila-image/ lets the image run without
+│       │                           a bind mount (§0.5 "Registry publish path")
+│       ├── provision.sh           Fly Machine lifecycle (sourced by launcher RUNTIME=fly branch);
+│       │                           provision_machine() create→started→trap; stop_machine();
+│       │                           destroy_machine(); decide_teardown() classifies exit-rc
+│       │                           and routes to stop (pause-on-failure) or destroy
+│       ├── lib.sh                 shared bash helpers (update_run_json atomic merge; iso_now);
+│       │                           sourced by provision.sh, resume-machine.sh, and re-seed.sh
+│       ├── resume-machine.sh      Resume helper for paused remote runs (DESIGN §6 *Remote
+│       │                           pause-on-failure*); resume_machine() flyctl machine start
+│       │                           + wait_for_started + clear paused_at sentinels
+│       ├── attach.sh               PTY-over-SSH attach for `pila --attach`; resolves
+│       │                           machine id from .pila/remote/<pid>.json or
+│       │                           .pila/runs/<run-id>/fly-machine.json and execs
+│       │                           `flyctl ssh console` over Fly WireGuard (no sshd
+│       │                           in the image; hallpass is platform-injected)
+│       ├── re-seed.sh               Mid-run re-rsync (Phase 4) — wakes paused machine,
+│       │                           runs safety check, calls seed_repo_dirty. Used by
+│       │                           `pila --re-seed <run-id>` and auto on `--resume`
+│       ├── seed-auth.sh           Worker auth + config seeding (sourced by launcher after
+│       │                           provision_machine() returns); seed_auth() delivers
+│       │                           ~/.claude.json + ~/.claude/ + git identity to the machine
+│       │                           via flyctl machine exec tar-pipe and git config calls
+│       ├── seed-repo.sh           two-channel repo seeding (sourced by launcher after provision);
+│       │                           seed_repo(): git clone --filter=blob:none + rsync dirty set
+│       └── fetch-branch.sh        post-run stream-back (sourced by launcher after remote orch exits 0);
+│                                   fetch_branch(): git bundle pipe + state tar-pipe → host repo
 ├── commands/pila.md            thin plugin skill — launches the orchestrator
 ├── skills/
 │   ├── judge-llm-batch/SKILL.md  post-run judge skill — scores a batch of captured
@@ -416,6 +544,13 @@ pila --list
 # local-only; the working branch is unchanged):
 pila "task" --no-push
 export PILA_NO_PUSH=1
+
+# Route to remote execution (e.g. Fly.io) instead of local nerdctl run:
+pila "task" --runtime fly
+export PILA_RUNTIME=fly
+# Or commit to pila.toml for a per-repo default:
+#   runtime = fly
+# Legacy aliases still work (--remote, PILA_REMOTE=1, pila.toml remote=true).
 
 # Skip pre-push hooks at finalize (the user's explicit override; defaults off).
 # Affects only the final `git push`; worker `git commit` operations inside
@@ -459,6 +594,11 @@ export PILA_VERBOSITY=stream
 # pila.toml for a per-repo default.
 export PILA_SOURCE_OF_TRUTH=codebase    # or: research, both
 pila "task" --source-of-truth codebase
+
+# Select the execution runtime (default: local). `fly` routes each worker
+# through Fly.io machines instead of local nerdctl containers.
+export PILA_RUNTIME=local               # or: fly
+pila "task" --runtime fly
 
 # Choose the model. Without overrides: judgment workers (classifier,
 # planner, reconciler, provision, integrator) default to opus; acting
@@ -582,6 +722,44 @@ priority first):
 
 An invalid value in env or file is rejected at startup via `die()` —
 same shape as `--source-of-truth` resolution.
+
+### Runtime mode
+
+Controls which execution backend runs the per-subtask worker containers.
+`local` uses the local nerdctl/containerd runtime (the existing behavior);
+`fly` routes each worker through Fly.io machines. Default is `local` so
+existing behavior is unchanged for users who have not opted in.
+
+Resolution order (highest priority first):
+
+1. **`--runtime`** CLI flag, values `local` | `fly`. Argparse rejects
+   anything else before the orchestrator runs.
+
+2. **`PILA_RUNTIME`** environment variable, same value set.
+
+3. **`pila.toml` at the repo root** with key `runtime`. Plain
+   `key=value` syntax:
+
+   ```
+   runtime = fly
+   ```
+
+4. **Default `local`.** When unset, pila runs workers in the local
+   container runtime. The default preserves all existing behavior
+   for users who have not configured a remote runtime.
+
+An invalid value in env or file is rejected at startup via `die()` — bad
+config is caught before any worker spawns. Valid values are
+`{local, fly}`.
+
+> The CLI/env > file order reflects the same session-scoped vs.
+> committed-default split as `--source-of-truth`: the CLI flag and env
+> var are one-off overrides, while `pila.toml` is the per-repo default.
+
+Maps to: `resolve_source_of_truth` resolution pattern in `pila.py`
+(`_read_toml_key` + env + CLI precedence). The code counterpart is
+`resolve_runtime()` in `pila.py`; constants are `RUNTIME_VALUES`,
+`RUNTIME_ENV`, `RUNTIME_FILE`; argparse flag is `--runtime {local,fly}`.
 
 ### Prompt loading and the shared filter fragment
 
@@ -958,6 +1136,7 @@ All in `pila.py`, in execution order. This is the concrete catalogue behind
 | Check | Catches |
 |-------|---------|
 | `resolve_source_of_truth()` at startup | invalid value in `pila.toml`, `PILA_SOURCE_OF_TRUTH`, or `--source-of-truth` — caught before any worker spawns, not mid-planner |
+| `resolve_runtime()` at startup | invalid value in `pila.toml`, `PILA_RUNTIME`, or `--runtime` — caught before any worker spawns |
 | `resolve_models()` at startup | invalid model alias in `pila.toml`, any `PILA_MODEL[_*]` env var, or any `--model[-*]` CLI flag — caught before any worker spawns |
 | `git user.email` / `user.name` set | commits would fail silently without identity |
 | working tree clean | dirty tree → ambiguous diffs, corrupt merge history |
@@ -1621,7 +1800,322 @@ env, `no_push = true` in `pila.toml`. `--no-verify` is CLI-only and
 only affects the push step (worker `git commit`s inside worktrees
 still run all hooks).
 
-Maps to `DESIGN.md`: §6 (Finalization).
+### Remote execution mode
+
+`--runtime fly` (or `PILA_RUNTIME=fly` / `pila.toml runtime=fly`) routes
+execution to Fly.io Machines instead of the local `nerdctl run`. The
+Colima/containerd preflight block is gated on `RUNTIME=local` and skipped
+entirely when `RUNTIME=fly`. `--runtime` flows through `REWRITTEN_ARGS`
+to the orchestrator's argparse; `--remote` (legacy) is consumed and not
+forwarded.
+
+Resolution order (highest priority first):
+
+1. **`--runtime local|fly`** CLI flag (canonical). Passed through to the
+   orchestrator so both the launcher and the orchestrator share the same
+   resolved value.
+2. **`PILA_RUNTIME`** environment variable, values `local` | `fly`.
+3. **`pila.toml`** at the repo root, `runtime = local|fly`.
+4. **`--remote`** CLI flag (legacy alias for `--runtime fly`; consumed,
+   not forwarded).
+5. **`PILA_REMOTE`** environment variable (boolean: `1`/`true`/`TRUE`/`yes`/`YES`;
+   legacy alias).
+6. **`pila.toml`** `remote = true` (legacy alias).
+7. **Default `local`** — local `nerdctl run` is used when unset.
+
+Invalid values in env or TOML are rejected immediately with an error
+message and exit 1 before any preflight runs.
+
+When `RUNTIME=fly`, the launcher skips the per-OS nerdctl preflight, the
+image-build check, the auth/cache mount assembly, and the `nerdctl run`
+invocation, and instead calls the remote dispatch path via
+`scripts/remote/provision.sh`.
+
+#### Machine lifecycle (`scripts/remote/provision.sh`)
+
+The provision script is **sourced** (not exec'd) by the launcher so the
+machine ID and destroy trap live in the launcher's process. It provides
+two functions:
+
+- **`provision_machine()`** — creates a Fly Machine from `$FLY_IMAGE_TAG`
+  (set by the launcher; see below), polls `flyctl machine status` until the
+  machine reaches state `started`, and registers `decide_teardown` as an
+  EXIT/INT/TERM trap. Exports `$PILA_MACHINE_ID`. Returns 0 on success;
+  destroys the machine and returns 1 on failure. Writes `fly_machine_id`
+  to the run sidecar (`.pila/runs/<run-id>/run.json`) when `$PILA_RUN_ID`
+  is set in the environment — written immediately after provision succeeds
+  so a launcher crash before classification still leaves a recoverable
+  pointer.
+- **`stop_machine()`** — runs `flyctl machine stop $PILA_MACHINE_ID
+  --app $FLY_APP`, tolerant of already-stopped machines. Preserves the
+  machine's filesystem on its Fly volume so `resume-machine.sh` can wake
+  it later.
+- **`destroy_machine()`** — runs `flyctl machine destroy $PILA_MACHINE_ID
+  --app $FLY_APP --force`, with a stop-then-destroy fallback for machines
+  that are already in a terminal state.
+- **`decide_teardown()`** — the trap entry point. Classifies
+  `$PILA_REMOTE_EXIT_RC` (set by the launcher just before exit) and
+  dispatches to `stop_machine` (pause branch, for unknown non-zero
+  failures) or `destroy_machine` (zero, EXIT_NEEDS_ANSWERS=10, EX_TEMPFAIL=75,
+  SIGINT=130, SIGTERM=143). On the stop branch, writes `paused_at` and
+  `pause_reason` to the run sidecar. Idempotent (the trap fires on every
+  exit, including success).
+
+The classification table is the canonical authority on which exit
+codes are treated as pause-worthy; DESIGN §6 *Remote pause-on-failure
+(Fly.io)* documents the rationale.
+
+Environment variables consumed by `provision.sh`:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PILA_FLY_APP` | `pila` | Fly.io app name |
+| `FLY_IMAGE_TAG` | `registry.fly.io/<app>:<version>` | Full image tag to launch (set by the launcher) |
+| `FLY_REGION` | `iad` | Fly.io region |
+| `FLY_VM_CPUS` | `4` | vCPU count for the machine |
+| `FLY_VM_MEMORY` | `8192` | Memory in MB for the machine |
+| `PILA_MACHINE_START_TIMEOUT` | `120` | Seconds to wait for `state=started` |
+
+`FLY_IMAGE_TAG` is resolved by the launcher (`resolve_fly_image_tag()`)
+using `$PILA_FLY_APP` and `$PILA_VERSION`, or overridden by setting
+`PILA_FLY_IMAGE` in the environment.
+
+`provision_machine` requires `flyctl` on `PATH` and `flyctl auth status`
+to succeed. Missing/unauthenticated `flyctl` produces an actionable error
+with install instructions rather than a cryptic failure mid-run.
+
+#### Worker auth + config seeding (`scripts/remote/seed-auth.sh`)
+
+After `provision_machine()` returns successfully, the launcher sources
+`scripts/remote/seed-auth.sh` and calls `seed_auth()`. This is the remote
+equivalent of the `AUTH_MOUNTS` bind-mount block (launcher lines ~542–726):
+instead of mounting `$STAGE` as container volumes, the same content is
+delivered via `flyctl machine exec` tar-pipe and git config calls.
+
+`seed_auth()` performs three steps, in order:
+
+1. **Tar-pipe delivery of `$STAGE` (Claude files only).** `tar -cC $STAGE`
+   (excluding `.gitconfig`, `.gitconfig.local`, `.gitignore`,
+   `.gitignore_global`, `.git-credentials`, `.netrc`, `.ssh`, `.gnupg`,
+   `.config`) is piped into `flyctl machine exec --stdin -- tar -xC /home/pila`.
+   This delivers `~/.claude.json` (projects-stripped) and `~/.claude/`
+   (session/history/bulk dirs already filtered during `$STAGE` assembly),
+   including `~/.claude/.credentials.json` if Keychain-extracted on macOS.
+
+2. **Token fallback.** If `$STAGE/.claude/.credentials.json` was not written
+   (Linux, or macOS Keychain extraction failure) but `$CLAUDE_CODE_OAUTH_TOKEN`
+   is set, `seed_auth()` writes a minimal credentials JSON
+   `{"claudeAiOauth":{"accessToken":"<token>"}}` directly to
+   `/home/pila/.claude/.credentials.json` on the machine via
+   `flyctl machine exec --stdin`. If neither source is available, `seed_auth()`
+   returns 1 with an actionable error message.
+
+3. **Git identity.** Reads `user.name` and `user.email` from the host's git
+   config (`git config user.name` / `git config user.email`) and sets them
+   globally on the remote machine via two `flyctl machine exec -- git config
+   --global` calls. Worker commits carry the host user's identity.
+
+Git-push auth (SSH keys, `.netrc`, `~/.config/gh`) is **not** seeded — that
+auth lives on the host per DESIGN §6 *Finalization* and is not needed inside
+the remote machine for `claude -p` worker authentication or `git commit`.
+
+After seeding completes the launcher runs the orchestrator inside the
+machine via `flyctl machine exec -- python3 /work/.pila-image/orchestrator/pila.py --no-push ...`,
+streaming its output back to the host terminal. `--no-push` is always
+injected so the remote orchestrator's `phase_finalize` does not attempt
+a push itself — push is always the host launcher's responsibility.
+
+Once the remote orchestrator exits 0, `fetch_branch()` (from
+`scripts/remote/fetch-branch.sh`) streams the completed run branch and
+state directory back to the host (see §0 *Files table* and the
+`fetch-branch.sh` section below), after which the existing host-side
+finalize block (push + `gh pr create`) runs unchanged.
+
+Maps to `DESIGN.md`: §6 (container boundary / teardown / finalization), `remote-task-system.md`
+§"microVM = 1 Colima" (lines 163–206) and §"The hard problem is auth-crossing"
+(lines 232–253).
+
+#### Repo seeding (`scripts/remote/seed-repo.sh`)
+
+Two-channel seeding (remote-task-system.md lines 15–20) that reproduces the
+developer's working tree at `/work` on the remote machine:
+
+1. **Committed bulk** — runs `git clone --filter=blob:none <origin_url> /work`
+   via `flyctl machine exec` on the started machine. Full history is required
+   for git worktrees (`--depth` shallow clone is disqualified — see
+   `remote-task-system.md` "Worktree constraint on the clone"). The partial
+   clone (`--filter=blob:none`) keeps the initial transfer fast over the
+   reliable cloud connection; blobs are backfilled lazily on demand.
+   After cloning, the same branch/commit the developer is on is checked out.
+
+2. **Uncommitted/untracked delta** — `git status --porcelain` on the local
+   repo computes modified + untracked files (minus ignored). That set is
+   packed into a tar archive and piped to `flyctl machine exec tar -C /work -xzf -`
+   on the remote. Only those files cross the slow laptop uplink.
+
+The script is **sourced** (not exec'd) by the launcher — the same pattern as
+`provision.sh` — so `seed_repo()` runs in the launcher's process after
+`provision_machine()` exports `$PILA_MACHINE_ID`.
+
+Environment variables consumed by `seed-repo.sh`:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PILA_MACHINE_ID` | — | ID of the started Fly Machine (exported by `provision.sh`) |
+| `PILA_FLY_APP` | `pila` | Fly.io app name |
+| `USER_REPO` | — | Absolute path to the local git repo (set by launcher) |
+| `PILA_GIT_REMOTE` | `origin` | Git remote to clone from |
+
+Requires: `flyctl` on `PATH` (authenticated); `git`; `tar`.
+
+#### Run branch stream-back (`scripts/remote/fetch-branch.sh`)
+
+Two-channel stream-back (mirror of `seed-repo.sh`'s two-channel seed) that
+makes the completed run available on the host so the existing host-side
+finalize block can push it and open a PR:
+
+1. **Run branch** — discovers the completed run-id on the machine by scanning
+   `.pila/runs/*/run.json` for a `finished_at`-bearing, unpushed entry (same
+   criteria the host-side finalize uses when scanning the local `.pila/`).
+   Then runs `git -C /work bundle create - pila/runs/<run-id>` on the machine
+   and pipes the bundle to a host tempfile, which is then fetched via
+   `git fetch <bundle> +pila/runs/<run-id>:pila/runs/<run-id>` into the host
+   repo. The bundle resolves cleanly because both repos share the same origin
+   history.
+
+2. **Run state directory** — tars `/work/.pila/runs/<run-id>` on the machine
+   and extracts it under `$USER_REPO/.pila/runs/` on the host. After
+   extraction, `run.json` and `state.json` are present on the host exactly as
+   they would be after a local run.
+
+The script is **sourced** (not exec'd) by the launcher and exports
+`PILA_REMOTE_RUN_ID` on success (the discovered run-id, in case the caller
+needs it for diagnostics).
+
+Environment variables consumed by `fetch-branch.sh`:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PILA_MACHINE_ID` | — | ID of the started Fly Machine (exported by `provision.sh`) |
+| `PILA_FLY_APP` | `pila` | Fly.io app name |
+| `USER_REPO` | — | Absolute path to the local git repo (set by launcher) |
+
+Exports: `PILA_REMOTE_RUN_ID` — the run-id of the completed run on the machine.
+
+Requires: `flyctl` on `PATH` (authenticated); `git`; `tar`; `python3` (on the machine — always present in the pila image).
+
+Maps to `DESIGN.md`: §6 *Finalization* (remote-finalize stream-back variant).
+
+#### Interactive attach over PTY (`scripts/remote/attach.sh`)
+
+`pila --attach [<run-id>] [--tail] [--app <app>]` opens a real PTY
+into a running or paused Fly Machine. The mechanism is
+`flyctl ssh console`, which proxies through Fly's hallpass +
+WireGuard mesh — no sshd in the image, no key management, no public
+exposure. Auth inherits from `flyctl auth status`.
+
+The launcher routes `--attach` as a fast-path before any runtime
+preflight (immediately after `--version`), because attach needs only
+`flyctl` and a `USER_REPO` to discover the machine. Local-mode and
+no-runtime-installed hosts can still attach to a remote run.
+
+Resolution rules for the machine id:
+
+1. `pila --attach <run-id>` → look up
+   `$USER_REPO/.pila/runs/<run-id>/fly-machine.json` first, then
+   `$USER_REPO/.pila/runs/<run-id>/run.json` (which carries
+   `fly_machine_id` per Phase 2). If neither yields a value, exit 1.
+2. `pila --attach` (no arg) → scan `$USER_REPO/.pila/remote/*.json`
+   for active records (records whose filename is a launcher PID that
+   still exists). Exactly one → use it. Multiple → print the list,
+   exit 1. None → exit 1 with "no active remote machine".
+
+`provision.sh` writes the PID-keyed record at
+`$USER_REPO/.pila/remote/$$.json` immediately after creating the
+machine. `destroy_machine` removes it on full reap. After
+`fetch_branch` succeeds and `PILA_REMOTE_RUN_ID` is known, the
+launcher renames the record to
+`$USER_REPO/.pila/runs/$PILA_REMOTE_RUN_ID/fly-machine.json` so
+post-run attach works using the run-id directly.
+
+Schema for the record (both paths):
+
+```json
+{
+  "fly_app": "pila",
+  "fly_machine_id": "148e445b911389",
+  "started_at": "2026-05-29T16:00:00+00:00",
+  "run_id": "feat-foo-abc123",
+  "launcher_pid": 12345
+}
+```
+
+`--tail` mode replaces the bash session with
+`tail -F /work/.pila/runs/<id>/logs/*.log` for the
+failure-inspection use case. Default is a bare bash shell at
+`/work` with `$PS1` set to `pila@<run-id>:\w$`.
+
+**Hallpass note (verification gate).** Fly's hallpass is platform-
+injected into machines launched via `flyctl machine run`. The
+mechanism has not yet been exercised against a live pila image —
+the first remote run is the test. If hallpass is absent (older
+flyctl, image incompatibility), the fallback is to bake a minimal
+sshd into the image, which is a larger change deferred to a
+follow-up. Document the outcome in the first PR that completes a
+real `--attach` round-trip.
+
+Maps to `DESIGN.md`: §6 *Interactive attach over PTY in remote mode*.
+
+#### Mid-run re-rsync (`scripts/remote/re-seed.sh`)
+
+Two user-visible surfaces share one mechanism:
+
+1. **`pila --re-seed <run-id> [--force]`** — explicit fast-path
+   before runtime preflight. Wakes the machine if stopped, runs the
+   safety check, runs `seed_repo_dirty`, exits. No orchestrator
+   exec — for the case where the user wants to attach via Phase 3
+   to inspect before resuming.
+2. **Auto-re-seed on `pila --resume <run-id> --runtime fly`** —
+   inside the `RUNTIME=fly` branch, when `resume_machine` runs
+   (i.e., the sidecar said `paused_at`), the launcher calls
+   `re_seed` between `seed_auth` and the orchestrator exec.
+   `--no-re-seed` opts out (rate-limit case where nothing changed
+   host-side). `--force` bypasses the safety check.
+
+Three operations in `re_seed`, in order:
+
+1. **Wake the machine if needed.** `flyctl machine status` → if
+   `stopped`, `flyctl machine start` + `wait_for_started`. Other
+   states (`destroyed`, `replacing`, …) abort with an actionable
+   message.
+2. **Safety check (unless `PILA_RE_SEED_FORCE=1`).** Run
+   `flyctl machine exec git -C /work status --porcelain` and filter
+   out paths under `.pila/` (worker state is expected to change
+   there). If any tracked file is dirty, refuse with a message
+   listing the first 10 paths and pointing at `pila --attach
+   <run-id>` and the `--force` bypass. Prevents silent clobbering
+   of in-flight worker edits that haven't yet been committed to a
+   per-subtask branch.
+3. **`seed_repo_dirty`.** Recompute the host's `git status
+   --porcelain` dirty set, tar it (with defensive `--exclude` flags
+   for `.pila/runs/*/worktrees/*` and `.git/*`), pipe via
+   `flyctl machine exec tar -C /work -xzf -`. The full-history
+   clone on the machine is preserved — re-seed must never re-clone,
+   because that would obliterate the run branch and per-subtask
+   branches.
+
+Launcher flag consumption:
+
+| Flag | Env | Default | Effect |
+|---|---|---|---|
+| `--no-re-seed` | — | off | Skip the auto-re-seed during `--resume`. |
+| `--force` | `PILA_RE_SEED_FORCE=1` | off | Bypass the safety check that refuses re-seed against machine-side dirty tracked files. |
+
+Both flags are consumed by the launcher and not forwarded to the
+orchestrator (same convention as `--no-runtime-install`,
+`--no-auto-publish`).
+
+Maps to `DESIGN.md`: §6 *Mid-run re-seed (remote mode)*.
 
 ---
 
@@ -1706,11 +2200,15 @@ discovery without parsing the full `state.json`):
 | `push_error` | str \| null | captured `git push` stderr if the push failed; mutually exclusive with `pushed_at` being set |
 | `pr_url` | str \| null | the PR URL `gh` returned; null until PR creation succeeds |
 | `pr_error` | str \| null | captured `gh` stderr if PR creation failed; logical invariant — `pr_error` can be set only after `pushed_at` is set |
+| `fly_machine_id` | str \| null | Fly Machine ID for a remote (`--runtime fly`) run; written by `scripts/remote/provision.sh` immediately after `flyctl machine run` succeeds, so a launcher that crashes before classifying still leaves a recoverable pointer. Null for local runs. |
+| `paused_at` | ISO-8601 str \| null | when the remote run was paused on failure (machine stopped, not destroyed); set by the launcher's EXIT trap on the pause branch. Null for successful runs and for runs the user cancelled. |
+| `pause_reason` | str \| null | short tag identifying which failure path triggered the pause (`worker-error`, `orchestrator-exception`, `finalize-failed`). Null when `paused_at` is null. |
 
-`_validate_run_json(data)` enforces three invariants on read:
+`_validate_run_json(data)` enforces four invariants on read:
 - `pushed_at` and `push_error` are mutually exclusive (at most one is non-null).
 - `pr_url` and `pr_error` are mutually exclusive.
 - If `pr_url` is set, `pushed_at` must be set (cannot have a PR without a push).
+- `paused_at` and `pushed_at` are mutually exclusive (a run cannot be both paused and finalized). If `paused_at` is set, `fly_machine_id` must also be set (you cannot pause a run without knowing where to resume it).
 
 A corrupt sidecar is flagged but does not block the rest of the system; `pila --list` will render that run with `status=corrupt-sidecar` and the user can inspect or delete the file.
 
@@ -1718,15 +2216,20 @@ A corrupt sidecar is flagged but does not block the rest of the system; `pila --
 
 | Status | When it fires | Typical next step |
 |--------|---------------|-------------------|
-| `corrupt-sidecar` | `run.json` violates one of the three invariants above | inspect the file under `.pila/runs/<id>/run.json` |
+| `corrupt-sidecar` | `run.json` violates one of the four invariants above | inspect the file under `.pila/runs/<id>/run.json` |
 | `push-failed` | `push_error` is set | re-run `git push -u origin pila/<id>` after fixing the access issue |
 | `pr-failed` | `pr_error` is set (and push succeeded) | re-run `gh pr create` manually using the command logged at finalize |
 | `done-pushed-pr` | `pr_url` is set | the happy path: PR open, work merged locally |
 | `done-pushed-no-pr` | `pushed_at` set but `pr_url` not | rare: push succeeded, PR wasn't attempted (e.g., gh removed between push and PR) |
 | `done-local` | `finished_at` set, no `pushed_at` | the user passed `--no-push`; push manually if desired |
+| `paused-remote` | `paused_at` is set | inspect/attach to the Fly Machine, then `pila --resume --run-id <id> --runtime fly` (DESIGN §6 *Remote pause-on-failure*) |
 | `in-progress` | none of the above | the run is still active (or died very early); resume with `--resume --run-id <id>` |
 
-`RUN_STATUSES` in `pila.py` declares the seven values; a test coupling check asserts the tuple matches every value `_derive_run_status` can return.
+`RUN_STATUSES` in `pila.py` declares the eight values; a test coupling check asserts the tuple matches every value `_derive_run_status` can return.
+
+`pila --list-paused` filters the run table to only `paused-remote`
+entries. Same short-circuit shape as `--list`: runs before any git/CLI
+preflight, exits without invoking the orchestrator.
 
 `state.json` fields. This table is canonical: every field the orchestrator
 writes to `st.data` must appear here, and every field listed here must be
@@ -2026,6 +2529,7 @@ enforcement functions:
 | Test file | Function under test |
 |-----------|----------------------|
 | `test_resolve_source_of_truth.py` | `resolve_source_of_truth()` |
+| `test_resolve_runtime.py` | `resolve_runtime()` — CLI > env > TOML > default `local` precedence, both valid values, invalid-value die() paths, empty/whitespace env handling |
 | `test_resolve_models.py` | `resolve_models()` — per-worker precedence (CLI > env > TOML), defaults, validation, empty/whitespace handling |
 | `test__read_toml_key.py` | `_read_toml_key()` — the shared `pila.toml` line parser used by both resolvers |
 | `test_gather_answers_validation.py` | the source-of-truth validation gate in `gather_answers()` |

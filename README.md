@@ -251,6 +251,7 @@ Complete reference for every CLI flag, environment variable, and
 | `--run-id ID` | — | Select a specific run by id (e.g., for `--resume` or `--phase` when multiple runs are in flight). |
 | `--list` | off | Enumerate in-flight and completed runs in this repository (run id, started, status, branch). |
 | `--no-push` | off | Skip the default push + PR at finalize. The run completes with the run branch local-only; your working branch is unchanged. Overrides `PILA_NO_PUSH` / `pila.toml`. |
+| `--remote` | off | Route execution to a remote backend (Fly.io) instead of the local `nerdctl run`. Consumed by the launcher before `REWRITTEN_ARGS`; the orchestrator never sees it. Also `PILA_REMOTE` env var or `remote = true` in `pila.toml`. |
 | `--no-verify` | off | Pass `--no-verify` to the finalize `git push` only (skips pre-push hooks). Worker commits inside worktrees still run all hooks. The user's explicit override per CLAUDE.md's hooks principle. |
 | `--answers FILE` | — | JSON object of pre-supplied clarification answers (keyed by question `id`; may include `source_of_truth`). |
 | `--clarify` | off | Opt into surfacing intent questions to the user. Default: questions are dropped after the classifier's codebase→research filter, and the implementer makes a documented best-effort decision. Also `PILA_CLARIFY` env var or `clarify = true` in `pila.toml`. |
@@ -259,6 +260,7 @@ Complete reference for every CLI flag, environment variable, and
 | `--confidence-rounds N` | `8` | Evidence-gate rounds the planner and implementer may run before exiting blocked (DESIGN §8). Overrides `PILA_CONFIDENCE_ROUNDS` and `pila.toml`. |
 | `--skip-smoke` | off | Skip the live `claude -p` preflight smoke test. |
 | `--source-of-truth VALUE` | `both` | `codebase` / `research` / `both`. Overrides `PILA_SOURCE_OF_TRUTH` and `pila.toml`. |
+| `--runtime VALUE` | `local` | `local` / `fly`. Execution backend for per-subtask worker containers. Overrides `PILA_RUNTIME` and `pila.toml`. |
 | `--inspect-dir PATH` | none | Extra directory the inspect-bucket workers (classifier, planner, reconciler, provision) may read; forwarded to `claude -p` as `--add-dir`. Repeatable. Also `PILA_INSPECT_DIRS` (colon-separated) or `inspect_dirs` in `pila.toml` (comma-separated). |
 | `--model ALIAS` | per-worker (judgment: `opus`; acting workers — implementer, conformer: `sonnet`) | `sonnet` / `opus` / `haiku`. Sets every worker this run; without it the per-worker defaults apply. |
 | `--model-<worker> ALIAS` | per-worker default (`implementer`, `conformer` → `sonnet`; everything else → `opus`) | Per-worker override. `<worker>` is one of `classifier`, `planner`, `reconciler`, `provision`, `implementer`, `integrator`, `conformer`. Overrides `--model`, `PILA_MODEL`, and `pila.toml`. |
@@ -280,12 +282,14 @@ Complete reference for every CLI flag, environment variable, and
 | Env var | `pila.toml` key | Description |
 |---------|---------------------|-------------|
 | `PILA_SOURCE_OF_TRUTH` | `source_of_truth` | Sticky source-of-truth preference (`codebase` / `research` / `both`). Overridden by `--source-of-truth`. Unset → default `both`. |
+| `PILA_RUNTIME` | `runtime` | Execution backend for per-subtask worker containers (`local` / `fly`). Overridden by `--runtime`. Unset → default `local`. |
 | `PILA_MODEL` | `model` | Model alias applied to every worker. Overridden by `--model` and per-worker overrides. Unset → per-worker defaults (judgment workers `opus`, acting workers — implementer, conformer — `sonnet`). |
 | `PILA_MODEL_<WORKER>` | `model_<worker>` | Per-worker override (e.g. `PILA_MODEL_IMPLEMENTER=opus`). Overridden by `--model-<worker>`. `<worker>` ∈ `classifier`, `planner`, `reconciler`, `provision`, `implementer`, `integrator`, `conformer`. Unset → `implementer` and `conformer` → `sonnet`; everything else → `opus`. |
 | `PILA_CONFIDENCE_ROUNDS` | `confidence_rounds` | Evidence-gate rounds per worker (positive integer). Overridden by `--confidence-rounds`. Unset → default `8`. |
 | `PILA_INSPECT_DIRS` | `inspect_dirs` | Extra directories the inspect-bucket workers (classifier, planner, reconciler, provision) may read; forwarded as `--add-dir`. Env value is colon-separated; TOML value is comma-separated. Overridden by `--inspect-dir` (repeatable). Unset → none. |
 | `PILA_VERBOSITY` | `verbosity` | Inline-output verbosity (`quiet` / `normal` / `stream` / `debug`). Overridden by `--verbosity`. `-v` / `-vv` / `-q` / `-qq` shortcuts override both. Unset → default `stream`. |
 | `PILA_NO_PUSH` | `no_push` | Sticky opt-out from push + PR at finalize (truthy → skip). Overridden by `--no-push`. `--no-verify` has no env/TOML mirror — it is a per-invocation override only. Unset → default `false` (push + PR happen). |
+| `PILA_REMOTE` | `remote` | Route execution to a remote backend instead of local `nerdctl run` (truthy → remote). Overridden by `--remote`. Unset → default `false` (local container run). |
 | `PILA_CLARIFY` | `clarify` | Sticky opt-in to surfacing intent questions to the user (truthy → on). Overridden by `--clarify`. Unset → default `false`. |
 | `PILA_MODEL_JUDGE` | `model_judge` | Model alias for the post-run judge skill. Overridden by `--judge-model`. Unset → default `sonnet`. |
 | `PILA_MODEL_HEAL` | `model_heal` | Model alias for the post-run self-heal skill. Overridden by `--heal-model`. Unset → default `sonnet`. |
@@ -385,6 +389,11 @@ live `claude` binary would be needed; out of scope for the current suite).
 | `scripts/integrate.sh` | Merge a subtask branch into the run branch |
 | `scripts/finalize.sh` | Verify the run branch is non-empty and ready to push (the working branch is not modified locally — the push + PR step lives in Python's `push_and_open_pr`, called from `phase_finalize` unless `--no-push`) |
 | `scripts/cleanup.sh` | Remove worktrees for one run (default `--run-id`) or all runs (`--all-runs`). State dir always preserved as audit. `--branches` also deletes the matching `pila/runs/<id>` run branch *and* `pila/subtasks/<id>/*` subtask branches. `--subtask-branches` deletes only the subtask branches and keeps `pila/runs/<id>` (the post-finalize default — the run branch is the PR head). `--bootstrap` removes orphaned `_bootstrap-*` dirs (runs that died before classify completed). |
+| `scripts/remote/build-push.sh` | Build and push a self-contained pila image to Fly.io's registry (source baked in at `/work/.pila-image/`). See `docs/IMPLEMENTATION.md` §0.5 *Registry publish path*. |
+| `scripts/remote/provision.sh` | Fly Machine lifecycle helper (sourced by the launcher's `REMOTE=true` branch). Provides `provision_machine()` (create → wait-started → register destroy trap) and `destroy_machine()`. See `docs/IMPLEMENTATION.md` §7 *Machine lifecycle*. |
+| `scripts/remote/seed-auth.sh` | Worker auth + config seeding (sourced by the launcher after `provision_machine()` returns). Provides `seed_auth()`, which delivers `~/.claude.json` + `~/.claude/` + git identity to the remote machine via `flyctl machine exec` tar-pipe and git config calls. See `docs/IMPLEMENTATION.md` §7 *Worker auth + config seeding*. |
+| `scripts/remote/seed-repo.sh` | Two-channel repo seeding helper (sourced by the launcher after `provision_machine()` succeeds). Provides `seed_repo()`: full-history partial clone via `git clone --filter=blob:none`, then rsync of the local dirty set via `flyctl machine exec tar`. See `docs/IMPLEMENTATION.md` §7 *Repo seeding*. |
+| `scripts/remote/fetch-branch.sh` | Post-run stream-back helper (sourced by the launcher after remote orchestration succeeds). Provides `fetch_branch()`: discovers the completed run-id on the machine, streams the `pila/runs/<run-id>` git bundle to the host via `git fetch`, and tars `.pila/runs/<run-id>/` back so the existing host-side finalize block (push + `gh pr create`) runs unchanged. See `docs/IMPLEMENTATION.md` §7 *Run branch stream-back*. |
 | `pila` | Executable entry-point wrapper |
 | `commands/pila.md` | Thin plugin skill — reachable as `/pila` from Claude Code |
 | `docs/DESIGN.md` | Full design document and rationale |

@@ -171,6 +171,12 @@ export PILA_SOURCE_OF_TRUTH=codebase   # or: research, both
 ./pila "task" --source-of-truth codebase
 # …or commit a pila.toml at the repo root with: source_of_truth = codebase
 
+# Select the execution runtime (default: local). `fly` routes each worker
+# through Fly.io machines instead of local nerdctl containers.
+export PILA_RUNTIME=local              # or: fly
+./pila "task" --runtime fly
+# …or commit a pila.toml at the repo root with: runtime = fly
+
 # Choose the model. Without overrides: judgment workers (classifier,
 # planner, reconciler, provision, integrator) default to opus; acting
 # workers (implementer, conformer) default to sonnet. Per-worker
@@ -205,12 +211,17 @@ export PILA_VERBOSITY=normal  # sticky default
 ## Testing
 
 `pytest tests/` from the repo root. Tests cover the deterministic
-enforcement functions (`resolve_source_of_truth`, `gather_answers`
-validation gate, `_retryable_failure`, `check_merge_committed`,
-`validate_result`, `validate_plan`) including a coupling test that the
-retry-policy markers match the live check-function strings. No coverage
-target is set — the suite was introduced from scratch and a number now
-would be arbitrary.
+enforcement functions (`resolve_source_of_truth`, `resolve_runtime`,
+`gather_answers` validation gate, `_retryable_failure`,
+`check_merge_committed`, `validate_result`, `validate_plan`,
+`_validate_run_json`, `_derive_run_status`, `list_paused_runs`)
+including a coupling test that the
+retry-policy markers match the live check-function strings. The
+remote (Fly.io) bash surface — `ensure_image`, `provision_machine`,
+`stop_machine`, `decide_teardown`, `resume_machine`, and `lib.sh`'s
+`update_run_json` — is tested via bash-harness subprocess tests with
+stubbed `flyctl`. No coverage target is set — the suite was
+introduced from scratch and a number now would be arbitrary.
 
 The worker invocation path (`claude_p`) is not unit-tested; meaningful
 testing requires a stub or live `claude` binary and lives in a separate

@@ -228,6 +228,13 @@ SOURCE_OF_TRUTH_VALUES = ("codebase", "research", "both")
 SOURCE_OF_TRUTH_ENV = "PILA_SOURCE_OF_TRUTH"
 SOURCE_OF_TRUTH_FILE = "pila.toml"
 
+# Runtime mode — see IMPLEMENTATION.md §2 "Runtime mode". Resolution order:
+# --runtime CLI flag → PILA_RUNTIME env var → per-repo pila.toml → 'local'.
+# CLI/env are session knobs and outrank the committed file default.
+RUNTIME_VALUES = ("local", "fly")
+RUNTIME_ENV = "PILA_RUNTIME"
+RUNTIME_FILE = SOURCE_OF_TRUTH_FILE
+
 # Confidence-rounds preference — see IMPLEMENTATION.md §2 "Confidence
 # rounds". Resolution order: --confidence-rounds CLI flag →
 # PILA_CONFIDENCE_ROUNDS env var → pila.toml → DEFAULT_CAPS
@@ -1454,13 +1461,17 @@ def compute_subtask_branch(run_id: str, sid: str) -> str:
 # --- run.json sidecar invariants (IMPLEMENTATION.md §8) -----------------
 
 def _validate_run_json(data: dict) -> None:
-    """Enforce the three logical invariants on a `run.json` sidecar.
+    """Enforce the four logical invariants on a `run.json` sidecar.
 
     1. `pushed_at` and `push_error` are mutually exclusive (at most one
        is non-null).
     2. `pr_url` and `pr_error` are mutually exclusive.
     3. If `pr_url` is set, `pushed_at` must be set (cannot have a PR
        without a successful push).
+    4. `paused_at` and `pushed_at` are mutually exclusive (a run cannot
+       be both paused and finalized). If `paused_at` is set,
+       `fly_machine_id` must also be set — you cannot pause a run
+       without knowing where to resume it.
 
     Raises ValueError on any violation. Caller (e.g., `pila --list`)
     decides whether to die, warn, or render as `status=corrupt-sidecar`."""
@@ -1470,6 +1481,8 @@ def _validate_run_json(data: dict) -> None:
     push_error = data.get("push_error")
     pr_url = data.get("pr_url")
     pr_error = data.get("pr_error")
+    paused_at = data.get("paused_at")
+    fly_machine_id = data.get("fly_machine_id")
     if pushed_at is not None and push_error is not None:
         raise ValueError(
             "run.json invariant: pushed_at and push_error are both set; "
@@ -1484,6 +1497,16 @@ def _validate_run_json(data: dict) -> None:
         raise ValueError(
             "run.json invariant: pr_url is set but pushed_at is null; "
             "PR cannot succeed without a successful push"
+        )
+    if paused_at is not None and pushed_at is not None:
+        raise ValueError(
+            "run.json invariant: paused_at and pushed_at are both set; "
+            "a run cannot be both paused and finalized"
+        )
+    if paused_at is not None and fly_machine_id is None:
+        raise ValueError(
+            "run.json invariant: paused_at is set but fly_machine_id is null; "
+            "you cannot pause a run without knowing where to resume it"
         )
 
 
@@ -1725,6 +1748,7 @@ RUN_STATUSES = (
     "done-pushed-pr",
     "push-failed",
     "pr-failed",
+    "paused-remote",
 )
 
 
@@ -1738,7 +1762,16 @@ def _derive_run_status(run_json: dict | None, state_json: dict | None) -> str:
       4. pr_url set                → `done-pushed-pr`.
       5. pushed_at set             → `done-pushed-no-pr`.
       6. finished_at set           → `done-local` (run completed, --no-push).
-      7. otherwise                 → `in-progress`.
+      7. paused_at set             → `paused-remote` (remote pause-on-failure).
+      8. otherwise                 → `in-progress`.
+
+    Precedence note: push/PR errors fire before the paused-remote check
+    because a finalize that failed mid-write should surface as the error
+    it actually is, not as a pause. The invariant
+    (paused_at xor pushed_at) means a paused run can't have pushed_at,
+    but it can in principle have a stale push_error from a prior attempt
+    — checking errors first makes the rendered status match the action
+    the user needs to take.
 
     state_json is currently unused in the derivation but accepted for
     forward-compat: future statuses (e.g., 'blocked') may consult
@@ -1759,20 +1792,16 @@ def _derive_run_status(run_json: dict | None, state_json: dict | None) -> str:
         return "done-pushed-no-pr"
     if rj.get("finished_at"):
         return "done-local"
+    if rj.get("paused_at"):
+        return "paused-remote"
     return "in-progress"
 
 
-def list_runs(pila_root: Path) -> None:
-    """Render a sortable columnar table of runs to stdout. Used by
-    `pila --list`. Reads run.json sidecar (commit 4) for status
-    derivation; falls back to state.json fields for runs without a
-    sidecar (e.g., extremely-early failures before the rename, though
-    discover_runs filters those out)."""
+def _collect_run_rows(pila_root: Path) -> list[tuple[str, str, str, str]]:
+    """Build (run_id, started_at, status, branch) rows for every run
+    under `pila_root/runs/`. Pure data-gathering; rendering is the
+    caller's concern."""
     runs = discover_runs(pila_root)
-    if not runs:
-        print("no runs under .pila/runs/")
-        return
-    # Read each run's run.json sidecar.
     rows: list[tuple[str, str, str, str]] = []
     for state in runs:
         run_id = state["run_id"]
@@ -1790,7 +1819,11 @@ def list_runs(pila_root: Path) -> None:
         started_at = state.get("started_at") or "—"
         branch = (run_json or {}).get("branch") or compute_run_branch(run_id)
         rows.append((run_id[:50], started_at, status, branch))
-    # Columnar layout: widths from the data, with sensible minimums.
+    return rows
+
+
+def _render_run_table(rows: list[tuple[str, str, str, str]]) -> None:
+    """Print rows as a columnar table with auto-sized columns."""
     w_id = max(len("run_id"), *(len(r[0]) for r in rows))
     w_st = max(len("started_at"), *(len(r[1]) for r in rows))
     w_status = max(len("status"), *(len(r[2]) for r in rows))
@@ -1800,6 +1833,33 @@ def list_runs(pila_root: Path) -> None:
     print(fmt.format("-" * w_id, "-" * w_st, "-" * w_status, "-" * w_br))
     for r in rows:
         print(fmt.format(*r))
+
+
+def list_runs(pila_root: Path) -> None:
+    """Render a sortable columnar table of runs to stdout. Used by
+    `pila --list`. Reads run.json sidecar (commit 4) for status
+    derivation; falls back to state.json fields for runs without a
+    sidecar (e.g., extremely-early failures before the rename, though
+    discover_runs filters those out)."""
+    rows = _collect_run_rows(pila_root)
+    if not rows:
+        print("no runs under .pila/runs/")
+        return
+    _render_run_table(rows)
+
+
+def list_paused_runs(pila_root: Path) -> None:
+    """Filter the run table to paused-remote entries. Used by
+    `pila --list-paused`. Reads the same sidecar source as `list_runs`;
+    the filter is on the derived status, not on `paused_at` directly,
+    so that the precedence rules in `_derive_run_status` apply (a
+    paused run that also has `push_error` renders as `push-failed`,
+    not `paused-remote`)."""
+    rows = [r for r in _collect_run_rows(pila_root) if r[2] == "paused-remote"]
+    if not rows:
+        print("no paused remote runs")
+        return
+    _render_run_table(rows)
 
 
 def _read_toml_key(path: Path, key: str) -> str | None:
@@ -1877,6 +1937,31 @@ def resolve_source_of_truth(repo_root: Path,
                 f"{SOURCE_OF_TRUTH_VALUES}")
         return file_val
     return "both"
+
+
+def resolve_runtime(repo_root: Path,
+                    cli_value: str | None = None) -> str:
+    """Resolve the runtime mode. Order:
+    --runtime CLI flag → PILA_RUNTIME env var → pila.toml → default 'local'.
+    argparse validates `cli_value` via choices=, so it is trusted when set.
+    env and file values are rejected via die() if not in RUNTIME_VALUES — a
+    bad config is caught at startup, not during a worker run."""
+    if cli_value:
+        return cli_value
+    env = os.environ.get(RUNTIME_ENV, "").strip()
+    if env:
+        if env not in RUNTIME_VALUES:
+            die(f"{RUNTIME_ENV}={env!r} is not one of "
+                f"{RUNTIME_VALUES}")
+        return env
+    cfg = repo_root / RUNTIME_FILE
+    file_val = _read_toml_key(cfg, "runtime")
+    if file_val is not None:
+        if file_val not in RUNTIME_VALUES:
+            die(f"{cfg}: runtime={file_val!r} is not one of "
+                f"{RUNTIME_VALUES}")
+        return file_val
+    return "local"
 
 
 def resolve_confidence_rounds(repo_root: Path,
@@ -7814,6 +7899,10 @@ def main() -> None:
                     help="enumerate in-flight and completed runs in this "
                          "repository (run id, started, status, branch). "
                          "Exits without running orchestrate. Default: off")
+    ap.add_argument("--list-paused", action="store_true", dest="list_paused",
+                    help="like --list but filters to paused remote runs "
+                         "(DESIGN §6 Remote pause-on-failure). Exits "
+                         "without running orchestrate. Default: off")
     ap.add_argument("--answers", metavar="FILE",
                     help="JSON file of pre-supplied clarification answers")
     ap.add_argument("--clarify", action="store_true",
@@ -7858,6 +7947,11 @@ def main() -> None:
                     help=f"source-of-truth preference "
                          f"({'|'.join(SOURCE_OF_TRUTH_VALUES)}, default both); "
                          f"overrides {SOURCE_OF_TRUTH_ENV} and pila.toml")
+    ap.add_argument("--runtime", choices=RUNTIME_VALUES,
+                    metavar="MODE",
+                    help=f"execution runtime "
+                         f"({'|'.join(RUNTIME_VALUES)}, default local); "
+                         f"overrides {RUNTIME_ENV} and pila.toml")
     ap.add_argument("--inspect-dir", action="append", metavar="PATH",
                     dest="inspect_dir",
                     help="extra directory the inspect-bucket workers "
@@ -7958,12 +8052,16 @@ def main() -> None:
                          "reports to <run-dir>/<heal-dir>/.")
     args = ap.parse_args()
 
-    # --list short-circuits everything else: read .pila/runs/* and
-    # exit. No git/CLI checks needed; the user might be inspecting runs
-    # from outside a git repo.
+    # --list / --list-paused short-circuit everything else: read
+    # .pila/runs/* and exit. No git/CLI checks needed; the user might
+    # be inspecting runs from outside a git repo.
     if args.list_runs:
         pila_root = Path(".pila").resolve()
         list_runs(pila_root)
+        return
+    if args.list_paused:
+        pila_root = Path(".pila").resolve()
+        list_paused_runs(pila_root)
         return
 
     if not shutil.which("claude"):
@@ -8021,6 +8119,7 @@ def main() -> None:
     # --source-of-truth / --model[-*] before we got here.
     repo_root = Path(os.getcwd())
     sot_pref = resolve_source_of_truth(repo_root, args.source_of_truth)
+    args.runtime = resolve_runtime(repo_root, args.runtime)
     models = resolve_models(repo_root, args)
     log(f"models: " + ", ".join(f"{w}={models[w]}" for w in WORKER_TYPES))
 

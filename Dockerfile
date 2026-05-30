@@ -1,9 +1,16 @@
 # pila container image — see docs/IMPLEMENTATION.md §0.5 "Container shape".
 #
 # Built locally on first `pila` run; tagged `pila:<VERSION>` so a pila upgrade
-# rebuilds once and reuses layers thereafter. The orchestrator source itself
-# is bind-mounted from the host at runtime (not baked in), so editing
-# orchestrator/pila.py does NOT require an image rebuild.
+# rebuilds once and reuses layers thereafter.
+#
+# LOCAL MODE: the launcher bind-mounts $PILA_HOME → /work/.pila-image:ro at
+# runtime, shadowing the baked-in COPY layers. Editing orchestrator/pila.py
+# on the host takes effect on the next run without an image rebuild.
+#
+# REGISTRY / FLY MODE: the COPY instructions below bake orchestrator/,
+# scripts/, prompts/, and .claude-plugin/ into /work/.pila-image/ so the
+# image is self-contained without a bind-mount. An image rebuild IS required
+# after source changes.
 
 FROM debian:12-slim
 
@@ -137,6 +144,18 @@ RUN mkdir -p /home/pila/.local/share/mise \
     && chown -R pila:"${HOST_GID}" /home/pila/.local /home/pila/.cache /home/pila/.gnupg \
     && chmod 700 /home/pila/.gnupg
 
+# Bake the orchestrator source into the image at /work/.pila-image/ so the
+# image is self-contained on Fly.io Machines (no host bind mount available).
+# On local runs the launcher's `-v $PILA_REPO:/work/.pila-image:ro` shadows
+# this baked copy, so development iteration (edit + run) works without
+# rebuilding the image. COPY runs as root; chown transfers ownership to pila.
+COPY orchestrator/ /work/.pila-image/orchestrator/
+COPY scripts/ /work/.pila-image/scripts/
+COPY prompts/ /work/.pila-image/prompts/
+COPY .claude-plugin/ /work/.pila-image/.claude-plugin/
+RUN chown -R pila:"${HOST_GID}" /work/.pila-image
+
 USER pila
 WORKDIR /work
+
 ENTRYPOINT ["/work/.pila-image/scripts/container-entry.sh"]

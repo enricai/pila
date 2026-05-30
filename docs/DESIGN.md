@@ -400,12 +400,37 @@ mountable file. Moving the network-y phases to the host eliminates
 all of that — the host has working auth for git, gh, and ssh
 because the user already uses them daily.
 
-The container hands off through `run.json`. The orchestrator writes
-`finished_at` and exits with status 0; the launcher polls for that
-field and proceeds with push + PR. If the container exits non-zero
-(an unrecoverable error mid-run), the launcher does not push —
-nothing changed on disk that the user didn't already see in the
-worker logs.
+**Local runs** hand off through `run.json` on the bind-mounted host
+filesystem. The orchestrator writes `finished_at` and exits with status 0;
+the launcher reads that field from the bind-mounted path and proceeds with
+push + PR. If the container exits non-zero (an unrecoverable error
+mid-run), the launcher does not push — nothing changed on disk that the
+user didn't already see in the worker logs.
+
+**Remote runs** (Fly.io `--runtime fly`) face the same auth boundary from
+the other direction: the run branch and `.pila/runs/<run-id>/` state live
+on the Fly Machine's filesystem, not on the host. The launcher resolves
+this with a **stream-back** step before the host-side finalize runs:
+
+1. The orchestrator inside the Machine writes `finished_at` to `run.json`
+   and exits 0, exactly as in local mode.
+2. The launcher calls `scripts/remote/fetch-branch.sh`, which:
+   - discovers the completed run-id by scanning `.pila/runs/*/run.json` on
+     the Machine for a `finished_at`-bearing, unpushed entry;
+   - creates a `git bundle` of `pila/runs/<run-id>` on the Machine and
+     pipes it to the host, where `git fetch` materialises the branch in the
+     host's local repo;
+   - tars `.pila/runs/<run-id>/` on the Machine and extracts it under
+     `$USER_REPO/.pila/runs/` on the host.
+3. The existing host-side finalize block (push + `gh pr create`) then runs
+   unchanged with the host's own auth — it finds `run.json` (now on the
+   host) and the run branch (now in the host repo) just as it would after a
+   local run.
+
+The orchestrator inside the Machine is always invoked with `--no-push` so
+it never attempts a push itself; push is always the launcher's job. The
+stream-back step is the remote equivalent of the bind-mount: it makes the
+same state visible on the host so the same finalize code path runs.
 
 The run branch is pushed to `origin` and a pull request is opened
 via `gh pr create` against the working branch (the branch
@@ -608,6 +633,137 @@ A `die()` call (the documented clean-exit mechanism for known failure
 modes) is *not* an abnormal exit. The user already got an actionable
 error message; running a worktree cleanup pass is correct (the run was
 mid-flight) but it is silent unless there were worktrees to clean.
+
+**Remote pause-on-failure (Fly.io).** Local mode reaps the container's
+PID namespace on every exit (success or failure) because the host
+filesystem holds the durable record. Remote mode has the same durable
+record (the run branch and `.pila/runs/<run-id>/`, both of which the
+stream-back finalize already understands) but the Fly Machine is *not*
+free — keeping it alive after failure has a real per-second cost, and
+destroying it after failure throws away the in-machine filesystem state
+that is useful for diagnosis (orchestrator logs, partial worktrees,
+recently-edited files that haven't yet been committed to a per-subtask
+branch).
+
+The compromise: classify the orchestrator's exit code on the host side
+and route to either *stop* (preserves volume, frees compute) or
+*destroy* (full reap). Classification:
+
+| Exit | Meaning | Disposition |
+|---|---|---|
+| `0` | success — finalize ran | destroy after stream-back |
+| `EXIT_NEEDS_ANSWERS=10` | clarification (plugin re-runs) | destroy (nothing to inspect) |
+| `75` (EX_TEMPFAIL) | rate-limit, parse-fail | destroy (state in run branch; cheaper to re-provision) |
+| `130` / `143` | host-side SIGINT / SIGTERM | destroy (user cancelled) |
+| any other non-zero | worker/orchestrator failure | **pause: stop machine, write sidecar, notify** |
+
+The decision lives in the launcher (`scripts/remote/provision.sh`'s
+EXIT trap), not the orchestrator. Per §6 *Worker subtree termination*
+the orchestrator stays runtime-agnostic — it always exits with the same
+exit codes regardless of where it runs, and the launcher routes those
+exit codes through the runtime-appropriate teardown.
+
+`flyctl machine stop` (not destroy) on the pause branch preserves the
+machine's filesystem on its Fly volume; the orchestrator's own state is
+already in `.pila/runs/<run-id>/run.json` on that volume, the run
+branch holds the committed work, and `flyctl machine start` brings the
+machine back from disk without losing anything. Memory state is not
+preserved — `remote-task-system.md` lines 89–99 explicitly retract the
+abstract "memory-state snapshot" requirement in favor of the
+run-branch-as-durable-record contract this section relies on.
+
+Three sidecar fields on `run.json` capture pause state:
+
+- `fly_machine_id` — written by `provision.sh` immediately after
+  `flyctl machine run` succeeds, so a launcher that crashes before
+  classifying still leaves a recoverable pointer to the machine.
+- `paused_at` — ISO timestamp written by the EXIT trap on the pause
+  branch.
+- `pause_reason` — short tag (`worker-error`, `orchestrator-exception`,
+  `finalize-failed`).
+
+`paused_at` and `pushed_at` are mutually exclusive — a run cannot be
+both paused and finalized. The orchestrator's `_validate_run_json`
+enforces the invariant.
+
+The user-visible surfaces are: a launcher-printed notification block
+on the pause branch (machine ID, attach command, resume command, kill
+command); `pila --list-paused`, which filters runs by `paused_at`;
+and `pila --resume --run-id <id> --runtime fly`, which reads the
+sidecar, calls `flyctl machine start`, re-runs the seed step for any
+host-side dirty edits (§ Mid-run re-seed, follow-up), and continues
+the run.
+
+**Interactive attach over PTY in remote mode.** The attach channel
+is the §6 isolation boundary's terminal-side surface — not a new
+privileged channel. `pila --attach <run-id>` `exec`s
+`flyctl ssh console` against the run's Fly Machine, which proxies
+through Fly's hallpass + WireGuard mesh and gives the user a real
+PTY at `/work`. No sshd in the image, no key management, no public
+exposure; isolation inherits from the same WireGuard mesh the
+launcher already uses for `flyctl machine exec`.
+
+The orchestrator is unaware of attach — it's a launcher-host gesture
+(mirrors §6's "container/process isolation is the launcher's
+concern"). The same mechanism serves three roles from
+`remote-task-system.md`:
+
+1. The "feels-local" interactive terminal — a developer can drop in
+   to inspect what a worker is doing.
+2. The mid-run attach mechanism — open a session against a running
+   machine without disturbing PID 1 (the orchestrator). `flyctl ssh
+   console` spawns an independent process; detach signals only the
+   SSH session's own children.
+3. The failure-inspection surface — the paused-machine state from
+   the pause-on-failure path is reachable via exactly the same
+   command. No second mechanism is needed.
+
+State contract: `scripts/remote/provision.sh` writes a PID-keyed
+record at `$USER_REPO/.pila/remote/$$.json` immediately after
+provisioning, removes it in `destroy_machine`, and lets the launcher
+rename it to `$USER_REPO/.pila/runs/<run-id>/fly-machine.json` after
+the run-id becomes known (via fetch-branch.sh). `pila --attach`
+resolves the machine via either path. Multiple concurrent remote
+runs in the same repo are disambiguated by passing a run-id.
+
+Local mode has no attach today — `pila --attach` errors with
+"attach is remote-only" until a parallel `scripts/local/attach.sh`
+wrapping `nerdctl exec -it <name> bash` is added.
+
+**Mid-run re-seed (remote mode).** `remote-task-system.md` line 50
+specifies "a second rsync of current laptop state into the task,
+user-triggered." pila realises this as two surfaces sharing one
+mechanism: an explicit `pila --re-seed <run-id>` subcommand and an
+implicit auto-re-seed step inside `pila --resume --run-id <id>
+--runtime fly`. Both wake the machine if stopped, run a safety
+check, and call the same `seed_repo_dirty` helper used by the fresh-
+provision path.
+
+Three operations, in order, mirroring the spec's intent ("current
+laptop state" = host commits plus host dirty edits):
+
+1. `flyctl machine start` (if stopped) + `wait_for_started`.
+2. Refuse re-seed when `/work` on the machine has uncommitted
+   tracked changes outside `.pila/` — those represent in-flight
+   worker edits that haven't yet been committed to a per-subtask
+   branch, and silently clobbering them produces a wrong PR.
+   `--force` bypasses.
+3. `seed_repo_dirty` — recompute `git status --porcelain` on the
+   host, tar the dirty set, pipe via `flyctl machine exec`. The
+   full-history clone on the machine is preserved (never
+   re-cloned, which would obliterate the run branch).
+
+The dirty set is computed on the host where worktree paths
+(`.pila/runs/<run-id>/worktrees/...`) structurally cannot appear,
+because worktrees live only on the machine. A defensive
+`tar --exclude='.pila/runs/*/worktrees/*' --exclude='.git/*'` flag
+protects against a future change that lets host-side paths name
+worktree files.
+
+Resume auto-re-seeds by default. `--no-re-seed` opts out for the
+rate-limit auto-resume case where no host edits happened. The
+trust model matches the spec: the user picks the moment (by typing
+`--resume`), so the seed is treated as authoritative.
 
 ---
 
@@ -1488,6 +1644,14 @@ sidecar with `pushed_at`/`pr_url`/error fields, `--no-push` and
 revisions of this document has been exercised; the broader design here
 becomes verified only after the corresponding code lands and a first run
 exercises it.
+
+Remote-mode features stack on the host-side finalize path described
+in §6 *Finalization*. `--runtime fly` provisioning, two-channel
+seeding, stream-back finalize, and remote pause-on-failure all depend
+on the run-branch-as-durable-record contract. Verifying them
+end-to-end requires the local-mode finalize to be exercised first;
+stacking new features on an unproven foundation is the failure mode
+this section is meant to surface.
 
 **Recommended first step.** Run Pila once on a throwaway repository with a
 small, fully-specified task before trusting it on real work.
