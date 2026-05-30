@@ -1773,11 +1773,11 @@ The provision script is **sourced** (not exec'd) by the launcher so the
 machine ID and destroy trap live in the launcher's process. It provides
 two functions:
 
-- **`provision_machine()`** — creates a Fly Machine from `$FLY_IMAGE_TAG`,
-  polls `flyctl machine status` until the machine reaches state `started`,
-  and registers `destroy_machine` as an EXIT/INT/TERM trap. Exports
-  `$PILA_MACHINE_ID`. Returns 0 on success; destroys the machine and
-  returns 1 on failure.
+- **`provision_machine()`** — creates a Fly Machine from `$FLY_IMAGE_TAG`
+  (set by the launcher; see below), polls `flyctl machine status` until the
+  machine reaches state `started`, and registers `destroy_machine` as an
+  EXIT/INT/TERM trap. Exports `$PILA_MACHINE_ID`. Returns 0 on success;
+  destroys the machine and returns 1 on failure.
 - **`destroy_machine()`** — runs `flyctl machine destroy $PILA_MACHINE_ID
   --app $FLY_APP --force`, with a stop-then-destroy fallback for machines
   that are already in a terminal state. Registered as a trap immediately
@@ -1788,15 +1788,15 @@ Environment variables consumed by `provision.sh`:
 | Variable | Default | Purpose |
 |---|---|---|
 | `PILA_FLY_APP` | `pila` | Fly.io app name |
-| `FLY_IMAGE_TAG` | `registry.fly.io/<app>:<version>` | Full image tag to launch |
+| `FLY_IMAGE_TAG` | `registry.fly.io/<app>:<version>` | Full image tag to launch (set by the launcher) |
 | `FLY_REGION` | `iad` | Fly.io region |
 | `FLY_VM_CPUS` | `4` | vCPU count for the machine |
 | `FLY_VM_MEMORY` | `8192` | Memory in MB for the machine |
 | `PILA_MACHINE_START_TIMEOUT` | `120` | Seconds to wait for `state=started` |
 
-`FLY_IMAGE_TAG` is resolved by the launcher using `$PILA_FLY_APP` and
-`$PILA_VERSION`, or overridden by setting `PILA_FLY_IMAGE` in the
-environment.
+`FLY_IMAGE_TAG` is resolved by the launcher (`resolve_fly_image_tag()`)
+using `$PILA_FLY_APP` and `$PILA_VERSION`, or overridden by setting
+`PILA_FLY_IMAGE` in the environment.
 
 `provision_machine` requires `flyctl` on `PATH` and `flyctl auth status`
 to succeed. Missing/unauthenticated `flyctl` produces an actionable error
