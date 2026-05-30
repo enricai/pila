@@ -32,6 +32,7 @@ inside the container (DESIGN §6 / §0.5 below).
 | `scripts/container-entry.sh` | Container PID 1. `cd /work && exec python3 /work/.pila-image/orchestrator/pila.py "$@"`. |
 | `scripts/remote/build-push.sh` | Build and push a self-contained pila image to Fly.io's registry. The baked source at `/work/.pila-image/` lets the image run on Fly Machines without any bind mount. |
 | `scripts/remote/provision.sh` | Fly.io machine lifecycle helper (sourced by the `pila` launcher's `RUNTIME=fly` branch). Exports `provision_machine()` (create → wait-started → register destroy trap) and `destroy_machine()`. The destroy trap fires on EXIT, INT, and TERM so no machine is leaked by Ctrl-C or crash. |
+| `scripts/remote/seed-repo.sh` | Two-channel repo seeding helper (sourced by the `pila` launcher after `provision_machine()` succeeds). Exports `seed_repo()`: (1) `git clone --filter=blob:none` on the remote machine via `flyctl machine exec`; (2) computes the local dirty set via `git status --porcelain`, packs it as a tar stream, and pipes it to the remote via `flyctl machine exec tar`. After seeding, `/work` on the machine mirrors the developer's working tree. |
 
 ### Python runtime — provisioned inside the container
 
@@ -438,8 +439,10 @@ pila/
 │       ├── build-push.sh          build and push a self-contained image for Fly.io Machines;
 │       │                           the baked /work/.pila-image/ lets the image run without
 │       │                           a bind mount (§0.5 "Registry publish path")
-│       └── provision.sh           Fly Machine lifecycle (sourced by launcher RUNTIME=fly branch);
-│                                   provision_machine() create→started→trap; destroy_machine()
+│       ├── provision.sh           Fly Machine lifecycle (sourced by launcher RUNTIME=fly branch);
+│       │                           provision_machine() create→started→trap; destroy_machine()
+│       └── seed-repo.sh           two-channel repo seeding (sourced by launcher after provision);
+│                                   seed_repo(): git clone --filter=blob:none + rsync dirty set
 ├── commands/pila.md            thin plugin skill — launches the orchestrator
 ├── skills/
 │   ├── judge-llm-batch/SKILL.md  post-run judge skill — scores a batch of captured
@@ -1803,11 +1806,45 @@ to succeed. Missing/unauthenticated `flyctl` produces an actionable error
 with install instructions rather than a cryptic failure mid-run.
 
 Current state: the machine lifecycle is implemented (create → started →
-destroy-on-exit). Seeding (git clone + rsync uncommitted delta) and worker
-auth forwarding are handled by subsequent feat-remote-* subtasks.
+destroy-on-exit); repo seeding (git clone + rsync uncommitted delta) is
+implemented by `scripts/remote/seed-repo.sh` (see below). Worker auth
+forwarding is handled by a subsequent feat-remote-* subtask.
 
 Maps to `DESIGN.md`: §6 (container boundary / teardown), `remote-task-system.md`
 §"microVM = 1 Colima" (lines 163–206).
+
+#### Repo seeding (`scripts/remote/seed-repo.sh`)
+
+Two-channel seeding (remote-task-system.md lines 15–20) that reproduces the
+developer's working tree at `/work` on the remote machine:
+
+1. **Committed bulk** — runs `git clone --filter=blob:none <origin_url> /work`
+   via `flyctl machine exec` on the started machine. Full history is required
+   for git worktrees (`--depth` shallow clone is disqualified — see
+   `remote-task-system.md` "Worktree constraint on the clone"). The partial
+   clone (`--filter=blob:none`) keeps the initial transfer fast over the
+   reliable cloud connection; blobs are backfilled lazily on demand.
+   After cloning, the same branch/commit the developer is on is checked out.
+
+2. **Uncommitted/untracked delta** — `git status --porcelain` on the local
+   repo computes modified + untracked files (minus ignored). That set is
+   packed into a tar archive and piped to `flyctl machine exec tar -C /work -xzf -`
+   on the remote. Only those files cross the slow laptop uplink.
+
+The script is **sourced** (not exec'd) by the launcher — the same pattern as
+`provision.sh` — so `seed_repo()` runs in the launcher's process after
+`provision_machine()` exports `$PILA_MACHINE_ID`.
+
+Environment variables consumed by `seed-repo.sh`:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PILA_MACHINE_ID` | — | ID of the started Fly Machine (exported by `provision.sh`) |
+| `PILA_FLY_APP` | `pila` | Fly.io app name |
+| `USER_REPO` | — | Absolute path to the local git repo (set by launcher) |
+| `PILA_GIT_REMOTE` | `origin` | Git remote to clone from |
+
+Requires: `flyctl` on `PATH` (authenticated); `git`; `tar`.
 
 ---
 
