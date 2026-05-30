@@ -194,10 +194,10 @@ pila "task" --clarify
 # set to "codebase", "research", or "both".
 pila "task" --answers answers.json
 
-# Override caps (defaults: 60 total workers, 4 in parallel per wave).
+# Override caps (defaults: 60 total workers, 2 in parallel per wave).
 # --max-workers also reads PILA_MAX_WORKERS or max_workers in
 # pila.toml; --max-parallel is CLI-only.
-pila "task" --max-workers 80 --max-parallel 6
+pila "task" --max-workers 80 --max-parallel 4
 export PILA_MAX_WORKERS=80
 
 # Dial how persistent the planner and implementer are at building
@@ -256,7 +256,8 @@ Complete reference for every CLI flag, environment variable, and
 | `--answers FILE` | — | JSON object of pre-supplied clarification answers (keyed by question `id`; may include `source_of_truth`). |
 | `--clarify` | off | Opt into surfacing intent questions to the user. Default: questions are dropped after the classifier's codebase→research filter, and the implementer makes a documented best-effort decision. Also `PILA_CLARIFY` env var or `clarify = true` in `pila.toml`. |
 | `--max-workers N` | `60` | Cap on total `claude -p` invocations across the run. Also `PILA_MAX_WORKERS` env var or `max_workers` in `pila.toml`. |
-| `--max-parallel N` | `4` | Cap on concurrent workers within a wave. |
+| `--max-parallel N` | `2` | Cap on concurrent workers within a wave. Lowered from 4 in May 2026 because subprocess fan-out inside each worker (vitest pools, webpack workers, etc.) is unbounded; raise this on machines with ≥16 GiB RAM. |
+| `--worker-memory-max SIZE` | auto | Per-worker cgroup memory cap (e.g. `4G`, `512M`). Bounds RAM the worker subtree may consume; OOMs stay inside the worker cgroup rather than cascading to sshd / orchestrator. Auto-derived from `/proc/meminfo` when unset (VM RAM / `max_parallel+1`, capped at 4 GiB). Also `PILA_WORKER_MEMORY_MAX` or `worker_memory_max` in `pila.toml`. |
 | `--confidence-rounds N` | `8` | Evidence-gate rounds the planner and implementer may run before exiting blocked (DESIGN §8). Overrides `PILA_CONFIDENCE_ROUNDS` and `pila.toml`. |
 | `--skip-smoke` | off | Skip the live `claude -p` preflight smoke test. |
 | `--source-of-truth VALUE` | `both` | `codebase` / `research` / `both`. Overrides `PILA_SOURCE_OF_TRUTH` and `pila.toml`. |

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`max_parallel` default lowered from 4 to 2.** Subprocess fan-out
+  *inside* each `claude -p` worker is unbounded — the Bash tool,
+  the Task background-job pattern, and toolchain children like
+  vitest pools / webpack workers / `tsc` are all uncapped from
+  pila's view. The orchestrator-side knob that bounds total
+  in-flight memory load is the worker count itself. At
+  `max_parallel=4`, a typical Next.js repo can run 3+ concurrent
+  Node toolchain processes (each 1-2 GiB RSS) before pila even
+  notices — exactly the load profile that OOM'd the
+  finalmemoriam run. Lowering to 2 keeps the worst-case peak
+  within reach of a 16 GiB VM. Users with larger VMs or lighter
+  toolchains can opt up via `--max-parallel`. Pairs with the
+  cgroup containment shipped in the same release.
+
 ### Added
 
 - **Per-worker cgroup v2 memory containment.** Each `claude -p`

@@ -115,7 +115,7 @@ appear at `.pila/subtasks/<id>.json`.
 For each wave Pila creates a per-subtask git worktree off the run
 branch (`pila/runs/<run-id>`), then spawns an implementer worker in
 each worktree. Workers run concurrently, capped by `--max-parallel`
-(default 4).
+(default 2).
 
 On stdout you'll see lines like (with a hypothetical `<run-id>` of
 `feat-add-dry-run-flag-a3f7c2`):
@@ -247,7 +247,11 @@ schema is documented in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) §8.
   a subtask failure, but earlier subtasks would have hit it first and
   aborted the run.
 - `--max-parallel N` — cap concurrent implementers per wave. Default:
-  `4` (`DEFAULT_CAPS["max_parallel"]`).
+  `2` (`DEFAULT_CAPS["max_parallel"]`). Lowered from 4 in May 2026
+  because subprocess fan-out inside each worker (vitest pools, webpack
+  workers, etc.) is unbounded; the only orchestrator-side knob that
+  keeps total in-flight toolchain memory in check is the worker count.
+  Raise this on machines with more RAM (16 GiB+ recommended for `N=4`).
 - `--clarify` — opt into surfacing intent questions to the user
   (default: off). Without it the classifier's filter still runs but
   surviving questions are dropped, and the implementer makes a
