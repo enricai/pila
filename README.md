@@ -392,6 +392,7 @@ live `claude` binary would be needed; out of scope for the current suite).
 | `scripts/remote/build-push.sh` | Build and push a self-contained pila image to Fly.io's registry (source baked in at `/work/.pila-image/`). See `docs/IMPLEMENTATION.md` §0.5 *Registry publish path*. |
 | `scripts/remote/provision.sh` | Fly Machine lifecycle helper (sourced by the launcher's `REMOTE=true` branch). Provides `provision_machine()` (create → wait-started → register destroy trap) and `destroy_machine()`. See `docs/IMPLEMENTATION.md` §7 *Machine lifecycle*. |
 | `scripts/remote/seed-auth.sh` | Worker auth + config seeding (sourced by the launcher after `provision_machine()` returns). Provides `seed_auth()`, which delivers `~/.claude.json` + `~/.claude/` + git identity to the remote machine via `flyctl machine exec` tar-pipe and git config calls. See `docs/IMPLEMENTATION.md` §7 *Worker auth + config seeding*. |
+| `scripts/remote/seed-repo.sh` | Two-channel repo seeding helper (sourced by the launcher after `provision_machine()` succeeds). Provides `seed_repo()`: full-history partial clone via `git clone --filter=blob:none`, then rsync of the local dirty set via `flyctl machine exec tar`. See `docs/IMPLEMENTATION.md` §7 *Repo seeding*. |
 | `pila` | Executable entry-point wrapper |
 | `commands/pila.md` | Thin plugin skill — reachable as `/pila` from Claude Code |
 | `docs/DESIGN.md` | Full design document and rationale |
