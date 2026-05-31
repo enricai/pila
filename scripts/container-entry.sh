@@ -14,6 +14,7 @@ set -e
 # or vitest can be OOM-killed inside Colima and otherwise leave
 # multi-GB core files behind in each per-subtask worktree. Setting
 # RLIMIT_CORE=0 at PID 1 is inherited by every worker subprocess.
+# shellcheck disable=SC3045  # ulimit -c is non-POSIX but supported by dash (Debian's /bin/sh) and bash
 ulimit -c 0
 cd /work
 exec python3 /work/.pila-image/orchestrator/pila.py "$@"
