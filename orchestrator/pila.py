@@ -8217,6 +8217,39 @@ def _shared_files_in_scc(
     return sorted(f for f, owners in file_owners.items() if len(owners) >= 2)
 
 
+def _original_tag_for_rename_edge(edge: dict, output: dict) -> str:
+    """Given a cycle-edge dict (from `_attribute_cycle_edges`) and the
+    reconciler's output, return the ORIGINAL pre-rename tag if the
+    edge was created by a rename in the output, else the post-rename
+    tag (which equals the edge's source-label tag).
+
+    Used by the cycle-retry recommendation + must-include builders so
+    `dropped_requires` ops target the tag that ACTUALLY exists on the
+    consumer's requires entry after the retry's revert. The retry
+    deep-copies the pre-mutation plans back into `plans` before
+    applying attempt 2's output — meaning the consumer's requires
+    entry holds the ORIGINAL pre-rename tag at apply time. A drop
+    targeting the post-rename tag silently no-ops (no matching entry
+    to remove), leaving the cycle in place and confusing the model.
+
+    Returns the empty string if the edge has no `requires:<tag>`
+    source label (e.g. depends_on edges).
+    """
+    src_label = edge.get("source", "")
+    if not src_label.startswith("requires:"):
+        return ""
+    post_rename_tag = src_label.split(":", 1)[1]
+    consumer_sid = edge["to"]
+    for r in output.get("renames", []):
+        if r["sid"] == consumer_sid and r["to"] == post_rename_tag:
+            return r["from"]
+    # Edge wasn't created by a rename in this output (could be
+    # planner-declared or from an added_subtask). The post-rename
+    # tag IS the current tag in the consumer's requires — safe to
+    # drop.
+    return post_rename_tag
+
+
 def _recommend_cycle_resolution(
     scc: list[str],
     succ: dict[str, set[str]],
@@ -8285,7 +8318,12 @@ def _recommend_cycle_resolution(
                 if e["mutation"].startswith("rename:"):
                     src_label = e["source"]
                     if src_label.startswith("requires:"):
-                        tag = src_label.split(":", 1)[1]
+                        # Use the ORIGINAL pre-rename tag so the drop
+                        # matches the consumer's requires entry after
+                        # the retry's revert (which restores the pre-
+                        # mutation state). A post-rename tag would
+                        # silently no-op.
+                        tag = _original_tag_for_rename_edge(e, output)
                         return {
                             "op": "dropped_requires",
                             "sid": e["to"],
@@ -8295,8 +8333,8 @@ def _recommend_cycle_resolution(
                                 "is planner-declared via depends_on; the "
                                 f"reverse rename on {e['to']} is the "
                                 "drift that closed the cycle. Drop the "
-                                "rename's requirement so the planner-"
-                                "declared ordering wins."
+                                "rename's original requirement so the "
+                                "planner-declared ordering wins."
                             ),
                             "rationale": "case-1: planner-edge keeper",
                         }
@@ -8340,15 +8378,18 @@ def _recommend_cycle_resolution(
         src_label = e["source"]
         if not src_label.startswith("requires:"):
             continue
-        tag = src_label.split(":", 1)[1]
+        post_rename_tag = src_label.split(":", 1)[1]
         for r in output.get("renames", []):
-            if r["sid"] == e["to"] and r["to"] == tag:
+            if r["sid"] == e["to"] and r["to"] == post_rename_tag:
                 original = r["from"]
                 if not pre_providers.get(original):
+                    # Drop the ORIGINAL tag — the consumer's requires
+                    # entry holds it (not the post-rename tag) at retry
+                    # apply time, after the retry's revert.
                     return {
                         "op": "dropped_requires",
                         "sid": e["to"],
-                        "tag": tag,
+                        "tag": original,
                         "reason": (
                             f"Rename of {e['to']}'s '{original}' was "
                             "speculative — no planner-declared producer "
@@ -8373,16 +8414,18 @@ def _recommend_cycle_resolution(
         rename_edges.sort(
             key=lambda e: (e["to"], e["source"]), reverse=True)
         e = rename_edges[0]
-        tag = e["source"].split(":", 1)[1]
+        # Drop the ORIGINAL pre-rename tag (matches the consumer's
+        # requires entry after the retry's revert).
+        tag = _original_tag_for_rename_edge(e, output)
         return {
             "op": "dropped_requires",
             "sid": e["to"],
             "tag": tag,
             "reason": (
                 "No structural signal preferred a specific resolution; "
-                "dropping the lexicographically later rename as a "
-                "deterministic tiebreaker. Override with a different "
-                "operation if you have a structural reason to."
+                "dropping the lexicographically later rename's original "
+                "requirement as a deterministic tiebreaker. Override with "
+                "a different operation if you have a structural reason to."
             ),
             "rationale": "case-4: lexicographic tiebreaker",
         }
@@ -8428,20 +8471,29 @@ def _format_recommendation(rec: dict) -> str:
     return f"<unknown op: {op}>"
 
 
-def _format_must_include(scc: list[str], edges: list[dict]) -> list[str]:
+def _format_must_include(
+    scc: list[str], edges: list[dict], output: dict,
+) -> list[str]:
     """For one SCC, list the bounded set of legal cycle-breaking
     operations the retry's apply step will accept. The retry prompt
     surfaces this set so the model knows the legal answer space. The
     apply step's must-include validation rejects outputs that pick
     none of them.
+
+    `output` is the failing attempt-1 reconciler output — used to
+    look up each rename's ORIGINAL pre-rename tag so the rendered
+    `dropped_requires` options target the tag the consumer's requires
+    entry actually holds at retry apply time (after the revert
+    restores the pre-mutation state).
     """
     options: list[str] = []
     # Each rename in the SCC can be dropped. Edge `src -> dst` carries
-    # the rename on the consumer (dst), so the drop targets dst's sid.
+    # the rename on the consumer (dst), so the drop targets dst's sid
+    # and the ORIGINAL pre-rename tag.
     for e in edges:
         if (e["mutation"].startswith("rename:")
                 and e["source"].startswith("requires:")):
-            tag = e["source"].split(":", 1)[1]
+            tag = _original_tag_for_rename_edge(e, output)
             options.append(
                 f"dropped_requires(sid={e['to']!r}, tag={tag!r}, ...)")
     # For 2-node SCCs, dependency_edges in either direction and
@@ -8535,7 +8587,7 @@ def _build_cycle_retry_prompt(
         parts.append(f"    Why: {rec.get('reason', '')}")
         parts.append("\n  Your output for this cycle MUST include at "
                      "least one of:")
-        for opt in _format_must_include(scc, edges):
+        for opt in _format_must_include(scc, edges, output):
             marker = ("    ← recommended"
                       if _matches_recommendation(opt, rec) else "")
             parts.append(f"    - {opt}{marker}")

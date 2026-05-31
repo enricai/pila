@@ -617,7 +617,14 @@ def test_recommendation_correct_on_run2_cycle(pila):
 
 def test_recommendation_correct_on_run1_cycle(pila):
     """Run 1's cycle has planner-declared feat-009 -> feat-008; case 1
-    fires; drop the rename closing the reverse direction."""
+    fires; drop the rename closing the reverse direction.
+
+    Pass-14 fix: the recommendation targets the ORIGINAL pre-rename
+    tag (`data-access-ready`), not the post-rename tag
+    (`prisma-data-access-ready`). The cycle-retry reverts to pre-
+    mutation plans before applying attempt 2, so the consumer's
+    requires entry holds the original tag at apply time — a drop
+    targeting the post-rename tag would silently no-op."""
     plans = _run1_post_reconcile_plans()
     output = _run1_reconciler_output()
     by_id = {s["id"]: s for plan in plans for s in plan["subtasks"]}
@@ -628,7 +635,11 @@ def test_recommendation_correct_on_run1_cycle(pila):
         pre_providers={"prisma-data-access-ready": ["feat-009"]})
     assert rec["op"] == "dropped_requires"
     assert rec["sid"] == "feat-008"
-    assert rec["tag"] == "prisma-data-access-ready"
+    # Original pre-rename tag, not the post-rename `prisma-data-access-ready`.
+    assert rec["tag"] == "data-access-ready", (
+        f"recommendation should drop the ORIGINAL pre-rename tag so it "
+        f"matches the consumer's requires after the retry's revert; "
+        f"got {rec['tag']!r}")
     assert rec["rationale"] == "case-1: planner-edge keeper"
 
 
@@ -1020,9 +1031,14 @@ def test_recommendation_case4_lexicographic_tiebreaker(pila):
     #   subtask-b -> subtask-a  [requires:b-canonical; rename on subtask-a]
     # The consumer side (e["to"]) gets the drop. DESC order: subtask-b
     # comes before subtask-a, so the dropped requires entry lives on
-    # subtask-b and targets tag `a-canonical`.
+    # subtask-b. Pass-14 fix: the tag is the ORIGINAL pre-rename tag
+    # (subtask-b's rename was `a-synonym → a-canonical`, so the drop
+    # targets `a-synonym`) — matches the consumer's requires after the
+    # retry's revert.
     assert rec["sid"] == "subtask-b"
-    assert rec["tag"] == "a-canonical"
+    assert rec["tag"] == "a-synonym", (
+        f"recommendation should drop the original pre-rename tag "
+        f"`a-synonym`, not the post-rename `a-canonical`; got {rec['tag']!r}")
 
 
 # ===========================================================================
@@ -1785,3 +1801,114 @@ def test_cycle_retry_loop_integration_with_stubbed_reconciler(
     assert "app-server-framework-present" not in config_005_tags, (
         f"config-005's `app-server-framework-present` requires should have "
         f"been dropped by the cycle-retry; remaining tags: {config_005_tags}")
+
+
+# ===========================================================================
+# Test 52 — failure-path integration test for the cycle-resolution retry loop
+#
+# Pass 13 explicitly deferred this as a "hypothetical pass 14 if requested."
+# Pass 14 closes the gap. Symmetric to pass-13's
+# test_unresolved_retry_dies_after_attempt_2 but for the cycle-retry path:
+# fake claude_p returns attempt-1's cycle-closing renames + an attempt-2
+# output that fails the must-include validator (drops on a non-SCC sid).
+# Asserts SystemExit + 2 calls + non-zero exit code.
+# ===========================================================================
+
+def test_cycle_retry_dies_after_attempt_2(
+    pila, monkeypatch, tmp_path
+):
+    """The model returns cycle-closing renames on attempt 1, then on
+    attempt 2 returns an output that doesn't address the named cycle
+    (e.g., a dropped_requires on a subtask NOT in the SCC). Pila's
+    must-include validator must fire on attempt 2 and `die()` cleanly.
+
+    Without this test, a regression in the validator's die wiring for
+    cycles (e.g., the `if unaddressed:` branch silently passes when the
+    set is non-empty) would only surface in live runs.
+    """
+    plans = [
+        {"domain": "feature-implementation", "status": "ready",
+         "subtasks": [{
+             "id": "feat-001",
+             "title": "Node HTTP backend entrypoint",
+             "intent": "Long-lived Node process",
+             "provides": ["backend-http-server"],
+             "requires": [
+                 {"tag": "node-server-runtime-libs-present",
+                  "extent": "in_plan"}],
+             "depends_on": [],
+             "files_likely_touched": ["server/index.ts"],
+             "success_criteria_seed": "server starts",
+             "size": "small"}]},
+        {"domain": "configuration-build", "status": "ready",
+         "subtasks": [{
+             "id": "config-005",
+             "title": "Update package.json scripts and deps",
+             "intent": "Pin AWS runtime deps",
+             "provides": ["app-runtime-deps", "app-build-scripts"],
+             "requires": [
+                 {"tag": "app-server-framework-present",
+                  "extent": "in_plan"}],
+             "depends_on": [],
+             "files_likely_touched": ["package.json"],
+             "success_criteria_seed": "package.json exposes build, start",
+             "size": "small"}]},
+    ]
+
+    # Attempt 1: same cycle-closing renames as the happy-path test.
+    attempt_1_output = {
+        "renames": [
+            {"sid": "feat-001",
+             "from": "node-server-runtime-libs-present",
+             "to": "app-runtime-deps"},
+            {"sid": "config-005",
+             "from": "app-server-framework-present",
+             "to": "backend-http-server"},
+        ],
+        "added_provides": [], "added_subtasks": [],
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+    # Attempt 2: model "fixes" the cycle by dropping a requires on a
+    # subtask NOT in the SCC. This DOES address some requires but
+    # doesn't address the cycle pila named. The must-include validator
+    # must reject and die.
+    attempt_2_output = {
+        "renames": [], "added_provides": [], "added_subtasks": [],
+        # Drop targets a tag on a NON-SCC sid (feat-001 and config-005
+        # are the SCC; this drop targets feat-001 — but a tag the
+        # consumer doesn't have, AND the must-include validator only
+        # accepts drops on the consumer of a cycle-edge rename, not
+        # arbitrary drops). Actually the must-include accepts a drop on
+        # any SCC member's tag. Need a fixture that truly fails the
+        # validator: emit something the must-include set rejects.
+        # Easier: emit nothing addressing the cycle.
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+
+    calls: list[dict] = []
+
+    async def fake_claude_p(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return attempt_1_output
+        return attempt_2_output
+
+    monkeypatch.setattr(pila, "claude_p", fake_claude_p)
+    st = _minimal_state_for_retry(pila, tmp_path)
+    caps = dict(pila.DEFAULT_CAPS)
+    models = {"reconciler": "opus"}
+    efforts = {"reconciler": "high"}
+
+    with pytest.raises(SystemExit) as exc_info:
+        asyncio.run(pila.phase_reconcile(
+            plans, "migrate to AWS", st, caps, models, efforts))
+
+    # 2 claude_p calls happened (retry fired before die).
+    assert len(calls) == 2, (
+        f"expected 2 claude_p calls (initial + cycle retry); got "
+        f"{len(calls)} — retry didn't fire OR died before attempt 2")
+
+    # die() exit code is non-zero.
+    assert exc_info.value.code != 0, "die() should exit non-zero"
