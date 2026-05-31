@@ -29,8 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `unresolvable` per unresolved entry; a post-retry cycle gate
   re-runs to catch reintroduced cycles. Verified in plan-mode against
   the captured failure: the Jaccard heuristic produces the correct
-  recommendation (`rename(deps-008, 'cdk-stacks-authored' →
-  'infra-stacks-authored')`) with no model judgment required.
+  recommendation (`rename(sid='deps-008',
+  from='cdk-stacks-authored', to='infra-stacks-authored')`)
+  with no model judgment required.
   Historical scan across 3 runs surfaced two real defects that the
   design now addresses: a self-loop trap (the heuristic would
   recommend renames TO tags the consumer itself provides), and
