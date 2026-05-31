@@ -8790,7 +8790,7 @@ def _build_unresolved_retry_prompt(
             top = scored[0][1]
             parts.append(
                 f"    - renames: rewrite this entry to a real producer "
-                f"(e.g. rename({sid}, '{tag}' → '{top}'))")
+                f"(e.g. rename(sid={sid!r}, from={tag!r}, to={top!r}))")
         parts.append(
             f"    - added_provides: declare an existing subtask "
             f"actually produces '{tag}' (add it to that subtask's "

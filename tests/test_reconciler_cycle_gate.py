@@ -1334,3 +1334,14 @@ def test_build_unresolved_retry_prompt_contains_required_sections(pila):
     # Recommendation rendered as a rename literal.
     assert "rename(sid='deps-008'" in prompt
     assert "to='infra-stacks-authored'" in prompt
+    # The must-include `renames:` example uses explicit-keyword syntax
+    # matching the actual reconciler schema ({sid, from, to}) — not the
+    # informal arrow form. Fix 8C: a literal-minded model emitting the
+    # arrow form would produce malformed JSON (e.g.
+    # `{"from": "cdk-stacks-authored → infra-stacks-authored", "to": ""}`).
+    assert "'cdk-stacks-authored' → 'infra-stacks-authored'" not in prompt, (
+        "must-include renames example must use explicit-keyword syntax "
+        "(rename(sid='X', from='Y', to='Z')), not the informal arrow "
+        "form — the arrow could mislead a literal-minded model")
+    # And the explicit-keyword form IS present as the example.
+    assert "rename(sid='deps-008', from='cdk-stacks-authored', " in prompt

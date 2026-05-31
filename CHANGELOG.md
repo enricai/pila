@@ -79,23 +79,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drift in what counts as an edge. Reconciler payload now includes
   `depends_on` and `files_likely_touched` per subtask (the model
   needs them to reason about ordering and merge candidates).
-  37 test cases (33 functions, one parametrized across 5
-  successful-run shapes) in `tests/test_reconciler_cycle_gate.py` cover
-  both captured runs verbatim, 3- and 4-node synthetic cycles,
-  connector cycles, all three apply-step ops with edge cases
-  (extent-preservation, chain merges, override fields, self-loop
-  fail-loud), recommendation correctness on all four heuristic
-  cases (planner-edge keeper, shared-files merge, speculative-
-  rename drop, lexicographic tiebreaker), direct unit tests for
-  the two render functions (`_format_recommendation`,
-  `_matches_recommendation`), must-include validation including
-  a negative case (op on a non-SCC sid does not credit the
-  cycle), post-retry cycle detection, mutation reversion
-  cleanness, and 5 regression fixtures from successful
-  historical runs (false-positive guard — the gate is silent on
-  every known-acyclic plan in the cross-repo canvass: centella
-  feat-rebrand, barnacle telemetry, navegando bugfix, pila
-  feat-please-read, finalmemoriam bugfix).
+  A comprehensive test corpus in
+  `tests/test_reconciler_cycle_gate.py` covers both captured runs
+  verbatim, 3- and 4-node synthetic cycles, connector cycles, all
+  three apply-step ops with edge cases (extent-preservation, chain
+  merges, override fields, self-loop fail-loud), recommendation
+  correctness on all four heuristic cases (planner-edge keeper,
+  shared-files merge, speculative-rename drop, lexicographic
+  tiebreaker), direct unit tests for the two render functions
+  (`_format_recommendation`, `_matches_recommendation`),
+  must-include validation including a negative case (op on a
+  non-SCC sid does not credit the cycle), post-retry cycle
+  detection, mutation reversion cleanness, and 5 regression
+  fixtures from successful historical runs (false-positive guard
+  — the gate is silent on every known-acyclic plan in the
+  cross-repo canvass: centella feat-rebrand, barnacle telemetry,
+  navegando bugfix, pila feat-please-read, finalmemoriam bugfix).
 
 ### Changed
 

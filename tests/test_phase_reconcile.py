@@ -252,18 +252,34 @@ def test_phase_reconcile_dies_on_unresolvable(pila):
 
 
 def test_phase_reconcile_second_pass_check_present(pila):
-    """After applying the reconciler's output, phase_reconcile re-runs
-    `_compute_unresolved_requires` to catch the case where an
-    `added_subtask` itself has unresolved `requires`. Pin so a future
-    refactor can't silently regress to the single-pass behavior."""
+    """phase_reconcile calls `_compute_unresolved_requires` at three
+    distinct sites, each gating a different state. Pin so a future
+    refactor can't silently regress any of them:
+
+    1. **Initial check** (before spawning the reconciler): if the
+       merged planner output already has every `requires` satisfied,
+       short-circuit — no worker call needed.
+    2. **Post-attempt-1 check** (after applying reconciler output):
+       if anything is still unresolved (e.g. an `added_subtask`
+       itself has unresolved `requires`, or the model invented a
+       new tag without renaming the original consumer's tag to
+       match), trigger the unresolved-retry loop instead of dying
+       immediately.
+    3. **Post-retry final check** (after the retry's apply step):
+       catches the edge case where attempt-2's `added_subtasks`
+       introduce a NEW unresolved requires entry not in the
+       original `still_unresolved` set. If non-empty, die with the
+       full report — retry budget exhausted.
+
+    The assertion uses `>= 3` rather than `== 3` so a future
+    refactor can ADD another check without tripping the pin.
+    """
     src = inspect.getsource(pila.phase_reconcile)
-    # The function should call _compute_unresolved_requires twice:
-    # once at the start (to short-circuit) and once after applying.
     count = src.count("_compute_unresolved_requires(plans)")
-    assert count >= 2, (
-        f"phase_reconcile should call _compute_unresolved_requires twice "
-        f"(initial check + second-pass after applying reconciler output), "
-        f"found {count}"
+    assert count >= 3, (
+        f"phase_reconcile should call _compute_unresolved_requires at "
+        f"three sites (initial short-circuit, post-attempt-1 gate, "
+        f"post-retry final check), found {count}"
     )
 
 
