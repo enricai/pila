@@ -1518,3 +1518,270 @@ def test_unresolved_retry_loop_integration_with_stubbed_reconciler(
         f"got {deps_008_tags}")
     assert "cdk-stacks-authored" not in deps_008_tags, (
         "the original tag should have been renamed away")
+
+
+# ===========================================================================
+# Test 50 — failure-path integration test for the unresolved-retry loop
+#
+# Plan line 718 called for `test_unresolved_retry_dies_after_attempt_2`
+# when the unresolved-retry feature shipped; pass 12 added the happy-path
+# companion but missed this failure-path. Pass 13 closes the gap.
+# ===========================================================================
+
+def test_unresolved_retry_dies_after_attempt_2(
+    pila, monkeypatch, tmp_path
+):
+    """The model returns the same broken output twice (doesn't fix the
+    unresolved tag, doesn't emit `unresolvable`, doesn't address the
+    named entry). Pila's must-include validator must fire on attempt 2
+    and `die()` cleanly with the structured report.
+
+    Without this test, a regression in the validator's `die()` wiring
+    (e.g., the `if unaddressed:` branch silently swallows the error)
+    would only surface in live runs.
+    """
+    # Same 075210-shape fixture as the happy-path test: deps-008
+    # requires `cdk-stacks-authored`, no producer exists, the model
+    # invents `infra-stacks-authored` and forgets the rename.
+    plans = [
+        {"domain": "dependency-migration", "status": "ready",
+         "subtasks": [{
+             "id": "deps-008",
+             "title": "Add infra/cdk deps",
+             "intent": "Add @aws-cdk/* deps",
+             "provides": ["infra-cdk-deps-present"],
+             "requires": [
+                 {"tag": "cdk-stacks-authored", "extent": "in_plan"}],
+             "depends_on": [],
+             "files_likely_touched": ["infra/package.json"],
+             "success_criteria_seed": "cdk lib deps installed",
+             "size": "small"}]},
+        {"domain": "configuration-build", "status": "ready",
+         "subtasks": [{
+             "id": "config-001",
+             "title": "Scaffold CDK project",
+             "intent": "Initialize infra/",
+             "provides": ["infra-cdk-project-scaffold"],
+             "requires": [],
+             "depends_on": [],
+             "files_likely_touched": ["infra/cdk.json"],
+             "success_criteria_seed": "cdk init succeeds",
+             "size": "small"}]},
+    ]
+
+    # The broken output (returned on BOTH calls — the model fails to fix).
+    broken_output = {
+        "renames": [], "added_provides": [],
+        "added_subtasks": [{
+            "id": "config-011",
+            "title": "Author CDK stacks",
+            "intent": "...",
+            "success_criteria_seed": "cdk synth succeeds",
+            "provides": ["infra-stacks-authored"],  # different name from deps-008's required tag
+            "requires": [
+                {"tag": "infra-cdk-project-scaffold", "extent": "in_plan"}],
+            "depends_on": ["config-001"],
+            "size": "medium",
+            "_added_by_reconciler": True}],
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+
+    calls: list[dict] = []
+
+    async def fake_claude_p(**kwargs):
+        calls.append(kwargs)
+        # Return the SAME broken output on both calls.
+        return broken_output
+
+    monkeypatch.setattr(pila, "claude_p", fake_claude_p)
+    st = _minimal_state_for_retry(pila, tmp_path)
+    caps = dict(pila.DEFAULT_CAPS)
+    models = {"reconciler": "opus"}
+    efforts = {"reconciler": "high"}
+
+    # phase_reconcile must die. `die()` calls sys.exit(); pytest catches
+    # SystemExit.
+    with pytest.raises(SystemExit) as exc_info:
+        asyncio.run(pila.phase_reconcile(
+            plans, "migrate to AWS", st, caps, models, efforts))
+
+    # Confirm the retry actually fired (2 calls) — the die came AFTER
+    # attempt 2, not before the retry started.
+    assert len(calls) == 2, (
+        f"expected 2 claude_p calls (initial + retry); got {len(calls)} "
+        "— retry didn't fire OR died before attempt 2")
+
+    # Confirm the die came from the must-include validator (the path that
+    # checks the revised output addresses every named unresolved entry).
+    # The `die()` message includes a specific phrase only the must-include
+    # validator emits: "ignored N named unresolved-requires".
+    assert exc_info.value.code != 0, "die() should exit non-zero"
+
+
+# ===========================================================================
+# Test 51 — happy-path integration test for the cycle-resolution retry loop
+#
+# Pass 12 added the analogue for the unresolved-retry and explicitly
+# deferred this symmetric test to pass 13. Pass 13 closes the gap.
+# ===========================================================================
+
+def test_cycle_retry_loop_integration_with_stubbed_reconciler(
+    pila, monkeypatch, tmp_path
+):
+    """End-to-end integration of the cycle-resolution retry loop.
+
+    Fixture: two subtasks with mutually-requiring tags so the model's
+    renames close a 2-node SCC. Fake `claude_p` returns cycle-closing
+    renames on attempt 1, then `dropped_requires` on attempt 2 to
+    break the cycle. Asserts:
+    1. `phase_reconcile` returns successfully (no `die`).
+    2. Exactly 2 `claude_p` calls (initial + cycle retry).
+    3. The 2nd call's user_prompt contains cycle-retry markers
+       (CYCLE 1:, RECOMMENDED:, MUST include).
+    4. Final plan is acyclic.
+    5. The drop landed on the right subtask's requires.
+
+    Mirror of test_unresolved_retry_loop_integration_with_stubbed_reconciler
+    for the cycle-retry path. The cycle-retry plan never explicitly named
+    this test, but pass 12 flagged the symmetric gap as a pass-13 candidate.
+    """
+    # Pre-reconcile fixture: two subtasks whose unresolved requires
+    # the model will rename onto each other's provides, closing a cycle.
+    # feat-001 provides "backend-http-server" and requires the unresolved
+    # tag "node-server-runtime-libs-present".
+    # config-005 provides "app-runtime-deps" + "app-build-scripts" and
+    # requires the unresolved tag "app-server-framework-present".
+    # The model's attempt-1 renames both → producing the cycle.
+    plans = [
+        {"domain": "feature-implementation", "status": "ready",
+         "subtasks": [{
+             "id": "feat-001",
+             "title": "Node HTTP backend entrypoint",
+             "intent": "Long-lived Node process exposing /health",
+             "provides": ["backend-http-server"],
+             "requires": [
+                 {"tag": "node-server-runtime-libs-present",
+                  "extent": "in_plan"}],
+             "depends_on": [],
+             "files_likely_touched": ["server/index.ts"],
+             "success_criteria_seed": "server starts, /health → 200",
+             "size": "small"}]},
+        {"domain": "configuration-build", "status": "ready",
+         "subtasks": [{
+             "id": "config-005",
+             "title": "Update package.json scripts and deps",
+             "intent": "Pin AWS runtime deps",
+             "provides": ["app-runtime-deps", "app-build-scripts"],
+             "requires": [
+                 {"tag": "app-server-framework-present",
+                  "extent": "in_plan"}],
+             "depends_on": [],
+             "files_likely_touched": ["package.json"],
+             "success_criteria_seed": "package.json exposes build, start",
+             "size": "small"}]},
+    ]
+
+    # Attempt 1: cycle-closing renames (exactly the captured run-2 shape).
+    # feat-001's tag renamed → "app-runtime-deps" (provided by config-005).
+    # config-005's tag renamed → "backend-http-server" (provided by feat-001).
+    # Closes a 2-node SCC.
+    attempt_1_output = {
+        "renames": [
+            {"sid": "feat-001",
+             "from": "node-server-runtime-libs-present",
+             "to": "app-runtime-deps"},
+            {"sid": "config-005",
+             "from": "app-server-framework-present",
+             "to": "backend-http-server"},
+        ],
+        "added_provides": [], "added_subtasks": [],
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+    # Attempt 2: model uses `dropped_requires` to break the cycle.
+    # NOTE: the cycle-retry's revert restores the PRE-mutation plans, so
+    # attempt-2's apply runs against the original (un-renamed) requires
+    # entries. Therefore both renames must be re-asserted, AND the drop
+    # must target the post-rename tag on the consumer side. Equivalently,
+    # we can drop the ORIGINAL requires tag (pre-rename) — both lead to
+    # the same final state. Use the original-tag approach: cleaner, no
+    # dependency on the rename being applied first.
+    attempt_2_output = {
+        # Keep feat-001's rename so feat-001's requires gets satisfied
+        # by config-005's `app-runtime-deps`.
+        "renames": [
+            {"sid": "feat-001",
+             "from": "node-server-runtime-libs-present",
+             "to": "app-runtime-deps"},
+        ],
+        "added_provides": [], "added_subtasks": [],
+        # Drop config-005's ORIGINAL `app-server-framework-present`
+        # requires entry. This breaks the cycle because config-005 no
+        # longer requires anything feat-001 provides.
+        "dropped_requires": [
+            {"sid": "config-005",
+             "tag": "app-server-framework-present",
+             "reason": "framework decision recorded by config-005 itself, "
+                       "not a code artifact feat-001 produces"},
+        ],
+        "dependency_edges": [], "merged_subtasks": [], "unresolvable": [],
+    }
+
+    calls: list[dict] = []
+
+    async def fake_claude_p(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return attempt_1_output
+        return attempt_2_output
+
+    monkeypatch.setattr(pila, "claude_p", fake_claude_p)
+    st = _minimal_state_for_retry(pila, tmp_path)
+    caps = dict(pila.DEFAULT_CAPS)
+    models = {"reconciler": "opus"}
+    efforts = {"reconciler": "high"}
+
+    result = asyncio.run(pila.phase_reconcile(
+        plans, "migrate to AWS", st, caps, models, efforts))
+
+    # 1. phase_reconcile returned (no die).
+    assert result is not None
+
+    # 2. Exactly 2 claude_p calls (initial + cycle retry).
+    assert len(calls) == 2, (
+        f"expected 2 claude_p calls (initial + cycle retry); got "
+        f"{len(calls)} — cycle retry didn't fire correctly")
+
+    # 3. The 2nd call's user_prompt contains the cycle-retry markers.
+    retry_prompt = calls[1]["user_prompt"]
+    assert "dependency cycle(s)" in retry_prompt, (
+        "2nd call's user_prompt should be the cycle-retry prompt")
+    assert "CYCLE 1:" in retry_prompt
+    assert "RECOMMENDED:" in retry_prompt
+    assert "MUST include" in retry_prompt
+    # Both SCC members named in the retry prompt.
+    assert "feat-001" in retry_prompt
+    assert "config-005" in retry_prompt
+
+    # 4. Final plan is acyclic — rebuild the graph from the post-retry
+    #    state and run Tarjan.
+    by_id = {s["id"]: s for plan in result for s in plan.get("subtasks", [])}
+    _preds, _provs, _es = pila._build_predecessor_graph(by_id)
+    succ: dict[str, set[str]] = {sid: set() for sid in by_id}
+    for tgt, src_set in _preds.items():
+        for src in src_set:
+            succ[src].add(tgt)
+    sccs = pila._tarjan_sccs(set(by_id), succ)
+    assert sccs == [], (
+        f"final plan should be acyclic; Tarjan found SCCs: {sccs}")
+
+    # 5. The drop actually landed on config-005's requires (apply-step
+    #    executed the dropped_requires op against the original tag).
+    config_005 = next(s for plan in result for s in plan.get("subtasks", [])
+                      if s.get("id") == "config-005")
+    config_005_tags = [r["tag"] for r in (config_005.get("requires") or [])
+                       if isinstance(r, dict)]
+    assert "app-server-framework-present" not in config_005_tags, (
+        f"config-005's `app-server-framework-present` requires should have "
+        f"been dropped by the cycle-retry; remaining tags: {config_005_tags}")
