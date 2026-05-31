@@ -15,6 +15,7 @@ against synthetic fixtures.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 
 import pytest
@@ -1345,3 +1346,175 @@ def test_build_unresolved_retry_prompt_contains_required_sections(pila):
         "form — the arrow could mislead a literal-minded model")
     # And the explicit-keyword form IS present as the example.
     assert "rename(sid='deps-008', from='cdk-stacks-authored', " in prompt
+
+
+# ===========================================================================
+# Test 49: end-to-end integration test of the unresolved-retry loop
+#
+# The plan for the unresolved-retry feature called for this test (and a
+# stubbed-claude_p replay verification) when it shipped; pass 12 of the
+# audit caught that it wasn't actually implemented. Adding it now so a
+# regression in the retry-loop wiring (e.g., refactor breaks attempt-2's
+# prompt construction, or the revert step doesn't fully restore the
+# snapshot) would be caught by pytest, not only by live PR-review runs.
+# ===========================================================================
+
+def _minimal_state_for_retry(pila, tmp_path):
+    """Stub State with just enough plumbing for phase_reconcile +
+    _spawn_reconciler to call bump_workers + st.save without crashing.
+
+    Duplicates the pattern in tests/test_phase_reconcile.py:_minimal_state
+    inline — keeping this test file independent of others (no cross-file
+    test imports). Acceptable to duplicate ~5 lines of setup pattern
+    rather than introduce a fixture coupling."""
+    pila_root = tmp_path / ".pila"
+    run_id = "test-unresolved-retry-aaa111"
+    (pila_root / "runs" / run_id).mkdir(parents=True)
+    st = pila.State(pila_root, run_id)
+    st.data = {"task": "test", "worker_count": 0}
+    st.save()
+    return st
+
+
+def test_unresolved_retry_loop_integration_with_stubbed_reconciler(
+    pila, monkeypatch, tmp_path
+):
+    """End-to-end integration of the unresolved-tags retry loop.
+
+    Fake `claude_p` returns the 075210-shape broken output on attempt 1
+    — the model invents `infra-stacks-authored` without renaming
+    deps-008's tag — and a fixture revising-output on attempt 2 that
+    adds the missing rename. Asserts:
+    1. `phase_reconcile` returns successfully (no `die`).
+    2. Exactly 2 `claude_p` calls were made (initial + 1 retry).
+    3. The merged plan has zero unresolved requires post-return.
+    4. The 2nd call's prompt contains the unresolved-retry retry-prompt
+       markers (so we know the retry path actually fired and the model
+       was given the structural feedback).
+    """
+    # Fixture: post-classifier plans matching the 075210 shape's
+    # relevant subset. deps-008 requires `cdk-stacks-authored`;
+    # nothing provides it; config-001 provides the cdk-project scaffold
+    # (so the connector the reconciler will invent has somewhere to
+    # depend on).
+    plans = [
+        {"domain": "dependency-migration", "status": "ready",
+         "subtasks": [{
+             "id": "deps-008",
+             "title": "Add infra/cdk deps",
+             "intent": "Add @aws-cdk/* deps to infra/package.json",
+             "provides": ["infra-cdk-deps-present"],
+             "requires": [
+                 {"tag": "cdk-stacks-authored", "extent": "in_plan"}],
+             "depends_on": [],
+             "files_likely_touched": ["infra/package.json"],
+             "success_criteria_seed": "cdk lib deps installed",
+             "size": "small"}]},
+        {"domain": "configuration-build", "status": "ready",
+         "subtasks": [{
+             "id": "config-001",
+             "title": "Scaffold CDK project",
+             "intent": "Initialize infra/ with cdk.json + tsconfig",
+             "provides": ["infra-cdk-project-scaffold"],
+             "requires": [],
+             "depends_on": [],
+             "files_likely_touched": ["infra/cdk.json"],
+             "success_criteria_seed": "cdk init succeeds",
+             "size": "small"}]},
+    ]
+
+    # Attempt 1: the model invents config-011 providing
+    # `infra-stacks-authored` but forgets to rename deps-008's
+    # `cdk-stacks-authored`. This matches the captured 075210 failure.
+    attempt_1_output = {
+        "renames": [], "added_provides": [],
+        "added_subtasks": [{
+            "id": "config-011",
+            "title": "Author CDK foundation + compute stacks",
+            "intent": "Implement infra/lib/*-stack.ts",
+            "success_criteria_seed": "cdk synth produces stack templates",
+            "provides": ["infra-stacks-authored"],
+            "requires": [
+                {"tag": "infra-cdk-project-scaffold", "extent": "in_plan"}],
+            "depends_on": ["config-001"],
+            "size": "medium",
+            "_added_by_reconciler": True}],
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+    # Attempt 2: revised output adds the missing rename on deps-008.
+    # The connector definition is preserved; deps-008's tag now matches.
+    attempt_2_output = {
+        "renames": [{"sid": "deps-008",
+                     "from": "cdk-stacks-authored",
+                     "to": "infra-stacks-authored"}],
+        "added_provides": [],
+        "added_subtasks": [{
+            "id": "config-011",
+            "title": "Author CDK foundation + compute stacks",
+            "intent": "Implement infra/lib/*-stack.ts",
+            "success_criteria_seed": "cdk synth produces stack templates",
+            "provides": ["infra-stacks-authored"],
+            "requires": [
+                {"tag": "infra-cdk-project-scaffold", "extent": "in_plan"}],
+            "depends_on": ["config-001"],
+            "size": "medium",
+            "_added_by_reconciler": True}],
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+
+    calls: list[dict] = []
+
+    async def fake_claude_p(**kwargs):
+        # Capture the kwargs (user_prompt is what the retry test cares
+        # about — confirms the unresolved-retry prompt actually got built
+        # and sent on the second call).
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return attempt_1_output
+        return attempt_2_output
+
+    monkeypatch.setattr(pila, "claude_p", fake_claude_p)
+
+    st = _minimal_state_for_retry(pila, tmp_path)
+    # Caps need the keys phase_reconcile + bump_workers touch.
+    caps = dict(pila.DEFAULT_CAPS)
+    models = {"reconciler": "opus"}
+    efforts = {"reconciler": "high"}
+
+    result = asyncio.run(pila.phase_reconcile(
+        plans, "migrate to AWS", st, caps, models, efforts))
+
+    # 1. phase_reconcile returned (didn't die).
+    assert result is not None
+
+    # 2. Exactly 2 claude_p calls (initial + 1 retry).
+    assert len(calls) == 2, (
+        f"expected 2 claude_p calls (initial + unresolved-retry); "
+        f"got {len(calls)} — retry path didn't fire correctly")
+
+    # 3. The 2nd call's user_prompt contains the unresolved-retry markers,
+    #    confirming the retry-prompt-builder was invoked.
+    retry_prompt = calls[1]["user_prompt"]
+    assert "cross-domain `requires` tag(s) still unresolved" in retry_prompt, (
+        "2nd call's user_prompt should be the unresolved-retry prompt")
+    assert "cdk-stacks-authored" in retry_prompt
+    assert "HINT" in retry_prompt  # heuristic computed a recommendation
+
+    # 4. Final plan has zero unresolved requires.
+    final_unresolved = pila._compute_unresolved_requires(result)
+    assert final_unresolved == [], (
+        f"phase_reconcile should converge with zero unresolved entries; "
+        f"got {final_unresolved}")
+
+    # 5. The rename actually landed on deps-008 (apply-step executed).
+    deps_008 = next(s for plan in result for s in plan.get("subtasks", [])
+                    if s.get("id") == "deps-008")
+    deps_008_tags = [r["tag"] for r in (deps_008.get("requires") or [])
+                     if isinstance(r, dict)]
+    assert "infra-stacks-authored" in deps_008_tags, (
+        f"deps-008's requires should be renamed to 'infra-stacks-authored'; "
+        f"got {deps_008_tags}")
+    assert "cdk-stacks-authored" not in deps_008_tags, (
+        "the original tag should have been renamed away")
