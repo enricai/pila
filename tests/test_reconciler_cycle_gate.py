@@ -1191,7 +1191,7 @@ def test_recommend_unresolved_resolution_075210_case(pila):
         "node-engine-bumped": ["deps-007"],
     }
     rec = pila._recommend_unresolved_resolution(
-        "deps-008", "cdk-stacks-authored", providers)
+        "deps-008", "cdk-stacks-authored", providers, {})
     assert rec is not None
     assert rec["op"] == "rename"
     assert rec["sid"] == "deps-008"
@@ -1211,7 +1211,7 @@ def test_recommend_unresolved_resolution_self_loop_guard(pila):
         "node-engine-bumped": ["deps-007"],
     }
     rec = pila._recommend_unresolved_resolution(
-        "deps-011", "supabase-client-imports-removed", providers)
+        "deps-011", "supabase-client-imports-removed", providers, {})
     # Self-match skipped; nothing else has j >= 0.5; abstain.
     assert rec is None
 
@@ -1225,7 +1225,7 @@ def test_recommend_unresolved_resolution_no_match(pila):
         "another-unrelated": ["sub-b"],
     }
     rec = pila._recommend_unresolved_resolution(
-        "consumer", "something-completely-different", providers)
+        "consumer", "something-completely-different", providers, {})
     assert rec is None
 
 
@@ -1240,7 +1240,7 @@ def test_recommend_unresolved_resolution_multi_strong_abstains(pila):
         "unrelated": ["sub-z"],
     }
     rec = pila._recommend_unresolved_resolution(
-        "consumer", "cdk-aws-stacks-authored", providers)
+        "consumer", "cdk-aws-stacks-authored", providers, {})
     # Neither hits the j>=0.7 very-high threshold; case-1 needs unique
     # top match so it also doesn't fire. Abstain.
     assert rec is None
@@ -1332,7 +1332,7 @@ def test_build_unresolved_retry_prompt_contains_required_sections(pila):
         "prisma-deps-present": ["deps-001"],
     }
     rec = pila._recommend_unresolved_resolution(
-        "deps-008", "cdk-stacks-authored", providers)
+        "deps-008", "cdk-stacks-authored", providers, {})
     recs = {("deps-008", "cdk-stacks-authored"): rec}
     prompt = pila._build_unresolved_retry_prompt(
         unresolved, providers, recs, "ORIGINAL USER PROMPT")
@@ -1715,14 +1715,19 @@ def test_cycle_retry_loop_integration_with_stubbed_reconciler(
         "dropped_requires": [], "dependency_edges": [],
         "merged_subtasks": [], "unresolvable": [],
     }
-    # Attempt 2: model uses `dropped_requires` to break the cycle.
-    # NOTE: the cycle-retry's revert restores the PRE-mutation plans, so
-    # attempt-2's apply runs against the original (un-renamed) requires
-    # entries. Therefore both renames must be re-asserted, AND the drop
-    # must target the post-rename tag on the consumer side. Equivalently,
-    # we can drop the ORIGINAL requires tag (pre-rename) — both lead to
-    # the same final state. Use the original-tag approach: cleaner, no
-    # dependency on the rename being applied first.
+    # Attempt 2: model emits the rename + drop pila's recommendation
+    # suggests. Pass-14 fix: pila's recommendation targets the ORIGINAL
+    # pre-rename tag — which matches the consumer's requires entry
+    # after the retry's revert restores the pre-mutation state. The
+    # apply step's drop loop matches on entry tag, so dropping the
+    # original tag executes correctly; dropping the post-rename tag
+    # would silently no-op (no matching entry post-revert) and the
+    # cycle would persist. Fixture mirrors what pila actually
+    # recommends post pass-14:
+    # - keep the feat-001 rename (resolves feat-001's requires to
+    #   config-005's `app-runtime-deps`).
+    # - drop config-005's ORIGINAL `app-server-framework-present`
+    #   requires entry (what's there at apply time post-revert).
     attempt_2_output = {
         # Keep feat-001's rename so feat-001's requires gets satisfied
         # by config-005's `app-runtime-deps`.
@@ -1912,3 +1917,115 @@ def test_cycle_retry_dies_after_attempt_2(
 
     # die() exit code is non-zero.
     assert exc_info.value.code != 0, "die() should exit non-zero"
+
+
+# ===========================================================================
+# Test 53 — unresolved-retry recommendation uses pre-revert tag as `from`
+#
+# Pass-15 finding 15B: the unresolved-retry's `rename` recommendation
+# had the same post-mutation-tag trap pass-14 fixed for the cycle-retry.
+# If attempt-1 rewrote the consumer's tag (rename to a non-existent
+# provider), the unresolved entry surfaces with the POST-rename tag,
+# but after the retry's revert the consumer's requires entry holds the
+# ORIGINAL pre-rename tag. The recommendation must emit `from=original-
+# tag` so the model copying it verbatim produces a rename the apply
+# step actually executes.
+# ===========================================================================
+
+def test_recommend_unresolved_resolution_with_attempt_1_rename(pila):
+    """Attempt 1 renamed the consumer's tag (foo → bar) but `bar` has
+    no producer, so the unresolved entry is (consumer, bar). Post-
+    revert, consumer's requires entry has `foo`. The recommendation
+    must emit `rename(sid=consumer, from=foo, to=...)` — not `from=bar`
+    — so the model copying it produces a rename the apply step actually
+    executes against the pre-revert state."""
+    providers = {
+        # A candidate producer of a tag similar to `bar` so the
+        # similarity heuristic fires.
+        "bar-canonical": ["other-subtask"],
+    }
+    # Attempt-1 output: model renamed consumer's `foo-original` to `bar`.
+    attempt_1_output = {
+        "renames": [
+            {"sid": "consumer", "from": "foo-original", "to": "bar"},
+        ],
+        "added_provides": [], "added_subtasks": [],
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+    rec = pila._recommend_unresolved_resolution(
+        "consumer", "bar", providers, attempt_1_output)
+    # Recommendation must use the pre-revert tag (`foo-original`), not
+    # the post-rename tag (`bar`). Without this, model copying verbatim
+    # would emit rename(from='bar', to='bar-canonical'), which finds no
+    # matching entry post-revert and silently no-ops.
+    assert rec is not None, (
+        "heuristic should fire — `bar` shares the 'bar' token with "
+        "`bar-canonical` (Jaccard 0.5, unique top)")
+    assert rec["op"] == "rename"
+    assert rec["sid"] == "consumer"
+    assert rec["from"] == "foo-original", (
+        f"recommendation's `from` must be the PRE-REVERT tag "
+        f"(`foo-original`), not the post-rename tag (`bar`); got "
+        f"{rec['from']!r}. Without this, the model copying verbatim "
+        "would emit a no-op rename after the retry's revert.")
+    assert rec["to"] == "bar-canonical"
+
+
+def test_recommend_unresolved_resolution_no_rename_in_attempt_1(pila):
+    """If attempt-1's renames don't touch the consumer's tag (the
+    common case — pass-12's captured 075210 fixture), the recommendation
+    falls through to using the unresolved tag as-is for `from`. Pin
+    that the existing behavior is preserved."""
+    providers = {"bar-canonical": ["other-subtask"]}
+    # Empty attempt-1 output (no renames touched the consumer).
+    attempt_1_output = {
+        "renames": [], "added_provides": [], "added_subtasks": [],
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+    rec = pila._recommend_unresolved_resolution(
+        "consumer", "bar", providers, attempt_1_output)
+    assert rec is not None
+    assert rec["from"] == "bar", (
+        f"with no attempt-1 rename touching the consumer, the "
+        f"recommendation's `from` is the unresolved tag as-is; got "
+        f"{rec['from']!r}")
+
+
+def test_validate_unresolved_must_include_accepts_pre_revert_tag_rename(pila):
+    """The validator must accept a rename whose `from` is the
+    consumer's pre-revert tag (looked up via attempt-1's output) — not
+    just the post-mutation tag. This matches what pila's own
+    recommendation produces post pass-15.
+
+    Without this, pila would reject its own recommendation as not
+    addressing the unresolved entry."""
+    unresolved = [{"domain": "feat", "sid": "consumer",
+                   "tag": "bar"}]  # post-mutation tag (unresolved set)
+    # Attempt-1 had renamed consumer's `foo-original` to `bar`.
+    attempt_1_output = {
+        "renames": [
+            {"sid": "consumer", "from": "foo-original", "to": "bar"},
+        ],
+        "added_provides": [], "added_subtasks": [],
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+    # Attempt-2 emits the pila-recommended rename: from the PRE-revert
+    # tag (foo-original), not the post-mutation tag (bar).
+    attempt_2_output = {
+        "renames": [
+            {"sid": "consumer", "from": "foo-original",
+             "to": "bar-canonical"},
+        ],
+        "added_provides": [], "added_subtasks": [],
+        "dropped_requires": [], "dependency_edges": [],
+        "merged_subtasks": [], "unresolvable": [],
+    }
+    unaddressed = pila._validate_unresolved_must_include(
+        attempt_2_output, unresolved, attempt_1_output)
+    assert unaddressed == [], (
+        "validator must accept a rename whose `from` matches the "
+        "consumer's pre-revert tag (looked up via attempt-1's renames); "
+        f"got {unaddressed}")

@@ -7917,7 +7917,7 @@ async def phase_reconcile(plans: list[dict], task: str, st: State,
         for u in still_unresolved:
             recommendations[(u["sid"], u["tag"])] = (
                 _recommend_unresolved_resolution(
-                    u["sid"], u["tag"], post_providers))
+                    u["sid"], u["tag"], post_providers, output))
         n_recommended = sum(1 for r in recommendations.values()
                             if r is not None)
         log(f"  computed {n_recommended} string-similarity hint(s) "
@@ -7940,9 +7940,12 @@ async def phase_reconcile(plans: list[dict], task: str, st: State,
 
         # Must-include validation: did the revised output address every
         # named unresolved entry? Same fail-loud discipline as the
-        # cycle-gate's must-include check.
+        # cycle-gate's must-include check. Pass `output` (attempt-1's
+        # output) so the validator can accept renames whose `from` is
+        # the consumer's pre-revert tag — matches what pila's own
+        # recommendation produces (pass-15 fix).
         unaddressed = _validate_unresolved_must_include(
-            output3, still_unresolved)
+            output3, still_unresolved, output)
         if unaddressed:
             bullets = "\n".join(f"  • {u}" for u in unaddressed)
             die(
@@ -8688,6 +8691,7 @@ def _recommend_unresolved_resolution(
     consumer_sid: str,
     unresolved_tag: str,
     providers: dict[str, list[str]],
+    output: dict,
 ) -> dict | None:
     """Deterministic recommendation for resolving one unresolved
     `(consumer_sid, unresolved_tag)` requires entry. Mirror of
@@ -8696,6 +8700,16 @@ def _recommend_unresolved_resolution(
     Returns a dict shaped like a rename op (with `op` + `rationale`),
     or `None` if no candidate is confident enough to recommend
     (model picks unaided).
+
+    The recommendation's `from` field is the consumer's PRE-REVERT
+    requires-entry tag. If `output["renames"]` contains a rename
+    matching `(sid=consumer_sid, to=unresolved_tag)`, attempt-1 had
+    rewritten the consumer's tag to `unresolved_tag`; after the
+    retry's revert, the consumer's entry holds `r["from"]` (the
+    original pre-rename tag). Else `unresolved_tag` was never touched
+    by a rename and IS the consumer's pre-revert tag. Same trap
+    pass-14 fixed for cycle-retry's `dropped_requires` recommendations
+    (`_original_tag_for_rename_edge`); applies analogously here.
 
     Self-loop guard: skips candidates whose `providers[candidate]`
     includes `consumer_sid` — a rename TO a tag the consumer itself
@@ -8716,6 +8730,16 @@ def _recommend_unresolved_resolution(
     calibrated for synonym-asymmetric cases (like captured run
     075210), not general renames.
     """
+    # Determine the consumer's pre-revert tag (what attempt-2's apply
+    # will see). If attempt-1 renamed the consumer's tag to
+    # `unresolved_tag`, the pre-revert tag is `r["from"]`. Else it's
+    # `unresolved_tag` (no rename touched it).
+    pre_revert_tag = unresolved_tag
+    for r in output.get("renames", []):
+        if r.get("sid") == consumer_sid and r.get("to") == unresolved_tag:
+            pre_revert_tag = r["from"]
+            break
+
     # Score candidates, applying the self-loop guard.
     scored: list[tuple[float, str]] = []
     for candidate_tag, candidate_providers in providers.items():
@@ -8735,7 +8759,7 @@ def _recommend_unresolved_resolution(
         return {
             "op": "rename",
             "sid": consumer_sid,
-            "from": unresolved_tag,
+            "from": pre_revert_tag,
             "to": strong[0][1],
             "reason": (
                 f"Top string-similarity match (Jaccard {strong[0][0]:.3f}, "
@@ -8750,7 +8774,7 @@ def _recommend_unresolved_resolution(
         return {
             "op": "rename",
             "sid": consumer_sid,
-            "from": unresolved_tag,
+            "from": pre_revert_tag,
             "to": very_strong[0][1],
             "reason": (
                 f"Very high string-similarity match (Jaccard "
@@ -8867,6 +8891,7 @@ def _build_unresolved_retry_prompt(
 def _validate_unresolved_must_include(
     output: dict,
     unresolved: list[dict],
+    attempt_1_output: dict | None = None,
 ) -> list[str]:
     """For each unresolved (sid, tag), check the reconciler's revised
     output addresses it via one of: rename on that sid+tag, added_provides
@@ -8877,10 +8902,37 @@ def _validate_unresolved_must_include(
     requires 'tag'") — empty list means every unresolved entry was
     addressed. Mirror of `_validate_must_include` for the cycle gate.
 
+    For rename ops, accept a match if the revised rename's `from`
+    equals EITHER the unresolved (post-mutation) tag OR the consumer's
+    pre-revert tag (looked up via `attempt_1_output`'s renames). This
+    matches what pila's own recommendation produces post pass-15: the
+    recommendation's `from` is the pre-revert tag (so the apply step's
+    rename loop finds the entry to rewrite after the retry's revert
+    restores the pre-mutation state). Without this dual-tag
+    acceptance, pila would reject its own recommendation as not
+    addressing the unresolved entry.
+
     Called from the unresolved-retry loop after attempt 2 emits, before
     the apply-step runs. A non-empty result means the model defied the
     structural constraint and the run aborts cleanly.
+
+    `attempt_1_output` is the failing first-attempt reconciler output
+    (in scope as `output` at the call site). Optional only for
+    backward-compat with existing tests that don't pass it; production
+    code always passes it.
     """
+    # Build a (consumer_sid → pre_revert_tag) lookup from attempt-1's
+    # renames so we can accept the pre-revert tag alongside the
+    # unresolved (post-mutation) tag in rename validation.
+    pre_revert_tag_by_sid_tag: dict[tuple[str, str], str] = {}
+    if attempt_1_output:
+        for r in attempt_1_output.get("renames", []):
+            sid = r.get("sid")
+            to_tag = r.get("to")
+            from_tag = r.get("from")
+            if sid and to_tag and from_tag:
+                pre_revert_tag_by_sid_tag[(sid, to_tag)] = from_tag
+
     # Index the revised output's operations for fast lookup.
     rename_sid_tags = {
         (r["sid"], r["from"]) for r in output.get("renames", [])
@@ -8899,8 +8951,15 @@ def _validate_unresolved_must_include(
     unaddressed: list[str] = []
     for u in unresolved:
         sid, tag = u["sid"], u["tag"]
-        addressed = (
+        # Accept rename on either the post-mutation tag or the pre-revert tag.
+        pre_revert_tag = pre_revert_tag_by_sid_tag.get((sid, tag))
+        rename_addressed = (
             (sid, tag) in rename_sid_tags
+            or (pre_revert_tag is not None
+                and (sid, pre_revert_tag) in rename_sid_tags)
+        )
+        addressed = (
+            rename_addressed
             or tag in added_provides_tags
             or tag in added_subtask_provides
             or (sid, tag) in unresolvable_sid_tags
